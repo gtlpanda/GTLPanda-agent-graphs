@@ -1,0 +1,12 @@
+# Machine-specific overrides. Never committed.
+settings.local.json
+*.local.json
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local scratch
+/tmp/

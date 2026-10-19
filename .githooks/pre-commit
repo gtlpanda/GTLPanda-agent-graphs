@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Pre-commit: refuse commits that contain keys/tokens or a machine-local settings file.
+# Enabled by install.sh via `git config core.hooksPath .githooks`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+if git diff --cached --name-only | grep -qE '(^|/)settings\.local\.json$'; then
+  echo "pre-commit: settings.local.json is machine-specific and must not be committed." >&2
+  exit 1
+fi
+exec scripts/check-secrets.sh --staged
