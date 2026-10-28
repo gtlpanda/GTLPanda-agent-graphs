@@ -13,6 +13,16 @@ cd ~/code/claude-harness
 ./install.sh             # link it
 ```
 
+On a machine whose `~/.claude/settings.json` and `CLAUDE.md` you want to keep
+(they hold machine-specific hooks, plugins, or your own rules), leave them out:
+
+```bash
+./install.sh --skip=settings.json,CLAUDE.md
+```
+
+`--skip` takes any target from the table below, or a whole directory
+(`--skip=agents`). An unknown name is an error, not a silent install.
+
 `install.sh` backs up anything already in the way to
 `~/.claude/backups/<timestamp>/` with a manifest, then links. It is safe to
 re-run: already-correct links are skipped and no new backup is made.
@@ -27,11 +37,12 @@ history, and project state):
 | `loop.md`                | `~/.claude/loop.md`          | one symlink               |
 | `skills/<name>/`         | `~/.claude/skills/<name>`    | one symlink **per skill** |
 | `agents/<name>.md`       | `~/.claude/agents/<name>.md` | one symlink **per agent** |
+| `workflows/<name>.js`    | `~/.claude/workflows/<name>.js` | one symlink **per workflow** |
 
-Skills and agents are linked per entry, not as whole directories, so skills
-installed by other tools (plugins, gstack, your own one-offs) in
-`~/.claude/skills/` keep working alongside these. The review skill is named
-`harness-review` so it does not collide with gstack's `review`.
+Skills, agents, and workflows are linked per entry, not as whole directories,
+so entries installed by other tools (plugins, gstack, your own one-offs) keep
+working alongside these. The review skill is named `harness-review` so it does
+not collide with gstack's `review`.
 
 ## Update
 

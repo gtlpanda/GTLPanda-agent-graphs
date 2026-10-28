@@ -3,12 +3,14 @@
 #
 # Links (never the whole ~/.claude directory — it holds credentials and state):
 #   files:        settings.json, CLAUDE.md, loop.md    -> one symlink each
-#   directories:  skills/, agents/                      -> one symlink PER ENTRY
-#                 (so skills/agents installed by other tools keep working)
+#   directories:  skills/, agents/, workflows/          -> one symlink PER ENTRY
+#                 (so entries installed by other tools keep working)
 #
 # Usage:
 #   ./install.sh              link; back up anything in the way
 #   ./install.sh --dry-run    print what would happen, change nothing
+#   ./install.sh --skip=a,b   install, but leave these targets alone (e.g.
+#                             --skip=settings.json,CLAUDE.md, or skills/verify)
 #   ./install.sh --uninstall  remove our links, restore the most recent backup
 #
 # Env: CLAUDE_CONFIG_DIR overrides the target (default: $HOME/.claude).
@@ -22,21 +24,28 @@ BACKUP_ROOT="$CLAUDE_DIR/backups"
 MANIFEST=".harness-manifest"
 
 FILE_TARGETS=(settings.json CLAUDE.md loop.md)
-DIR_TARGETS=(skills agents)
+DIR_TARGETS=(skills agents workflows)
 
 DRY_RUN=0
 MODE=install
+SKIP=()      # rel paths (or a whole DIR_TARGETS name) that install leaves alone
 
-usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run)   DRY_RUN=1 ;;
     --uninstall) MODE=uninstall ;;
+    --skip=*)
+      # An empty value (e.g. --skip="$UNSET") must not fall through to a full install.
+      [ -n "${arg#--skip=}" ] || { echo "--skip= needs at least one target" >&2; exit 2; }
+      IFS=',' read -r -a parts <<< "${arg#--skip=}"; SKIP+=(${parts[@]+"${parts[@]}"}) ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+[ "$MODE" = install ] || [ "${#SKIP[@]}" -eq 0 ] || { echo "--skip only applies to install" >&2; exit 2; }
 
 log()  { printf '%s\n' "$*"; }
 warn() { printf 'warn: %s\n' "$*" >&2; }
@@ -74,6 +83,28 @@ list_targets() {
       [ -e "$entry" ] || continue
       printf '%s/%s\n' "$t" "$(basename "$entry")"
     done
+  done
+}
+
+# True if rel path $1 is named by --skip, directly or by its top-level dir.
+is_skipped() {
+  local s
+  for s in ${SKIP[@]+"${SKIP[@]}"}; do
+    [ "$1" = "$s" ] && return 0
+    case "$1" in "$s"/*) return 0 ;; esac
+  done
+  return 1
+}
+# Refuse --skip names that match nothing, so a typo cannot silently install the target.
+check_skips() {
+  local s t known targets
+  # Collect first: `list_targets | grep -q` under pipefail fails when grep exits
+  # early on a match and list_targets takes SIGPIPE.
+  targets="$(list_targets)"
+  for s in ${SKIP[@]+"${SKIP[@]}"}; do
+    known=0
+    for t in "${DIR_TARGETS[@]}"; do [ "$s" = "$t" ] && known=1; done
+    [ "$known" -eq 1 ] || grep -qxF -- "$s" <<< "$targets" || die "--skip: '$s' is not an install target (see the table in README.md)"
   done
 }
 
@@ -146,9 +177,13 @@ do_install() {
   log "repo:   $REPO_DIR"
   log "target: $CLAUDE_DIR"
   guard_layout
+  check_skips
   run mkdir -p "$CLAUDE_DIR"
   while IFS= read -r rel; do
     src="$REPO_DIR/$rel"; dest="$CLAUDE_DIR/$rel"
+    if is_skipped "$rel"; then
+      log "skip (--skip): $rel"; continue
+    fi
     if [ ! -e "$src" ]; then
       log "skip (missing in repo): $rel"; continue
     fi

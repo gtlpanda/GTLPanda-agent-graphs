@@ -127,6 +127,28 @@ HOME="$H7" "$REPO/install.sh" --uninstall --dry-run >"$TMP/dry7.log" 2>&1
 check "dry-run says it would restore"  'grep -q "\[dry-run\] mv .*loop.md" "$TMP/dry7.log"'
 check "dry-run did not restore"        '[ -L "$H7/.claude/loop.md" ]'
 
+echo "== 12. --skip leaves named targets alone and links the rest"
+H8="$TMP/home8"; mkdir -p "$H8/.claude"; echo MINE > "$H8/.claude/settings.json"; echo RULES > "$H8/.claude/CLAUDE.md"
+HOME="$H8" "$REPO/install.sh" --skip=settings.json,CLAUDE.md >"$TMP/install8.log"
+check "skipped settings.json untouched" '[ ! -L "$H8/.claude/settings.json" ] && [ "$(cat "$H8/.claude/settings.json")" = "MINE" ]'
+check "skipped CLAUDE.md untouched"    '[ ! -L "$H8/.claude/CLAUDE.md" ] && [ "$(cat "$H8/.claude/CLAUDE.md")" = "RULES" ]'
+check "skips logged"                   '[ "$(grep -c "skip (--skip)" "$TMP/install8.log")" = "2" ]'
+check "no backup made for skipped"     '[ ! -d "$H8/.claude/backups" ]'
+check "rest linked (loop.md, verify)"  '[ -L "$H8/.claude/loop.md" ] && [ -L "$H8/.claude/skills/verify" ]'
+H9="$TMP/home9"; mkdir -p "$H9/.claude"
+HOME="$H9" "$REPO/install.sh" --skip=agents >/dev/null
+check "--skip=<dir> skips every entry" '[ ! -e "$H9/.claude/agents" ] && [ -L "$H9/.claude/skills/verify" ]'
+check "unknown --skip name refused"    '! HOME="$H9" "$REPO/install.sh" --skip=CLAUDE.mdd >/dev/null 2>&1'
+check "--skip with --uninstall refused" '! HOME="$H9" "$REPO/install.sh" --uninstall --skip=CLAUDE.md >/dev/null 2>&1'
+check "empty --skip= refused"          '! HOME="$H9" "$REPO/install.sh" --skip= >/dev/null 2>&1'
+check "empty --skip= w/ uninstall refused" '! HOME="$H9" "$REPO/install.sh" --uninstall --skip= >/dev/null 2>&1'
+check "refusals changed nothing"       '[ -L "$H9/.claude/CLAUDE.md" ] && [ ! -e "$H9/.claude/agents" ]'
+H10="$TMP/home10"; mkdir -p "$H10/.claude"; echo MINE > "$H10/.claude/settings.json"
+HOME="$H10" "$REPO/install.sh" --skip= >/dev/null 2>&1 || true
+check "empty --skip= left settings alone" '[ ! -L "$H10/.claude/settings.json" ] && [ "$(cat "$H10/.claude/settings.json")" = "MINE" ] && [ ! -e "$H10/.claude/loop.md" ]'
+HOME="$H10" "$REPO/install.sh" --skip=settings.json --dry-run >"$TMP/dry10.log"
+check "--skip + --dry-run changes nothing" '[ "$(cat "$H10/.claude/settings.json")" = "MINE" ] && [ ! -e "$H10/.claude/loop.md" ] && grep -q "skip (--skip): settings.json" "$TMP/dry10.log"'
+
 echo
 echo "TEST-INSTALL: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
