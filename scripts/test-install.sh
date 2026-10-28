@@ -35,7 +35,7 @@ check "dry-run created no backup dir"  '[ ! -d "$CD/backups" ]'
 
 echo "== 2. install links everything, backs up conflicts"
 "$REPO/install.sh" >"$TMP/install1.log"
-for rel in settings.json CLAUDE.md loop.md skills/verify skills/harness-review agents/checker.md agents/reviewer.md agents/fixer.md; do
+for rel in settings.json CLAUDE.md loop.md skills/verify skills/harness-review agents/checker.md agents/reviewer.md agents/fixer.md agents/advisor.md workflows/harness-repair.js; do
   check "linked $rel" '[ -L "$CD/'"$rel"'" ] && [ "$(readlink "$CD/'"$rel"'")" = "$REPO/'"$rel"'" ]'
 done
 check "untouched foreign skill kept"   '[ -f "$CD/skills/legacy/SKILL.md" ] && [ ! -L "$CD/skills/legacy" ]'
@@ -63,6 +63,7 @@ check "agents/reviewer.md restored"    '[ "$(cat "$CD/agents/reviewer.md")" = "o
 check "broken symlink restored as-is"  '[ -L "$CD/agents/checker.md" ] && [ "$(readlink "$CD/agents/checker.md")" = "/nonexistent" ]'
 check "loop.md removed (was ours)"     '[ ! -e "$CD/loop.md" ] && [ ! -L "$CD/loop.md" ]'
 check "skills/harness-review removed"  '[ ! -e "$CD/skills/harness-review" ] && [ ! -L "$CD/skills/harness-review" ]'
+check "workflows link removed"         '[ ! -e "$CD/workflows/harness-repair.js" ] && [ ! -L "$CD/workflows/harness-repair.js" ]'
 check "foreign skills/review survives" '[ "$(cat "$CD/skills/review/SKILL.md")" = "name: review" ]'
 check "legacy skill still present"     '[ -f "$CD/skills/legacy/SKILL.md" ]'
 check "no link into repo remains"      '! find "$CD" -type l -exec readlink {} \; | grep -q "^$REPO/"'
@@ -134,7 +135,7 @@ check "skipped settings.json untouched" '[ ! -L "$H8/.claude/settings.json" ] &&
 check "skipped CLAUDE.md untouched"    '[ ! -L "$H8/.claude/CLAUDE.md" ] && [ "$(cat "$H8/.claude/CLAUDE.md")" = "RULES" ]'
 check "skips logged"                   '[ "$(grep -c "skip (--skip)" "$TMP/install8.log")" = "2" ]'
 check "no backup made for skipped"     '[ ! -d "$H8/.claude/backups" ]'
-check "rest linked (loop.md, verify)"  '[ -L "$H8/.claude/loop.md" ] && [ -L "$H8/.claude/skills/verify" ]'
+check "rest linked (loop.md, workflow)" '[ -L "$H8/.claude/loop.md" ] && [ -L "$H8/.claude/workflows/harness-repair.js" ]'
 H9="$TMP/home9"; mkdir -p "$H9/.claude"
 HOME="$H9" "$REPO/install.sh" --skip=agents >/dev/null
 check "--skip=<dir> skips every entry" '[ ! -e "$H9/.claude/agents" ] && [ -L "$H9/.claude/skills/verify" ]'

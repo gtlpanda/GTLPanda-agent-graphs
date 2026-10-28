@@ -85,6 +85,14 @@ for f in "${agents[@]}"; do
   [ -n "$name" ] && [ -n "$desc" ] && [ -n "$model" ] && [ -n "$tools" ] && [ "$name" = "$base" ] && ok "agent $name (model=$model)"
 done
 
+# ---- Workflows (routing is tested by scripts/test-workflow.sh) ----
+for f in workflows/*.js; do
+  base="$(basename "$f" .js)"
+  if [ "$(head -n 1 "$f")" != "export const meta = {" ]; then bad "$f: first line must be 'export const meta = {'"; continue; fi
+  name="$(awk '/^  name: /{gsub(/^  name: \x27|\x27,$/,""); print; exit}' "$f")"
+  if [ "$name" = "$base" ]; then ok "workflow $name"; else bad "$f: meta name '$name' does not match filename"; fi
+done
+
 # ---- Shell scripts parse ----
 for f in install.sh scripts/*.sh skills/*/*.sh .githooks/*; do
   [ -f "$f" ] || continue
