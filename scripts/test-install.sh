@@ -17,11 +17,12 @@ check() { if eval "$2"; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FA
 snapshot() { (cd "$HOME" && find . -print | sort; find . -type l -exec sh -c 'printf "%s -> %s\n" "$1" "$(readlink "$1")"' _ {} \; | sort); }
 
 echo "== seed a pre-existing ~/.claude with things in the way"
-mkdir -p "$CD/skills/legacy" "$CD/skills/verify" "$CD/agents"
+mkdir -p "$CD/skills/legacy" "$CD/skills/verify" "$CD/skills/review" "$CD/agents"
 echo '{"model":"old","hooks":{}}' > "$CD/settings.json"
 echo '# old rules' > "$CD/CLAUDE.md"
 echo 'name: legacy' > "$CD/skills/legacy/SKILL.md"
 echo 'name: verify-old' > "$CD/skills/verify/SKILL.md"
+echo 'name: review' > "$CD/skills/review/SKILL.md"   # another tool's skill named review (gstack ships one)
 echo 'old reviewer' > "$CD/agents/reviewer.md"
 ln -s /nonexistent "$CD/agents/checker.md"        # broken foreign symlink in the way
 before="$(snapshot)"
@@ -34,10 +35,11 @@ check "dry-run created no backup dir"  '[ ! -d "$CD/backups" ]'
 
 echo "== 2. install links everything, backs up conflicts"
 "$REPO/install.sh" >"$TMP/install1.log"
-for rel in settings.json CLAUDE.md loop.md skills/verify skills/review agents/checker.md agents/reviewer.md agents/fixer.md; do
+for rel in settings.json CLAUDE.md loop.md skills/verify skills/harness-review agents/checker.md agents/reviewer.md agents/fixer.md; do
   check "linked $rel" '[ -L "$CD/'"$rel"'" ] && [ "$(readlink "$CD/'"$rel"'")" = "$REPO/'"$rel"'" ]'
 done
 check "untouched foreign skill kept"   '[ -f "$CD/skills/legacy/SKILL.md" ] && [ ! -L "$CD/skills/legacy" ]'
+check "foreign skills/review untouched" '[ ! -L "$CD/skills/review" ] && [ "$(cat "$CD/skills/review/SKILL.md")" = "name: review" ]'
 bk="$(ls -1d "$CD"/backups/*/ | head -1)"; bk="${bk%/}"
 check "exactly one backup dir"         '[ "$(ls -1d "$CD"/backups/*/ | wc -l | tr -d " ")" = "1" ]'
 check "manifest lists 5 moved items"   '[ "$(wc -l < "$bk/.harness-manifest" | tr -d " ")" = "5" ]'
@@ -60,7 +62,8 @@ check "skills/verify restored"         '[ ! -L "$CD/skills/verify" ] && [ "$(cat
 check "agents/reviewer.md restored"    '[ "$(cat "$CD/agents/reviewer.md")" = "old reviewer" ]'
 check "broken symlink restored as-is"  '[ -L "$CD/agents/checker.md" ] && [ "$(readlink "$CD/agents/checker.md")" = "/nonexistent" ]'
 check "loop.md removed (was ours)"     '[ ! -e "$CD/loop.md" ] && [ ! -L "$CD/loop.md" ]'
-check "skills/review removed"          '[ ! -e "$CD/skills/review" ] && [ ! -L "$CD/skills/review" ]'
+check "skills/harness-review removed"  '[ ! -e "$CD/skills/harness-review" ] && [ ! -L "$CD/skills/harness-review" ]'
+check "foreign skills/review survives" '[ "$(cat "$CD/skills/review/SKILL.md")" = "name: review" ]'
 check "legacy skill still present"     '[ -f "$CD/skills/legacy/SKILL.md" ]'
 check "no link into repo remains"      '! find "$CD" -type l -exec readlink {} \; | grep -q "^$REPO/"'
 check "backup dir cleaned up"          '[ -z "$(ls -A "$CD/backups" 2>/dev/null)" ]'

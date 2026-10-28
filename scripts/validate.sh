@@ -36,6 +36,14 @@ case "$teams" in
   1) ok "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=\"1\" (ON: ~7x token cost)" ;;
   *) bad "settings.json: env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS must be \"0\" or \"1\" (got $teams)" ;;
 esac
+for key in model advisorModel; do
+  val="$(jq -r --arg k "$key" '.[$k] // "missing"' settings.json)"
+  case "$val" in
+    haiku|sonnet|opus|fable|claude-*) ok "settings.json $key=$val" ;;
+    missing) bad "settings.json: $key missing (the graph expects an opus orchestrator and a fable advisor)" ;;
+    *) bad "settings.json: $key '$val' is not a documented alias or model id" ;;
+  esac
+done
 if [ "$(jq -r '.disableAllHooks // false' settings.json)" = "true" ]; then
   bad "settings.json: disableAllHooks=true breaks /goal"
 else ok "hooks not disabled"; fi

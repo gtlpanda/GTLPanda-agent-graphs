@@ -30,7 +30,8 @@ history, and project state):
 
 Skills and agents are linked per entry, not as whole directories, so skills
 installed by other tools (plugins, gstack, your own one-offs) in
-`~/.claude/skills/` keep working alongside these.
+`~/.claude/skills/` keep working alongside these. The review skill is named
+`harness-review` so it does not collide with gstack's `review`.
 
 ## Update
 
@@ -110,7 +111,7 @@ current branch's PR (review comments, red CI, merge conflicts), run `/verify`,
 then small cleanup. `/loop 10m` repeats on an interval; bare `/loop` self-paces.
 
 **Agents** (`~/.claude/agents/`): `checker` (haiku) runs verify and reports
-failures; `reviewer` (opus) reviews diffs and makes judgment calls, read-only;
+failures; `reviewer` (sonnet) reviews diffs, read-only;
 `fixer` (sonnet) implements fixes for checker/reviewer findings and re-verifies.
 
 ## Repo checks

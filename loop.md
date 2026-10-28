@@ -12,7 +12,7 @@ when a step needs a human decision; say what you need and why.
    - If there are merge conflicts with the base branch, rebase or merge and resolve.
 3. **Verify.** Run `/verify`. Do not push or report success unless the last
    line is `VERIFY: PASS`.
-4. **Idle work.** Only when 1 to 3 are clean: run `/review` on the branch diff and
+4. **Idle work.** Only when 1 to 3 are clean: run `/harness-review` on the branch diff and
    fix any High or Critical finding. Then a small cleanup pass: dead code,
    duplicated helpers, stale TODOs touched by this branch. Keep each cleanup
    commit under ~50 lines.

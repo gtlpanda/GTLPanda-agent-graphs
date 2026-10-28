@@ -1,10 +1,10 @@
 ---
-name: review
+name: harness-review
 description: Bugs, security, and infrastructure-as-code misconfiguration review of the current diff. Reports only real, reproducible findings with severity and file:line. Use before opening or merging a PR, or when asked to review changes.
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
-# review
+# harness-review
 
 Review the current change set for defects. Report only findings you can point
 at. No style nits, no "consider", no speculative hardening.
