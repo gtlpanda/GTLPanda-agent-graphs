@@ -10,3 +10,6 @@ settings.local.json
 
 # Local scratch
 /tmp/
+
+# Personal task tracking (todo.md, lessons.md). Kept local.
+/tasks/
