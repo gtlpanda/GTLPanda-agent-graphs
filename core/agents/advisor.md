@@ -46,6 +46,19 @@ You get a task and the planner's plan. Read the code it cites before judging it.
 - `blocked` only when the task itself is ambiguous in a way the code cannot
   settle; put each question for the human in `questions`.
 
+## Diagnosing a failed release
+
+You get a merged pull request, its merge SHA, and deploy targets that failed
+to deploy or failed their health check twice in a row.
+- Decide whether this change caused it. Read the diff and the failing
+  evidence (workflow logs via `gh run view --log-failed`, the health response).
+  A failure in code or config the diff touched, or one that starts exactly at
+  this deploy, points at the change. A failure in a step the diff did not
+  touch (expired credential, quota, a dependency's outage) does not.
+- `rollback` only with evidence that the change is the cause, citing
+  `file:line` in the diff and the failing line of output. Otherwise
+  `investigate`, and say what to check first. You never perform the rollback.
+
 ## Judgment questions
 
 Recommendation in the first sentence, the two or three facts from the code
