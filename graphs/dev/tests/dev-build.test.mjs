@@ -200,3 +200,123 @@ await test('missing repo, or neither task nor plan -> escalate before any agent 
     assert.equal(calls.length, 0)
   }
 })
+
+console.log('== dev-build: build failures')
+const APPROVED = { repo: '/tmp/fixture', plan: PLAN(), planApproved: true }
+await test('a component failing verify gets one retry with the VERIFY block, then the build continues', async () => {
+  const { result, calls } = await run(fn, {
+    scout: [brief(), brief()],
+    implementer: [built(), p => { assert.match(p, /previous attempt failed verification/); assert.match(p, /AssertionError t1/); assert.match(p, /do not loosen any test/); return built() }, built(['src/b.js'])],
+    checker: [failWith('t1'), pass_(), pass_()],
+    'acceptance-auditor': [met()], [QA]: [QA_DONE],
+  }, APPROVED)
+  assert.equal(result.status, 'done')
+  assert.equal(types(calls), `scout,scout,implementer,checker,implementer,checker,implementer,checker,acceptance-auditor,${QA}`)
+  assert.equal(result.components.C1.builds.length, 2)
+})
+await test('failing verify twice -> escalate, resumable: completed lists only what passed', async () => {
+  const { result, calls } = await run(fn, {
+    scout: [brief(), brief()],
+    implementer: [built(), built(['src/b.js']), built(['src/b.js'])],
+    checker: [pass_(), failWith('t2'), failWith('t2')],
+  }, APPROVED)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /C2 still fails verification after one retry; resume with completed=/)
+  assert.deepEqual(result.completed, ['C1'])
+  assert.equal(calls.filter(c => c.agentType === QA).length, 0, 'never hands a red branch to QA')
+})
+await test("the gate reads the VERIFY line, not the checker's verdict field", async () => {
+  const lying = { verdict: 'PASS', verify_block: FAIL_BLOCK, failures: [] }
+  const { result, logs } = await run(fn, {
+    scout: [brief(), brief()], implementer: [built(), built(), built(['src/b.js'])],
+    checker: [lying, pass_(), pass_()], 'acceptance-auditor': [met()], [QA]: [QA_DONE],
+  }, APPROVED)
+  assert.equal(result.status, 'done')
+  assert.equal(result.components.C1.builds.length, 2, 'the lying PASS triggered a retry')
+  assert.ok(logs.some(l => /using the block/.test(l)))
+})
+await test('implementer reports done=false -> escalate with its reason, no check spent', async () => {
+  const { result, calls } = await run(fn, { scout: [brief(), brief()], implementer: [built([], { done: false, summary: 'needs a DB migration the plan omits' })] }, APPROVED)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /could not finish C1: needs a DB migration/)
+  assert.equal(calls.filter(c => c.agentType === 'checker').length, 0)
+})
+await test('a scout returning nothing does not stop the build; the implementer is told', async () => {
+  const { result } = await run(fn, {
+    scout: [null, brief()],
+    implementer: [p => { assert.match(p, /the scout returned nothing/); return built() }, built(['src/b.js'])],
+    checker: [pass_(), pass_()], 'acceptance-auditor': [met()], [QA]: [QA_DONE],
+  }, APPROVED)
+  assert.equal(result.status, 'done')
+})
+
+console.log('== dev-build: acceptance')
+await test('UNMET -> one rework with the gap -> check -> re-audit MET -> QA', async () => {
+  const { result, calls } = await run(fn, {
+    ...BUILD_OK(),
+    implementer: [built(), built(['src/b.js']), p => {
+      const unmetSection = p.slice(p.indexOf('Unmet criteria'))
+      assert.match(unmetSection, /"id": "AC2"/)
+      assert.match(unmetSection, /no test asserts the 404/)
+      assert.doesNotMatch(unmetSection, /"id": "AC1"/, 'only unmet criteria are sent as gaps')
+      return built(['test/b.test.js'])
+    }],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [{ criteria: [{ id: 'AC1', status: 'MET', evidence: 'e' }, { id: 'AC2', status: 'UNMET', evidence: 'no test asserts the 404' }], behavior_changes_missing: [] }, met()],
+  }, APPROVED)
+  assert.equal(result.status, 'done')
+  assert.ok(types(calls).endsWith(`acceptance-auditor,implementer,checker,acceptance-auditor,${QA}`))
+  assert.ok(result.touched.includes('test/b.test.js'))
+})
+await test('a criterion the auditor did not report on counts as unmet', async () => {
+  const { calls } = await run(fn, {
+    ...BUILD_OK(),
+    implementer: [built(), built(['src/b.js']), p => { assert.match(p, /not reported by the auditor/); return built() }],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [met(['AC1']), met()],
+  }, APPROVED)
+  assert.equal(calls.filter(c => c.agentType === 'acceptance-auditor').length, 2)
+})
+await test('an unplanned behavior change triggers the rework too', async () => {
+  const { result } = await run(fn, {
+    ...BUILD_OK(),
+    implementer: [built(), built(['src/b.js']), p => { assert.match(p, /Behavior changes the plan does not list/); assert.match(p, /GET now returns 410/); return built() }],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [{ ...met(), behavior_changes_missing: [{ change: 'GET now returns 410', file: 'src/a.js', line: 4 }] }, met()],
+  }, APPROVED)
+  assert.equal(result.status, 'done')
+})
+await test('still failing acceptance after the rework -> escalate naming the gaps, no QA', async () => {
+  const unmet2 = { criteria: [{ id: 'AC1', status: 'MET', evidence: 'e' }, { id: 'AC2', status: 'UNMET', evidence: 'x' }], behavior_changes_missing: [] }
+  const { result, calls } = await run(fn, {
+    ...BUILD_OK(), implementer: [built(), built(['src/b.js']), built()], checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [unmet2, unmet2], [QA]: [],
+  }, APPROVED)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /acceptance still failing after one rework: unmet AC2/)
+  assert.equal(calls.filter(c => c.agentType === QA).length, 0)
+})
+await test('a rework that breaks verify -> escalate, no QA', async () => {
+  const { result } = await run(fn, {
+    ...BUILD_OK(), implementer: [built(), built(['src/b.js']), built()], checker: [pass_(), pass_(), failWith('broke')],
+    'acceptance-auditor': [met(['AC1'])], [QA]: [],
+  }, APPROVED)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /rework broke verification/)
+})
+
+console.log('== dev-build: node failures')
+await test('a node returning null or throwing -> escalate naming it, never a crash', async () => {
+  const P = { repo: '/tmp/fixture', task: 't', approval: 'advisor' }
+  for (const [script, a, who] of [
+    [{ planner: [null] }, P, 'planner'],
+    [{ planner: [PLAN()], advisor: [null] }, P, 'advisor'],
+    [{ scout: [brief(), brief()], implementer: [null] }, APPROVED, 'implementer'],
+    [{ scout: [brief(), brief()], implementer: [built()], checker: [{ throws: "agent type 'checker' not found" }] }, APPROVED, "checker failed: agent type 'checker' not found"],
+    [{ ...BUILD_OK(), 'acceptance-auditor': [null], [QA]: [] }, APPROVED, 'acceptance-auditor'],
+  ]) {
+    const { result } = await run(fn, script, a)
+    assert.equal(result.status, 'escalate', who)
+    assert.match(result.reason, new RegExp(who), who)
+  }
+})
