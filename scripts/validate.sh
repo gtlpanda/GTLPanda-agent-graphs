@@ -57,10 +57,22 @@ if grep -nE '"/(Users|home)/' settings.json; then
   bad "settings.json contains a machine-specific absolute path; move it to settings.local.json"
 else ok "settings.json has no machine-specific paths"; fi
 
-# ---- Skills ----
+# ---- Layout: entries live in core/ and graphs/<graph>/, never at the top level ----
 shopt -s nullglob
-skills=(skills/*/SKILL.md)
-[ "${#skills[@]}" -gt 0 ] || bad "no skills found under skills/"
+for d in skills agents workflows; do
+  [ -e "$d" ] && bad "top-level $d/ is not read by install.sh; put entries in core/$d/ or graphs/<graph>/$d/"
+done
+graphs=(graphs/*/)
+[ "${#graphs[@]}" -gt 0 ] || bad "no graphs found under graphs/"
+# install.sh links every entry flat into ~/.claude/<dir>/, so a name may appear once across all roots.
+for d in skills agents workflows; do
+  dups="$(for e in core/"$d"/* graphs/*/"$d"/*; do basename "$e"; done | sort | uniq -d)"
+  if [ -n "$dups" ]; then bad "duplicate $d name(s) across core/ and graphs/: $(echo $dups)"; else ok "$d names unique across core/ and graphs/"; fi
+done
+
+# ---- Skills ----
+skills=(core/skills/*/SKILL.md graphs/*/skills/*/SKILL.md)
+[ "${#skills[@]}" -gt 0 ] || bad "no skills found under core/skills/ or graphs/*/skills/"
 for f in "${skills[@]}"; do
   dir="$(basename "$(dirname "$f")")"
   if ! frontmatter "$f" >/dev/null; then bad "$f: no frontmatter block"; continue; fi
@@ -72,8 +84,8 @@ for f in "${skills[@]}"; do
 done
 
 # ---- Agents ----
-agents=(agents/*.md)
-[ "${#agents[@]}" -gt 0 ] || bad "no agents found under agents/"
+agents=(core/agents/*.md graphs/*/agents/*.md)
+[ "${#agents[@]}" -gt 0 ] || bad "no agents found under core/agents/ or graphs/*/agents/"
 for f in "${agents[@]}"; do
   base="$(basename "$f" .md)"
   if ! frontmatter "$f" >/dev/null; then bad "$f: no frontmatter block"; continue; fi
@@ -97,7 +109,7 @@ for f in "${agents[@]}"; do
 done
 
 # ---- Workflows (routing is tested by scripts/test-workflow.sh) ----
-for f in workflows/*.js; do
+for f in core/workflows/*.js graphs/*/workflows/*.js; do
   base="$(basename "$f" .js)"
   if [ "$(head -n 1 "$f")" != "export const meta = {" ]; then bad "$f: first line must be 'export const meta = {'"; continue; fi
   name="$(awk '/^  name: /{gsub(/^  name: \x27|\x27,$/,""); print; exit}' "$f")"
@@ -105,13 +117,13 @@ for f in workflows/*.js; do
 done
 
 # ---- Shell scripts parse ----
-for f in install.sh scripts/*.sh skills/*/*.sh .githooks/*; do
+for f in install.sh scripts/*.sh core/skills/*/*.sh graphs/*/skills/*/*.sh .githooks/*; do
   [ -f "$f" ] || continue
   if bash -n "$f"; then ok "bash -n $f"; else bad "bash -n $f"; fi
   [ -x "$f" ] || bad "$f is not executable"
 done
 if command -v shellcheck >/dev/null 2>&1; then
-  if shellcheck -S warning install.sh scripts/*.sh skills/*/*.sh .githooks/*; then ok "shellcheck"; else bad "shellcheck"; fi
+  if shellcheck -S warning install.sh scripts/*.sh core/skills/*/*.sh graphs/*/skills/*/*.sh .githooks/*; then ok "shellcheck"; else bad "shellcheck"; fi
 else echo "note  shellcheck not installed; skipped"; fi
 
 # ---- Required files ----

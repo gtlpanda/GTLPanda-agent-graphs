@@ -4,7 +4,9 @@
 # Links (never the whole ~/.claude directory — it holds credentials and state):
 #   files:        settings.json, CLAUDE.md, loop.md    -> one symlink each
 #   directories:  skills/, agents/, workflows/          -> one symlink PER ENTRY
-#                 (so entries installed by other tools keep working)
+#                 (so entries installed by other tools keep working), taken
+#                 from core/<dir>/ and every graphs/<graph>/<dir>/ and landing
+#                 flat in ~/.claude/<dir>/. Two sources with one name: refused.
 #
 # Usage:
 #   ./install.sh              link; back up anything in the way
@@ -25,6 +27,9 @@ MANIFEST=".harness-manifest"
 
 FILE_TARGETS=(settings.json CLAUDE.md loop.md)
 DIR_TARGETS=(skills agents workflows)
+# Repo dirs that hold DIR_TARGETS entries: shared core, then each graph.
+SOURCE_ROOTS=(core)
+for g in "$REPO_DIR"/graphs/*/; do [ -d "$g" ] && SOURCE_ROOTS+=("graphs/$(basename "$g")"); done
 
 DRY_RUN=0
 MODE=install
@@ -73,17 +78,35 @@ guard_layout() {
   done
 }
 
-# Print "rel/path" for every item we manage, one per line.
+# Print "dest<TAB>src" for every item we manage, one per line. dest is the
+# path under ~/.claude; src is the path in the repo. Both are relative.
 list_targets() {
-  local t entry
-  for t in "${FILE_TARGETS[@]}"; do printf '%s\n' "$t"; done
-  for t in "${DIR_TARGETS[@]}"; do
-    [ -d "$REPO_DIR/$t" ] || continue
-    for entry in "$REPO_DIR/$t"/*; do
-      [ -e "$entry" ] || continue
-      printf '%s/%s\n' "$t" "$(basename "$entry")"
+  local t root entry name
+  for t in "${FILE_TARGETS[@]}"; do printf '%s\t%s\n' "$t" "$t"; done
+  for root in "${SOURCE_ROOTS[@]}"; do
+    for t in "${DIR_TARGETS[@]}"; do
+      [ -d "$REPO_DIR/$root/$t" ] || continue
+      for entry in "$REPO_DIR/$root/$t"/*; do
+        [ -e "$entry" ] || continue
+        name="$(basename "$entry")"
+        printf '%s/%s\t%s/%s/%s\n' "$t" "$name" "$root" "$t" "$name"
+      done
     done
   done
+}
+
+# Refuse two repo sources that would land on the same ~/.claude path (two
+# graphs both shipping agents/advisor.md). Names share one flat namespace.
+check_duplicates() {
+  local targets dups d
+  targets="$(list_targets)"
+  dups="$(cut -f1 <<< "$targets" | sort | uniq -d)"
+  [ -z "$dups" ] && return 0
+  while IFS= read -r d; do
+    printf 'error: %s is provided by more than one source: %s\n' "$d" \
+      "$(awk -F'\t' -v d="$d" '$1==d{printf "%s ", $2}' <<< "$targets")" >&2
+  done <<< "$dups"
+  die "rename one of each duplicate; every agent, skill, and workflow name must be unique across core/ and graphs/"
 }
 
 # True if rel path $1 is named by --skip, directly or by its top-level dir.
@@ -100,7 +123,7 @@ check_skips() {
   local s t known targets
   # Collect first: `list_targets | grep -q` under pipefail fails when grep exits
   # early on a match and list_targets takes SIGPIPE.
-  targets="$(list_targets)"
+  targets="$(list_targets | cut -f1)"
   for s in ${SKIP[@]+"${SKIP[@]}"}; do
     known=0
     for t in "${DIR_TARGETS[@]}"; do [ "$s" = "$t" ] && known=1; done
@@ -177,10 +200,11 @@ do_install() {
   log "repo:   $REPO_DIR"
   log "target: $CLAUDE_DIR"
   guard_layout
+  check_duplicates
   check_skips
   run mkdir -p "$CLAUDE_DIR"
-  while IFS= read -r rel; do
-    src="$REPO_DIR/$rel"; dest="$CLAUDE_DIR/$rel"
+  while IFS=$'\t' read -r rel srcrel; do
+    src="$REPO_DIR/$srcrel"; dest="$CLAUDE_DIR/$rel"
     if is_skipped "$rel"; then
       log "skip (--skip): $rel"; continue
     fi
@@ -220,7 +244,7 @@ do_uninstall() {
   local rel dest removed=0 backup restored=0 remaining=()
   log "repo:   $REPO_DIR"
   log "target: $CLAUDE_DIR"
-  while IFS= read -r rel; do
+  while IFS=$'\t' read -r rel _; do
     dest="$CLAUDE_DIR/$rel"
     if points_into_repo "$dest"; then
       run rm "$dest"; log "unlinked: $rel"; removed=$((removed + 1))

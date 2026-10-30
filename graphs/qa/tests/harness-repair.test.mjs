@@ -3,7 +3,7 @@
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
-import { test, load, run, agentField } from '../scripts/workflow-harness.mjs'
+import { test, load, run, agentField } from '../../../scripts/workflow-harness.mjs'
 
 // ---------- fixtures ----------
 const PASS_BLOCK = '  [0] scripts/test.sh\nVERIFY: PASS'

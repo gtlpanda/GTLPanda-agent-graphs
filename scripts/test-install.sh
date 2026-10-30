@@ -35,8 +35,14 @@ check "dry-run created no backup dir"  '[ ! -d "$CD/backups" ]'
 
 echo "== 2. install links everything, backs up conflicts"
 "$REPO/install.sh" >"$TMP/install1.log"
-for rel in settings.json CLAUDE.md loop.md skills/verify skills/harness-review agents/checker.md agents/reviewer.md agents/fixer.md agents/advisor.md workflows/harness-repair.js; do
-  check "linked $rel" '[ -L "$CD/'"$rel"'" ] && [ "$(readlink "$CD/'"$rel"'")" = "$REPO/'"$rel"'" ]'
+# dest (under ~/.claude) = src (in the repo)
+for pair in settings.json=settings.json CLAUDE.md=CLAUDE.md loop.md=loop.md \
+            skills/verify=core/skills/verify skills/harness-review=core/skills/harness-review \
+            agents/checker.md=graphs/qa/agents/checker.md agents/reviewer.md=graphs/qa/agents/reviewer.md \
+            agents/fixer.md=graphs/qa/agents/fixer.md agents/advisor.md=graphs/qa/agents/advisor.md \
+            workflows/harness-repair.js=graphs/qa/workflows/harness-repair.js; do
+  rel="${pair%%=*}"; src="${pair#*=}"
+  check "linked $rel -> $src" '[ -L "$CD/'"$rel"'" ] && [ "$(readlink "$CD/'"$rel"'")" = "$REPO/'"$src"'" ]'
 done
 check "untouched foreign skill kept"   '[ -f "$CD/skills/legacy/SKILL.md" ] && [ ! -L "$CD/skills/legacy" ]'
 check "foreign skills/review untouched" '[ ! -L "$CD/skills/review" ] && [ "$(cat "$CD/skills/review/SKILL.md")" = "name: review" ]'
@@ -78,7 +84,7 @@ echo "== 6. regression: target that resolves into the repo is refused (audit C1/
 RCOPY="$TMP/repocopy"; cp -R "$REPO" "$RCOPY"; rm -rf "$RCOPY/.git"
 H2="$TMP/home2"; mkdir -p "$H2"; ln -s "$RCOPY" "$H2/.claude"
 check "refuses ~/.claude -> repo"      '! HOME="$H2" "$RCOPY/install.sh" >/dev/null 2>&1'
-check "repo skills untouched"          '[ -f "$RCOPY/skills/verify/SKILL.md" ] && [ ! -L "$RCOPY/skills/verify" ]'
+check "repo skills untouched"          '[ -f "$RCOPY/core/skills/verify/SKILL.md" ] && [ ! -L "$RCOPY/core/skills/verify" ]'
 H3="$TMP/home3"; mkdir -p "$H3/.claude" "$TMP/dotfiles/skills"; ln -s "$TMP/dotfiles/skills" "$H3/.claude/skills"
 check "refuses symlinked skills dir"   '! HOME="$H3" "$REPO/install.sh" >/dev/null 2>&1'
 check "nothing written through link"   '[ -z "$(ls -A "$TMP/dotfiles/skills")" ]'
@@ -149,6 +155,20 @@ HOME="$H10" "$REPO/install.sh" --skip= >/dev/null 2>&1 || true
 check "empty --skip= left settings alone" '[ ! -L "$H10/.claude/settings.json" ] && [ "$(cat "$H10/.claude/settings.json")" = "MINE" ] && [ ! -e "$H10/.claude/loop.md" ]'
 HOME="$H10" "$REPO/install.sh" --skip=settings.json --dry-run >"$TMP/dry10.log"
 check "--skip + --dry-run changes nothing" '[ "$(cat "$H10/.claude/settings.json")" = "MINE" ] && [ ! -e "$H10/.claude/loop.md" ] && grep -q "skip (--skip): settings.json" "$TMP/dry10.log"'
+
+echo "== 13. every graph is installed; a name shipped by two sources is refused"
+GCOPY="$TMP/graphcopy"; cp -R "$REPO" "$GCOPY"; rm -rf "$GCOPY/.git"
+GCOPY="$(cd "$GCOPY" && pwd -P)"   # install.sh records physical paths (/var -> /private/var on macOS)
+mkdir -p "$GCOPY/graphs/fake/agents"; printf -- '---\nname: extra\n---\n' > "$GCOPY/graphs/fake/agents/extra.md"
+H11="$TMP/home11"; mkdir -p "$H11/.claude"
+HOME="$H11" "$GCOPY/install.sh" >/dev/null
+check "second graph's agent linked"    '[ "$(readlink "$H11/.claude/agents/extra.md")" = "$GCOPY/graphs/fake/agents/extra.md" ]'
+check "first graph still linked"       '[ "$(readlink "$H11/.claude/agents/checker.md")" = "$GCOPY/graphs/qa/agents/checker.md" ]'
+cp "$GCOPY/graphs/qa/agents/checker.md" "$GCOPY/graphs/fake/agents/checker.md"
+H12="$TMP/home12"; mkdir -p "$H12/.claude"; echo MINE > "$H12/.claude/settings.json"
+check "duplicate name refused"         '! HOME="$H12" "$GCOPY/install.sh" >"$TMP/install12.log" 2>&1'
+check "refusal names both sources"     'grep -q "agents/checker.md is provided by more than one source: graphs/fake/agents/checker.md graphs/qa/agents/checker.md" "$TMP/install12.log"'
+check "refusal wrote nothing"          '[ "$(cat "$H12/.claude/settings.json")" = "MINE" ] && [ ! -e "$H12/.claude/agents" ] && [ ! -d "$H12/.claude/backups" ]'
 
 echo
 echo "TEST-INSTALL: $pass passed, $fail failed"
