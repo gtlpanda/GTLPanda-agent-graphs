@@ -175,8 +175,8 @@ function failureSig(check) {
 function findingKey(f) {
   return `${f.file}#${String(f.title).toLowerCase().trim()}`
 }
-function reviewSig(findings) {
-  return 'review|' + findings.map(findingKey).sort().join('|')
+function findingsSig(source, findings) {
+  return `${source}|` + findings.map(findingKey).sort().join('|')
 }
 function addUnique(list, items, key) {
   const seen = new Set(list.map(key))
@@ -213,9 +213,9 @@ ${strategy ? `\nAn earlier attempt did not change this failure. The advisor diag
 Fill the structured output: fixed = what you fixed, one line each. unfixed = anything you could not fix, with the reason. touched = repo-relative paths you changed. verify_verdict = the last line of your own verify run (NOT_RUN if you did not run it). summary = at most two lines.`
 }
 
-function fixFindingsPrompt(findings) {
+function fixFindingsPrompt(findings, who) {
   return `${where}
-Verification passes, but review found blocking defects that the advisor confirmed. Fix each with the smallest correct change, following your instructions (read before editing, add a test that fails without the fix, never commit, never push).
+Verification passes, but the ${who} found blocking defects that the advisor confirmed. Fix each with the smallest correct change, following your instructions (read before editing, add a test that fails without the fix, never commit, never push).
 
 Findings:
 ${json(findings)}
@@ -237,10 +237,10 @@ ${json(scope.prior)}
 Report a prior finding again only if it is still present. Report any new defect the fix introduced. files_reviewed = how many of those files you read. An empty findings list is a valid answer.`
 }
 
-function confirmPrompt(findings) {
+function confirmPrompt(findings, who) {
   const indexed = findings.map((f, index) => ({ index, ...f }))
   return `${where}
-A reviewer reported these blocking findings. Before anyone spends a fix round on them, confirm or refute each by reading the code at file:line.
+The ${who} reported these blocking findings. Before anyone spends a fix round on them, confirm or refute each by reading the code at file:line.
 ${json(indexed)}
 Return one verdict per index. real=false only when you can show the finding is wrong (unreachable path, already handled, or a misreading of the code). If you cannot decide, real=true. reason = one sentence with file:line evidence.`
 }
@@ -273,6 +273,61 @@ let strategy = null                // advisor strategy for the next verify fix
 let reviewScope = { kind: 'branch' }
 let touchedSinceReview = []
 let checks = 0
+
+function recordFix(fix) {
+  addUnique(ledger.touched, fix.touched, asIs)
+  addUnique(ledger.fixed, fix.fixed, asIs)
+  addUnique(touchedSinceReview, fix.touched, asIs)
+}
+
+// Note MEDIUM/LOW findings (not fixed by the graph); return the blocking ones.
+function triage(source, findings) {
+  addUnique(ledger.noted, findings.filter(f => !BLOCKING.includes(f.severity)).map(f => ({ ...f, source })), findingKey)
+  return findings.filter(f => BLOCKING.includes(f.severity))
+}
+
+// The advisor confirms blocking findings from `source` (a NODES key) in
+// one batched call, then the fixer fixes the confirmed ones. Returns
+// { finished } to end the run, { confirmed } after a fix round, or {} when the
+// advisor refuted every finding.
+async function confirmAndFix(source, blocking) {
+  const who = NODES[source].agentType
+  phase('Advise')
+  const confirm = await runNode('advise', `advise: confirm ${blocking.length} ${source} finding(s)`, confirmPrompt(blocking, who), CONFIRM_SCHEMA)
+  if (!confirm) return { finished: finish('escalate', nodeFailure('advise', `on blocking ${source} findings`), { unconfirmed: blocking }) }
+  ledger.history.push({ node: 'advise', kind: 'confirm', source, result: confirm })
+  const byIndex = new Map(confirm.verdicts.map(v => [v.index, v]))
+  const confirmed = []
+  blocking.forEach((f, i) => {
+    const v = byIndex.get(i)
+    if (v && v.real === false) ledger.refuted.push({ ...f, source, refutedBecause: v.reason })
+    else confirmed.push(f)   // no verdict for this index counts as real: a missed bug costs more than a fix round
+  })
+  if (!confirmed.length) return {}
+
+  const sig = findingsSig(source, confirmed)
+  if (KNOWN_STUCK.has(sig)) {
+    return { finished: finish('escalate', 'same confirmed findings an earlier iteration already escalated; needs a human', { stuckSig: sig }) }
+  }
+  if (sig === lastSig) {
+    return { finished: finish('escalate', 'confirmed findings survived a fix round unchanged', { stuckSig: sig }) }
+  }
+  if (ledger.fixRounds >= MAX_FIX_ROUNDS) {
+    return { finished: finish('escalate', `fix-round cap (${MAX_FIX_ROUNDS}) reached with confirmed findings open`, { stuckSig: sig }) }
+  }
+
+  phase('Fix')
+  lastSig = sig
+  ledger.fixRounds += 1
+  const fix = await runNode('fix', `fix #${ledger.fixRounds} (${source})`, fixFindingsPrompt(confirmed, who), FIX_SCHEMA)
+  if (!fix) return { finished: finish('escalate', nodeFailure('fix')) }
+  ledger.history.push({ node: 'fix', trigger: source, sig, result: fix })
+  if (!fix.touched.length) {
+    return { finished: finish('escalate', 'fixer changed no files for confirmed findings', { stuckSig: sig }) }
+  }
+  recordFix(fix)
+  return { confirmed }
+}
 
 while (true) {
   // ----- check -----
@@ -317,9 +372,7 @@ while (true) {
     strategy = null
     if (!fix) return finish('escalate', nodeFailure('fix'))
     ledger.history.push({ node: 'fix', trigger: 'verify', sig, result: fix })
-    addUnique(ledger.touched, fix.touched, asIs)
-    addUnique(ledger.fixed, fix.fixed, asIs)
-    addUnique(touchedSinceReview, fix.touched, asIs)
+    recordFix(fix)
     continue
   }
 
@@ -333,46 +386,10 @@ while (true) {
   ledger.history.push({ node: 'review', scope: scope.kind, files: scope.files || null, findings: review.findings.length })
   touchedSinceReview = []
 
-  const blocking = review.findings.filter(f => BLOCKING.includes(f.severity))
-  addUnique(ledger.noted, review.findings.filter(f => !BLOCKING.includes(f.severity)), findingKey)
-  if (!blocking.length) return finish('done', 'VERIFY: PASS and no HIGH/CRITICAL findings')
-
-  // ----- advise: confirm blocking findings, one batched call -----
-  phase('Advise')
-  const confirm = await runNode('advise', `advise: confirm ${blocking.length} finding(s)`, confirmPrompt(blocking), CONFIRM_SCHEMA)
-  if (!confirm) return finish('escalate', nodeFailure('advise', 'on blocking findings'), { unconfirmed: blocking })
-  ledger.history.push({ node: 'advise', kind: 'confirm', result: confirm })
-  const byIndex = new Map(confirm.verdicts.map(v => [v.index, v]))
-  const confirmed = []
-  blocking.forEach((f, i) => {
-    const v = byIndex.get(i)
-    if (v && v.real === false) ledger.refuted.push({ ...f, refutedBecause: v.reason })
-    else confirmed.push(f)   // no verdict for this index counts as real: a missed bug costs more than a fix round
-  })
-  if (!confirmed.length) return finish('done', 'VERIFY: PASS; every blocking finding was refuted by the advisor')
-
-  const sig = reviewSig(confirmed)
-  if (KNOWN_STUCK.has(sig)) {
-    return finish('escalate', 'same confirmed findings an earlier iteration already escalated; needs a human', { stuckSig: sig })
-  }
-  if (sig === lastSig) {
-    return finish('escalate', 'confirmed findings survived a fix round unchanged', { stuckSig: sig })
-  }
-  if (ledger.fixRounds >= MAX_FIX_ROUNDS) {
-    return finish('escalate', `fix-round cap (${MAX_FIX_ROUNDS}) reached with confirmed findings open`, { stuckSig: sig })
-  }
-
-  phase('Fix')
-  lastSig = sig
-  ledger.fixRounds += 1
-  const fix = await runNode('fix', `fix #${ledger.fixRounds} (review)`, fixFindingsPrompt(confirmed), FIX_SCHEMA)
-  if (!fix) return finish('escalate', nodeFailure('fix'))
-  ledger.history.push({ node: 'fix', trigger: 'review', sig, result: fix })
-  if (!fix.touched.length) {
-    return finish('escalate', 'fixer changed no files for confirmed findings', { stuckSig: sig })
-  }
-  addUnique(ledger.touched, fix.touched, asIs)
-  addUnique(ledger.fixed, fix.fixed, asIs)
-  addUnique(touchedSinceReview, fix.touched, asIs)
-  reviewScope = { kind: 'fix', prior: confirmed }
+  const reviewBlocking = triage('review', review.findings)
+  if (!reviewBlocking.length) return finish('done', 'VERIFY: PASS and no HIGH/CRITICAL findings')
+  const outcome = await confirmAndFix('review', reviewBlocking)
+  if (outcome.finished) return outcome.finished
+  if (!outcome.confirmed) return finish('done', 'VERIFY: PASS; every blocking finding was refuted by the advisor')
+  reviewScope = { kind: 'fix', prior: outcome.confirmed }
 }
