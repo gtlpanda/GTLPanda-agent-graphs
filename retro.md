@@ -101,3 +101,37 @@ recorded models from subagent transcripts, never effort. Also unchecked: which
 of `effortLevel` and `modelSettings` wins for the live opus-5-5 orchestrator.
 
 **Stats.** 10 files (60+/19-). TEST: PASS (TEST-WORKFLOW 31/0, TEST-INSTALL 68/0, TEST-SECRETS 22/0).
+
+## 3. Monorepo for agent graphs (2026-10-30)
+
+**What changed.** `claude-harness` became `GTLPanda-agent-graphs`, the home for
+every graph (QA now; dev and release next). GitHub repo renamed (old URL
+redirects); local checkout moved to `~/Documents/code/GTLPanda-agent-graphs`.
+History was rewritten before going public: commits use the GitHub noreply
+address, `tasks/` is local-only, and an MIT LICENSE was added.
+
+**Layout.** `core/skills/` holds what every graph shares (`verify`,
+`harness-review`). `graphs/qa/` holds the repair graph's agents, workflow,
+routing tests, and README. `scripts/`, `loop.md`, `settings.json`, and
+`CLAUDE.md` stay at the root: `/verify` detects the repo through
+`scripts/test.sh`, the pre-commit hook calls `scripts/check-secrets.sh`, and
+there is only one `~/.claude/loop.md`.
+
+**Key details.**
+- `install.sh` maps repo source to `~/.claude` target (they no longer match)
+  and refuses two sources with one name before writing anything. Existing
+  installs re-point cleanly: the stale-link check matches on the target
+  suffix, so all 8 live links moved with zero backups.
+- The workflow mock runtime is now `scripts/workflow-harness.mjs`; each graph
+  ships `graphs/<graph>/tests/*.test.mjs`, and `scripts/test-workflow.mjs`
+  runs them all.
+- Bug caught in the new install test, not in install.sh: the test compared a
+  `/var/folders` path with the `/private/var` path `install.sh` records
+  (`pwd -P`). Fixed in the test.
+- Mutations, each caught: effort drift, a test file that fails to import, no
+  test files, a duplicate agent across graphs, a stray top-level `agents/`.
+
+**Open.** Each graph will need its own loop entry point; today the QA graph
+owns the default `/loop`.
+
+**Stats.** 3 commits. TEST: PASS (TEST-INSTALL 73/0, TEST-WORKFLOW 33/0, TEST-SECRETS 22/0).

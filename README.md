@@ -1,14 +1,39 @@
-# claude-harness
+# GTLPanda-agent-graphs
 
-Portable, user-level Claude Code config: skills, agents, `settings.json`,
-`CLAUDE.md`, `loop.md`. One repo, symlinked into `~/.claude/` on every machine.
-Built for unattended, self-verifying work with `/goal` and `/loop`.
+Agent graphs for Claude Code: teams of agents wired together by code, each
+with an Opus orchestrator, a Fable advisor for judgment calls, and focused
+subagents. Plus the shared user-level config they run on (`settings.json`,
+`CLAUDE.md`, `loop.md`, the `verify` gate). One repo, symlinked into
+`~/.claude/` on every machine. Built for unattended, self-verifying work with
+`/goal` and `/loop`.
+
+| Graph | Status | What it does |
+|-------|--------|--------------|
+| [`graphs/qa/`](graphs/qa/README.md) | working | check → fix → review → advisor-confirm loop that makes a branch green and clean |
+| `graphs/dev/` | planned | senior-developer graph that writes the code, then hands off to QA |
+| `graphs/release/` | planned | release loop after QA passes |
+
+## Layout
+
+```
+install.sh  settings.json  CLAUDE.md  loop.md   shared config, linked into ~/.claude/
+core/skills/                                    skills every graph uses (verify, harness-review)
+graphs/<graph>/agents/                          that graph's agents
+graphs/<graph>/workflows/                       that graph's workflow script
+graphs/<graph>/tests/                           that graph's routing tests (*.test.mjs)
+graphs/<graph>/README.md                        roles, models, routing
+scripts/                                        repo checks (test.sh, validate, install/secret/workflow tests)
+```
+
+Every agent, skill, and workflow lands in one flat `~/.claude/<dir>/`, so each
+name must be unique across `core/` and all graphs. `validate.sh` and
+`install.sh` both refuse duplicates.
 
 ## Install
 
 ```bash
-git clone <your-remote> ~/code/claude-harness
-cd ~/code/claude-harness
+git clone https://github.com/gtlpanda/GTLPanda-agent-graphs.git
+cd GTLPanda-agent-graphs
 ./install.sh --dry-run   # see what would change
 ./install.sh             # link it
 ```
@@ -30,14 +55,16 @@ re-run: already-correct links are skipped and no new backup is made.
 What gets linked (never the whole `~/.claude/`; it holds credentials, sessions,
 history, and project state):
 
-| Repo path                | Target                       | How                       |
-|--------------------------|------------------------------|---------------------------|
-| `settings.json`          | `~/.claude/settings.json`    | one symlink               |
-| `CLAUDE.md`              | `~/.claude/CLAUDE.md`        | one symlink               |
-| `loop.md`                | `~/.claude/loop.md`          | one symlink               |
-| `skills/<name>/`         | `~/.claude/skills/<name>`    | one symlink **per skill** |
-| `agents/<name>.md`       | `~/.claude/agents/<name>.md` | one symlink **per agent** |
-| `workflows/<name>.js`    | `~/.claude/workflows/<name>.js` | one symlink **per workflow** |
+| Repo path                                    | Target                          | How                          |
+|----------------------------------------------|---------------------------------|------------------------------|
+| `settings.json`                              | `~/.claude/settings.json`       | one symlink                  |
+| `CLAUDE.md`                                  | `~/.claude/CLAUDE.md`           | one symlink                  |
+| `loop.md`                                    | `~/.claude/loop.md`             | one symlink                  |
+| `core/skills/<name>/`, `graphs/*/skills/<name>/` | `~/.claude/skills/<name>`   | one symlink **per skill**    |
+| `core/agents/<name>.md`, `graphs/*/agents/<name>.md` | `~/.claude/agents/<name>.md` | one symlink **per agent** |
+| `core/workflows/<name>.js`, `graphs/*/workflows/<name>.js` | `~/.claude/workflows/<name>.js` | one symlink **per workflow** |
+
+`--skip` uses the target name (`--skip=agents/fixer.md`), not the repo path.
 
 Skills, agents, and workflows are linked per entry, not as whole directories,
 so entries installed by other tools (plugins, gstack, your own one-offs) keep
@@ -47,7 +74,7 @@ not collide with gstack's `review`.
 ## Update
 
 ```bash
-cd ~/code/claude-harness && git pull && ./install.sh
+cd GTLPanda-agent-graphs && git pull && ./install.sh
 ```
 
 Links point at the checkout, so most edits take effect on the next session
@@ -122,69 +149,14 @@ current branch's PR (review comments, red CI, merge conflicts), run the repair
 graph, then small cleanup. `/loop 10m` repeats on an interval; bare `/loop`
 self-paces.
 
-## The repair graph
+## Graphs
 
-`/loop` is the outer layer: the clock, PR tending, commits, and state.
-`workflows/harness-repair.js` is the inner layer: one deterministic graph run
-per iteration. Code routes between nodes; agents are leaves and never call
-each other.
+Each graph documents its own roles, models, and routing in its README. The QA
+graph is [graphs/qa/README.md](graphs/qa/README.md).
 
-```
-check --FAIL--> fix --> check            (the fixer's own verify run is never the gate)
-check --PASS--> review --nothing HIGH/CRITICAL--> done
-review --HIGH/CRITICAL--> advisor confirms --real--> fix --> check --> review (touched files only)
-same failure twice in a row --> advisor unsticks once --> fix with its strategy, else escalate
-```
-
-| Role         | Who                        | Model  | Effort | Called                          |
-|--------------|----------------------------|--------|--------|---------------------------------|
-| Orchestrator | the `/loop` session        | opus   | high   | every iteration                 |
-| Advisor      | `agents/advisor.md`        | fable  | high   | blocking findings, stuck loops  |
-| Checker      | `agents/checker.md`        | haiku  | high   | every check                     |
-| Fixer        | `agents/fixer.md`          | sonnet | high   | each fix round                  |
-| Reviewer     | `agents/reviewer.md`       | sonnet | high   | after each passing check        |
-
-`settings.json` sets `model: opus`, `advisorModel: fable`, and
-`effortLevel: high`, so the orchestrator runs at high and its own advisor
-tool is Fable too. Agent efforts live in each agent file's `effort:` and in
-`NODES`; `scripts/test-workflow.sh` fails if they disagree. Models are aliases; in CLI
-2.1.308 they resolve to Opus 5.5, Fable 5.1, Sonnet 5.5, and Haiku 5.5. To pin
-exact versions, put full IDs (`claude-sonnet-5-5`) in the agent files and in
-`NODES` at the top of the workflow; `scripts/test-workflow.sh` fails if the two
-disagree.
-
-Routing rules, all in code and all tested:
-- Every node returns a schema. The gate reads the last line of the verbatim
-  `VERIFY` block, not the checker's own verdict field.
-- At most `maxFixRounds` (default 3) fix rounds per run. A failure whose
-  signature (step, exit code, first error) repeats goes to the advisor once;
-  if it repeats after the advisor's strategy, the run escalates.
-- Blocking findings are confirmed by the advisor in one batched call before a
-  fix round is spent. Refuted ones are recorded, not fixed. MEDIUM/LOW are
-  noted, not fixed.
-- A node that returns nothing escalates; nothing crashes the loop.
-- The run returns a ledger. `/loop` stores it in
-  `$(git rev-parse --git-path harness-loop)/ledger.json` and passes escalated
-  signatures back as `knownStuckSigs`, so a stuck failure costs one checker
-  call per iteration until a human changes something.
-
-Known limits:
-- Repo content (test output, file text) flows verbatim into the fixer's and
-  advisor's prompts, and the fixer can write files and run Bash. Run the
-  unattended loop only on branches whose code you trust.
-- `reviewer` and `advisor` are read-only by instruction, not by tool list:
-  both have Bash so they can run `git diff` and friends.
-- Before committing, `/loop` re-runs `/verify` itself rather than trusting the
-  checker's transcribed block.
-
-Cost and speed: a clean iteration is two calls (haiku check, sonnet review).
-Fable runs only at decision points, and its confirmations are batched.
-Fixes run one at a time on one working tree; no worktrees, no merge step.
-
-**Agents** (`~/.claude/agents/`): `checker` (haiku) runs verify and reports
-failures; `fixer` (sonnet) implements fixes and re-verifies; `reviewer`
-(sonnet) reviews diffs, read-only; `advisor` (fable) confirms findings,
-unsticks loops, and answers judgment calls, read-only.
+To add a graph: create `graphs/<name>/` with `agents/`, `workflows/`, `tests/`,
+and a `README.md`, give every agent and workflow a name no other graph uses,
+run `scripts/test.sh`, then `./install.sh`.
 
 ## Repo checks
 
@@ -193,7 +165,7 @@ scripts/test.sh           # runs all four below; ends with TEST: PASS|FAIL
 scripts/validate.sh       # JSON valid, frontmatter complete, no secrets, no machine paths
 scripts/test-install.sh   # install / re-install / uninstall against a temp HOME
 scripts/test-secrets.sh   # proves the scanner and pre-commit hook block real key formats
-scripts/test-workflow.sh  # runs each workflow against scripted agents and asserts the routing
+scripts/test-workflow.sh  # runs every graphs/*/tests/*.test.mjs against scripted agents; checks every workflow parses
 scripts/check-secrets.sh  # the scanner itself (prints "check-secrets: clean" or lists hits); also the pre-commit hook
 ```
 
