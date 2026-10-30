@@ -199,3 +199,35 @@ Two gaps it exposed, both fixed:
   and that matching copies on those paths are still HIGH.
 
 **Stats.** TEST-WORKFLOW 78/0 (34 dev routing tests).
+
+## 6. Release graph (2026-10-30)
+
+**What changed.** `graphs/release/`: `/release-pr [PR#]` drives the
+`release-flow` workflow through four instant stages: `docs` (scribe updates
+the repo's existing docs in the PR) → `ready` (GitHub's merge gate and every
+check on the exact head) → `land` (you approve that head; the merger merges
+once) → `verify` (deploy evidence for the merge commit, health checks).
+Rules adapted from gstack's `land-and-deploy`, `canary`, `document-release`,
+and `setup-deploy`, and the user's `release` skill (credited).
+
+**Key details.**
+- Nothing in the graph waits. Bash calls cap at 10 minutes and foreground
+  `sleep` is blocked, so `/release-pr` owns the clock and waits with
+  background `gh pr checks --watch` / `gh run watch`, then re-invokes.
+- In code: approval bound to `{pr, head, base}` (any move → `stale`); `land`
+  reads the PR first and never calls the merger on a merged PR; the merger
+  runs once per run; a health failure is BROKEN only on the second round in a
+  row; no deploy evidence or an unreported target is UNVERIFIED, never a pass.
+- The merger is the only agent in these graphs allowed an irreversible
+  action, on an approval for one exact head.
+- `validate.sh` now refuses a skill and a workflow with the same name (both
+  appear in the skills list); `release` itself was taken twice (the user's
+  skill and a plugin's), hence `release-pr` / `release-flow`.
+- Mutations: 6 of the release routing, each caught.
+
+**Untested live.** Mock-tested only. A live run needs a real PR and a deploy
+target; Terracotta's Guardian workflows (triggered by a PR closing) and
+Render services are the first candidates, and it has no health URL, so its
+verdicts will be UNVERIFIED until one is configured.
+
+**Stats.** TEST-WORKFLOW 109/0 (31 release routing tests).

@@ -11,7 +11,7 @@ subagents. Plus the shared user-level config they run on (`settings.json`,
 |-------|--------|--------------|
 | [`graphs/qa/`](graphs/qa/README.md) | working | check → fix → review → advisor-confirm loop that makes a branch green and clean |
 | [`graphs/dev/`](graphs/dev/README.md) | working, one live run | plan (you approve) → build tests-first → prove acceptance → QA graph; run with `/dev <task>` |
-| `graphs/release/` | planned | release loop after QA passes |
+| [`graphs/release/`](graphs/release/README.md) | built, mock-tested | docs into the PR → you approve the exact head → merge once → deploy evidence for the merge commit; run with `/release-pr [PR#]` |
 
 ## Layout
 

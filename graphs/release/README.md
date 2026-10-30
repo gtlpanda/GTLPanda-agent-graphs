@@ -6,7 +6,7 @@ from "PR green" to "merged, deployed, verified, documented". Entry point: the
 approve the merge for one exact commit, and a rollback is only ever a
 recommendation with evidence.
 
-Status: **design**. Nothing below is built yet; this is the spec the build follows.
+Status: **built; routing tested with mocked agents** (`tests/release-flow.test.mjs`). Not yet run live.
 
 ## Graph
 
@@ -29,8 +29,9 @@ land:    release-checker reads the PR first --already MERGED--> merged (merger s
          --> merger (once; never replayed) --MERGED--> merged {merge_sha, targets to wait on}
                                            --NOT_MERGED or UNKNOWN--> escalate (state read back, reported)
 verify:  deploy-watcher, after /release-pr waited --still deploying--> waiting {deploy}
-             all targets DEPLOYED or UNVERIFIED --> done
-             any DEGRADED, BROKEN, or DEPLOY-FAILED --> advisor (is it this change?) --> rollback-recommended | done-with-concerns
+             all targets DEPLOYED --> done
+             any UNVERIFIED (no failures) --> done-with-concerns
+             any BROKEN (health failed twice in a row) or DEPLOY-FAILED --> advisor (is it this change?) --> rollback-recommended | done-with-concerns
 ```
 
 ## Roles
@@ -143,14 +144,13 @@ Version bumps and tags (none of the repos this was built against use them),
 baseline comparison and browser canaries with screenshots, and automatic
 rollback.
 
-## Build order
+## Files
 
-Each step is a commit with `VERIFY: PASS`:
-1. `validate.sh`: names unique across skills and workflows (both show up as skills).
-2. Release agents.
-3. `release-flow.js` and its routing tests, starting with "land on an
-   already-merged PR skips the merger".
-4. `/release-pr` skill; this README moves from design to as-built.
+- `workflows/release-flow.js`: the graph. Helpers marked `// shared` are copied
+  verbatim from the QA graph's script, and a test fails if they drift.
+- `agents/`: release-checker, scribe, merger, deploy-watcher.
+- `skills/release-pr/SKILL.md`: the `/release-pr` orchestrator.
+- `tests/release-flow.test.mjs`: routing tests, run by `scripts/test-workflow.sh`.
 
 ## Credits
 
