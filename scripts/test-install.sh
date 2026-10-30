@@ -38,8 +38,9 @@ echo "== 2. install links everything, backs up conflicts"
 # dest (under ~/.claude) = src (in the repo)
 for pair in settings.json=settings.json CLAUDE.md=CLAUDE.md loop.md=loop.md \
             skills/verify=core/skills/verify skills/harness-review=core/skills/harness-review \
-            agents/checker.md=graphs/qa/agents/checker.md agents/reviewer.md=graphs/qa/agents/reviewer.md \
-            agents/fixer.md=graphs/qa/agents/fixer.md agents/advisor.md=graphs/qa/agents/advisor.md \
+            agents/checker.md=core/agents/checker.md agents/advisor.md=core/agents/advisor.md \
+            agents/reviewer.md=graphs/qa/agents/reviewer.md agents/fixer.md=graphs/qa/agents/fixer.md \
+            agents/qa-auditor.md=graphs/qa/agents/qa-auditor.md \
             workflows/harness-repair.js=graphs/qa/workflows/harness-repair.js; do
   rel="${pair%%=*}"; src="${pair#*=}"
   check "linked $rel -> $src" '[ -L "$CD/'"$rel"'" ] && [ "$(readlink "$CD/'"$rel"'")" = "$REPO/'"$src"'" ]'
@@ -163,11 +164,12 @@ mkdir -p "$GCOPY/graphs/fake/agents"; printf -- '---\nname: extra\n---\n' > "$GC
 H11="$TMP/home11"; mkdir -p "$H11/.claude"
 HOME="$H11" "$GCOPY/install.sh" >/dev/null
 check "second graph's agent linked"    '[ "$(readlink "$H11/.claude/agents/extra.md")" = "$GCOPY/graphs/fake/agents/extra.md" ]'
-check "first graph still linked"       '[ "$(readlink "$H11/.claude/agents/checker.md")" = "$GCOPY/graphs/qa/agents/checker.md" ]'
-cp "$GCOPY/graphs/qa/agents/checker.md" "$GCOPY/graphs/fake/agents/checker.md"
+check "first graph still linked"       '[ "$(readlink "$H11/.claude/agents/reviewer.md")" = "$GCOPY/graphs/qa/agents/reviewer.md" ]'
+check "core agent linked"              '[ "$(readlink "$H11/.claude/agents/checker.md")" = "$GCOPY/core/agents/checker.md" ]'
+cp "$GCOPY/core/agents/checker.md" "$GCOPY/graphs/fake/agents/checker.md"   # a graph shadowing a core agent
 H12="$TMP/home12"; mkdir -p "$H12/.claude"; echo MINE > "$H12/.claude/settings.json"
 check "duplicate name refused"         '! HOME="$H12" "$GCOPY/install.sh" >"$TMP/install12.log" 2>&1'
-check "refusal names both sources"     'grep -q "agents/checker.md is provided by more than one source: graphs/fake/agents/checker.md graphs/qa/agents/checker.md" "$TMP/install12.log"'
+check "refusal names both sources"     'grep -q "agents/checker.md is provided by more than one source: core/agents/checker.md graphs/fake/agents/checker.md" "$TMP/install12.log"'
 check "refusal wrote nothing"          '[ "$(cat "$H12/.claude/settings.json")" = "MINE" ] && [ ! -e "$H12/.claude/agents" ] && [ ! -d "$H12/.claude/backups" ]'
 
 echo

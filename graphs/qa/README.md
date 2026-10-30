@@ -16,8 +16,8 @@ same failure twice in a row --> advisor unsticks once --> fix with its strategy,
 | Role         | Who                        | Model  | Effort | Called                          |
 |--------------|----------------------------|--------|--------|---------------------------------|
 | Orchestrator | the `/loop` session        | opus   | high   | every iteration                 |
-| Advisor      | `agents/advisor.md`        | fable  | high   | blocking findings, stuck loops  |
-| Checker      | `agents/checker.md`        | haiku  | high   | every check                     |
+| Advisor      | `core/agents/advisor.md` (shared) | fable | high | blocking findings, stuck loops |
+| Checker      | `core/agents/checker.md` (shared) | haiku | high | every check                    |
 | Fixer        | `agents/fixer.md`          | sonnet | high   | each fix round                  |
 | Reviewer     | `agents/reviewer.md`       | sonnet | high   | after each passing check        |
 | QA auditor   | `agents/qa-auditor.md`     | sonnet | high   | once review is clean            |

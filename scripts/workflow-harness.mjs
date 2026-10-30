@@ -43,11 +43,14 @@ export function load(file) {
   const src = readFileSync(file, 'utf8')
   const meta = extractMeta(src, file)
   const body = src.replace(/^export const meta/, 'const meta')
-  const fn = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'Math', 'Date', body)
+  const fn = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', 'Math', 'Date', body)
   return { src, meta, fn }
 }
 
-// script: { [agentType]: [response | (prompt, opts) => response | { throws: message }, ...] }
+// script: { [agentType]: [response | (prompt, opts) => response | { throws: message }, ...],
+//           'workflow:<name>': [ledger | args => ledger | { throws: message }, ...] }
+// A child workflow() call is recorded in `calls` as agentType 'workflow:<name>'
+// with its args, so tests can assert where the handoff happens and what it sends.
 //
 // The workflow catches anything agent() throws and escalates, so an assert
 // inside a scripted response (or an unexpected call) would otherwise be
@@ -72,9 +75,23 @@ export async function run(fn, script, args, { allowLeftover = false } = {}) {
     if (typeof next !== 'function') return next
     try { return next(prompt, opts) } catch (e) { mockErrors.push(e); throw e }
   }
+  const workflow = async (name, childArgs) => {
+    const key = `workflow:${typeof name === 'string' ? name : JSON.stringify(name)}`
+    calls.push({ agentType: key, workflow: name, args: childArgs })
+    const q = queues[key]
+    if (!q || !q.length) {
+      const e = new Error(`unexpected workflow call: ${key}`)
+      mockErrors.push(e)
+      throw e
+    }
+    const next = q.shift()
+    if (next && typeof next === 'object' && 'throws' in next) throw new Error(next.throws)
+    if (typeof next !== 'function') return next
+    try { return next(childArgs) } catch (e) { mockErrors.push(e); throw e }
+  }
   const parallel = async thunks => Promise.all(thunks.map(t => t().catch(() => null)))
   const pipeline = async () => { throw new Error('pipeline not used by this graph') }
-  const result = await fn(agent, parallel, pipeline, () => {}, m => logs.push(m), args, { total: null, spent: () => 0, remaining: () => Infinity }, SafeMath, SafeDate)
+  const result = await fn(agent, parallel, pipeline, () => {}, m => logs.push(m), args, { total: null, spent: () => 0, remaining: () => Infinity }, workflow, SafeMath, SafeDate)
   if (mockErrors.length) throw mockErrors[0]
   const leftover = Object.entries(queues).filter(([, q]) => q.length).map(([k, q]) => `${k}:${q.length}`)
   if (!allowLeftover) assert.deepEqual(leftover, [], `scripted responses never consumed: ${leftover.join(', ')}`)

@@ -18,6 +18,7 @@ subagents. Plus the shared user-level config they run on (`settings.json`,
 ```
 install.sh  settings.json  CLAUDE.md  loop.md   shared config, linked into ~/.claude/
 core/skills/                                    skills every graph uses (verify, harness-review)
+core/agents/                                    agents more than one graph uses (advisor, checker)
 graphs/<graph>/agents/                          that graph's agents
 graphs/<graph>/workflows/                       that graph's workflow script
 graphs/<graph>/tests/                           that graph's routing tests (*.test.mjs)

@@ -1,6 +1,6 @@
 ---
 name: advisor
-description: Senior judgment for the repair graph. Confirms or refutes blocking review findings before anyone spends effort fixing them, and diagnoses a fix loop that is not making progress (retry with a different strategy, or escalate to a human). Also answers design and trade-off questions with one recommendation. Read-only.
+description: Senior judgment for the agent graphs, called only at decision points. Confirms or refutes blocking review and QA findings before anyone spends effort fixing them, and diagnoses a fix loop that is not making progress (retry with a different strategy, or escalate to a human). Also answers design and trade-off questions with one recommendation. Read-only.
 model: fable
 effort: high
 tools: Read, Grep, Glob, Bash
