@@ -10,7 +10,7 @@ subagents. Plus the shared user-level config they run on (`settings.json`,
 | Graph | Status | What it does |
 |-------|--------|--------------|
 | [`graphs/qa/`](graphs/qa/README.md) | working | check → fix → review → advisor-confirm loop that makes a branch green and clean |
-| [`graphs/dev/`](graphs/dev/README.md) | built, mock-tested | plan (you approve) → build tests-first → prove acceptance → QA graph; run with `/dev <task>` |
+| [`graphs/dev/`](graphs/dev/README.md) | working, one live run | plan (you approve) → build tests-first → prove acceptance → QA graph; run with `/dev <task>` |
 | `graphs/release/` | planned | release loop after QA passes |
 
 ## Layout

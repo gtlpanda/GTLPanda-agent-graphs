@@ -5,7 +5,8 @@ then hands the branch to the [QA graph](../qa/README.md) as a child workflow.
 Entry point: the `/dev` skill. `/loop` stays the maintenance loop for branches
 that already exist.
 
-Status: **built; routing tested with mocked agents** (`tests/dev-build.test.mjs`). Not yet run live.
+Status: **built**. Routing is tested with mocked agents (`tests/dev-build.test.mjs`), and one live run
+on a fixture finished `done` (see the root `retro.md`, entry 5).
 
 ## Graph
 

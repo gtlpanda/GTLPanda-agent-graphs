@@ -21,7 +21,11 @@ the plan, the component, and a scout's brief of the code around it.
    extend an existing test. Test at the real boundary; do not add exports,
    flags, or hooks that only a test needs.
 3. **Prove the test bites.** Run it before the change and see it fail for the
-   right reason (an assertion, not an import error). Then make it pass.
+   right reason (an assertion, not an import error). For new code, a test that
+   can only fail because the function does not exist yet proves nothing: once it
+   passes, break the behavior it protects (drop the check, swap the order,
+   skip the write), see an assertion fail, then restore the code. Report the
+   break and the failing assertion for every test you add.
 4. **Real code only.** Real code and real tests land together. A stub, a
    placeholder assertion, a skipped test, or a TODO for later is not done.
 5. **Stay in scope.** Change only what the component needs. Anything else you

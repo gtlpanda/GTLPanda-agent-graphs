@@ -82,6 +82,12 @@ await test('every node pins agentType + model + effort at high, matching the age
   }
   assert.deepEqual([...seen].sort(), ['acceptance-auditor', 'advisor', 'checker', 'implementer', 'planner', 'scout'])
 })
+await test("every test the implementer adds must report its bite: the break it made and the assertion that failed", async () => {
+  const { calls } = await run(fn, BUILD_OK(), { repo: '/tmp/fixture', plan: PLAN(), planApproved: true })
+  const impl = calls.find(c => c.agentType === 'implementer')
+  assert.ok(impl.schema.properties.tests_added.items.required.includes('bite'))
+  assert.match(impl.prompt, /"the function did not exist" is not a bite/)
+})
 await test('meta.phases models match the model each phase actually runs', async () => {
   const declared = Object.fromEntries(meta.phases.map(p => [p.title, p.model]))
   const { calls } = await run(fn, { planner: [PLAN()], advisor: [approve], ...BUILD_OK() }, ARGS)

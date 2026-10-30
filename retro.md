@@ -165,3 +165,37 @@ was that the fix was uncommitted, which is by design (`/loop` commits); the
 QA prompt now says so (`0b29ce8`).
 
 **Stats.** TEST-WORKFLOW 40/0 (7 new QA tests; 16 existing tests updated for the extra node).
+
+## 5. Dev graph (2026-10-30)
+
+**What changed.** `graphs/dev/`: `/dev <task>` → `dev-build` workflow →
+planner → advisor plan gate → you approve → parallel scouts → implementer per
+component (tests first) with a checker gate → acceptance-auditor → the QA
+graph as a child workflow. `advisor` and `checker` moved to `core/agents/`.
+Design and contracts: `graphs/dev/README.md`. Rules adapted from the user's
+`build`/`dry` skills and gstack's `spec`/`test-audit`/`plan-eng-review`/
+`investigate` (credited).
+
+**Key details.**
+- In code, not prompts: structural plan problems go back to the planner
+  without an advisor call; an unreported criterion counts as unmet; a red
+  component never reaches QA; the QA child gets only the caller's args and
+  its `stuckSig` comes back up. Helpers shared with the QA script are copied
+  verbatim and a test fails if they drift.
+- Mutations: 11 of the dev routing, each caught.
+
+**Live run** (`claude -p`, fixture task "owner-only updateRoute; 404 for
+non-owners and missing docs; 400 for an empty body"): planner (7 criteria,
+2 components) → gate approve → 2 scouts → implementer/checker ×2 →
+acceptance all MET → harness-repair (check, review, QA) → done. 12 agents,
+none failed, about $2.10. Re-verified by hand: VERIFY: PASS; breaking the
+owner check, the 404-before-400 order, or the write fails 5, 3, and 3 tests.
+Two gaps it exposed, both fixed:
+- Implementers proved their tests only by "the function did not exist".
+  `tests_added[].bite` is now required: the break made after green and the
+  assertion that failed.
+- The reviewer rated a duplicated authorization check MEDIUM, reading the
+  DRY rule's "differ or security path" as "and". The rule now says EITHER,
+  and that matching copies on those paths are still HIGH.
+
+**Stats.** TEST-WORKFLOW 78/0 (34 dev routing tests).

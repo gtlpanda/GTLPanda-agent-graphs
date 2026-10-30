@@ -114,7 +114,7 @@ const BUILD_SCHEMA = {
   properties: {
     done: { type: 'boolean' },
     touched: STRS,
-    tests_added: { type: 'array', items: { type: 'object', properties: { file: STR, name: STR, protects: STR, fails_when: STR }, required: ['file', 'name', 'protects', 'fails_when'] } },
+    tests_added: { type: 'array', items: { type: 'object', properties: { file: STR, name: STR, protects: STR, fails_when: STR, bite: STR }, required: ['file', 'name', 'protects', 'fails_when', 'bite'] } },
     test_changes: { type: 'array', items: { type: 'object', properties: { change: STR, reason: STR }, required: ['change', 'reason'] } },
     verify_verdict: { type: 'string', enum: ['PASS', 'FAIL', 'NOT_RUN'] },
     unchecked: STRS,
@@ -336,7 +336,7 @@ ${failed.verify_block}
 Failures:
 ${json(failed.failures)}` : ''}
 
-Fill the structured output: done = false only if you could not finish (say why in summary). touched = repo-relative paths you changed. test_changes first: any test, timeout, threshold, or snapshot you changed, with the reason. verify_verdict = the last line of your own verify run (NOT_RUN if you did not run it).`
+Fill the structured output: done = false only if you could not finish (say why in summary). touched = repo-relative paths you changed. test_changes first: any test, timeout, threshold, or snapshot you changed, with the reason. tests_added[].bite = the break you made to the code once the test passed and the assertion that then failed ("the function did not exist" is not a bite). verify_verdict = the last line of your own verify run (NOT_RUN if you did not run it).`
 }
 
 function acceptPrompt(plan) {
