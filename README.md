@@ -1,17 +1,43 @@
 # GTLPanda-agent-graphs
 
-Agent graphs for Claude Code: teams of agents wired together by code, each
-with an Opus orchestrator, a Fable advisor for judgment calls, and focused
-subagents. Plus the shared user-level config they run on (`settings.json`,
-`CLAUDE.md`, `loop.md`, the `verify` gate). One repo, symlinked into
-`~/.claude/` on every machine. Built for unattended, self-verifying work with
-`/goal` and `/loop`.
+> **TL;DR** Hand Claude Code a task and get back a change that is planned,
+> built tests-first, reviewed, QA'd, and released on your approval. Three
+> agent teams do the work; code, not prompts, decides what runs next, and every
+> step is gated on real test results, never on an agent's word.
+>
+> ```
+> /dev <task>         plan it (you approve) → build it tests-first → prove every acceptance criterion → QA
+> /loop               keep a branch green: check → fix → review → QA, until it passes or needs you
+> /release-pr [PR#]   docs into the PR → you approve the exact commit → merge once → verify the deploy
+> ```
+>
+> Install: `git clone https://github.com/gtlpanda/GTLPanda-agent-graphs.git && cd GTLPanda-agent-graphs && ./install.sh`
 
-| Graph | Status | What it does |
-|-------|--------|--------------|
-| [`graphs/qa/`](graphs/qa/README.md) | working | check → fix → review → advisor-confirm loop that makes a branch green and clean |
-| [`graphs/dev/`](graphs/dev/README.md) | working, one live run | plan (you approve) → build tests-first → prove acceptance → QA graph; run with `/dev <task>` |
-| [`graphs/release/`](graphs/release/README.md) | built, mock-tested | docs into the PR → you approve the exact head → merge once → deploy evidence for the merge commit; run with `/release-pr [PR#]` |
+## What drives it
+
+- **Code routes, agents are leaves.** Each graph is a workflow script that
+  reads every agent's structured output and decides the next step. Agents never
+  call each other, so a stuck loop, a skipped check, or a hallucinated "done"
+  cannot steer the run.
+- **Gates on evidence.** A step passes on the verify script's own last line, a
+  passing assertion at `file:line`, or a CI result for the exact commit. An
+  agent saying it passed counts for nothing.
+- **The right model for each job.** An Opus orchestrator owns state, commits,
+  and your approvals; a Fable advisor is called only at decision points
+  (confirm a finding, gate a plan, unstick a loop, diagnose a failed deploy);
+  Sonnet and Haiku subagents do the focused work. Every node is configured for high effort.
+- **You stay in charge of the irreversible.** You approve every plan and every
+  merge (for one exact commit); a rollback is only ever recommended, with evidence.
+
+| Graph | Run it with | What it does | Status |
+|-------|-------------|--------------|--------|
+| [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
+| [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
+| [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
+
+It also carries the shared user-level config the graphs run on
+(`settings.json`, `CLAUDE.md`, `loop.md`, the `verify` gate): one repo,
+symlinked into `~/.claude/` on every machine.
 
 ## Layout
 
