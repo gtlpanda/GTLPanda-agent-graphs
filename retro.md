@@ -76,3 +76,28 @@ the touched files only. Agents are leaves and never call each other.
 
 **Untested.** The advisor's unstick path (same failure twice) has run only
 against mocked agents.
+
+## 2. High effort across the graph (2026-10-30)
+
+**What changed.** Every node in `harness-repair` is now configured at `high`: checker
+(was low), fixer (was medium), reviewer (was medium), advisor (already high).
+Each agent file carries a matching `effort: high` so standalone use agrees with
+the graph. `settings.json` records `effortLevel: high` for the orchestrator;
+the live `~/.claude/settings.json` already had it, but install skips
+`settings.json`, so the repo did not reflect it.
+
+**Key details.**
+- `scripts/test-workflow.mjs`: the drift test now compares effort as well as
+  model against the agent files, and asserts every node runs at high.
+- `scripts/validate.sh`: agents must declare `effort` (low|medium|high|xhigh|max);
+  `settings.json` must declare `effortLevel`.
+- Mutations, each caught: NODES-only effort change (TEST-WORKFLOW), `effort`
+  removed from an agent file (VALIDATE + TEST-WORKFLOW), `effortLevel` removed
+  from settings (VALIDATE).
+- Cost: haiku checker at high costs more per run than at low. Not measured.
+
+**Untested.** That the runtime honors the `effort` option: live runs so far
+recorded models from subagent transcripts, never effort. Also unchecked: which
+of `effortLevel` and `modelSettings` wins for the live opus-5-5 orchestrator.
+
+**Stats.** 10 files (60+/19-). TEST: PASS (TEST-WORKFLOW 31/0, TEST-INSTALL 68/0, TEST-SECRETS 22/0).

@@ -2,6 +2,7 @@
 name: checker
 description: Runs the verify skill against the current repo and reports the VERIFY block plus a short summary of any failures. Use after changes to get an independent pass/fail with proof. Read-only plus Bash; it never edits files.
 model: haiku
+effort: high
 tools: Read, Grep, Glob, Bash
 ---
 

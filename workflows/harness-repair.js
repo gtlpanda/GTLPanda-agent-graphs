@@ -22,12 +22,12 @@ export const meta = {
 // access, so the outer /loop turn persists it.
 
 // One place for every node's agent, model, and effort. The agent files carry
-// the same models for standalone use; scripts/test-workflow.mjs fails if they drift.
+// the same models and efforts for standalone use; scripts/test-workflow.mjs fails if they drift.
 const NODES = {
-  check:  { agentType: 'checker',  model: 'haiku',  effort: 'low',    phase: 'Check' },
-  fix:    { agentType: 'fixer',    model: 'sonnet', effort: 'medium', phase: 'Fix' },
-  review: { agentType: 'reviewer', model: 'sonnet', effort: 'medium', phase: 'Review' },
-  advise: { agentType: 'advisor',  model: 'fable',  effort: 'high',   phase: 'Advise' },
+  check:  { agentType: 'checker',  model: 'haiku',  effort: 'high', phase: 'Check' },
+  fix:    { agentType: 'fixer',    model: 'sonnet', effort: 'high', phase: 'Fix' },
+  review: { agentType: 'reviewer', model: 'sonnet', effort: 'high', phase: 'Review' },
+  advise: { agentType: 'advisor',  model: 'fable',  effort: 'high', phase: 'Advise' },
 }
 const BLOCKING = ['CRITICAL', 'HIGH']
 const DEFAULT_MAX_FIX_ROUNDS = 3

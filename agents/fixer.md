@@ -2,6 +2,7 @@
 name: fixer
 description: Implements fixes for findings reported by the checker or reviewer agents. Give it the finding (file:line, failure, suggested fix) and it makes the minimal change, re-runs verification, and reports the diff plus the VERIFY block.
 model: sonnet
+effort: high
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 

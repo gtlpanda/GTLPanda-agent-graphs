@@ -2,6 +2,7 @@
 name: reviewer
 description: Code review. Reviews the current diff (or a named set of files) for bugs, security issues, and IaC misconfiguration and reports only real findings with severity and file:line. Read-only; it never edits files or runs anything that changes state. For judgment calls and stuck loops, use the advisor agent.
 model: sonnet
+effort: high
 tools: Read, Grep, Glob, Bash
 skills:
   - harness-review

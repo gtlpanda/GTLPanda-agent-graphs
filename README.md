@@ -138,14 +138,16 @@ same failure twice in a row --> advisor unsticks once --> fix with its strategy,
 
 | Role         | Who                        | Model  | Effort | Called                          |
 |--------------|----------------------------|--------|--------|---------------------------------|
-| Orchestrator | the `/loop` session        | opus   | session| every iteration                 |
+| Orchestrator | the `/loop` session        | opus   | high   | every iteration                 |
 | Advisor      | `agents/advisor.md`        | fable  | high   | blocking findings, stuck loops  |
-| Checker      | `agents/checker.md`        | haiku  | low    | every check                     |
-| Fixer        | `agents/fixer.md`          | sonnet | medium | each fix round                  |
-| Reviewer     | `agents/reviewer.md`       | sonnet | medium | after each passing check        |
+| Checker      | `agents/checker.md`        | haiku  | high   | every check                     |
+| Fixer        | `agents/fixer.md`          | sonnet | high   | each fix round                  |
+| Reviewer     | `agents/reviewer.md`       | sonnet | high   | after each passing check        |
 
-`settings.json` sets `model: opus` and `advisorModel: fable`, so the
-orchestrator's own advisor tool is Fable too. Models are aliases; in CLI
+`settings.json` sets `model: opus`, `advisorModel: fable`, and
+`effortLevel: high`, so the orchestrator runs at high and its own advisor
+tool is Fable too. Agent efforts live in each agent file's `effort:` and in
+`NODES`; `scripts/test-workflow.sh` fails if they disagree. Models are aliases; in CLI
 2.1.308 they resolve to Opus 5.5, Fable 5.1, Sonnet 5.5, and Haiku 5.5. To pin
 exact versions, put full IDs (`claude-sonnet-5-5`) in the agent files and in
 `NODES` at the top of the workflow; `scripts/test-workflow.sh` fails if the two

@@ -91,9 +91,9 @@ const review = findings => ({ files_reviewed: 2, findings })
 const ARGS = { repo: '/tmp/fixture' }
 const types = calls => calls.map(c => c.agentType).join(',')
 
-// Frontmatter `model:` of agents/<name>.md.
-function agentModel(name) {
-  const m = readFileSync(join(REPO, 'agents', `${name}.md`), 'utf8').match(/^model:\s*(\S+)\s*$/m)
+// Frontmatter `<key>:` of agents/<name>.md.
+function agentField(name, key) {
+  const m = readFileSync(join(REPO, 'agents', `${name}.md`), 'utf8').match(new RegExp(`^${key}:\\s*(\\S+)\\s*$`, 'm'))
   return m ? m[1] : null
 }
 
@@ -121,7 +121,7 @@ await test('PASS + clean review -> done in two calls (haiku checker, sonnet revi
   assert.equal(result.lastVerify, PASS_BLOCK)
   assert.deepEqual(leftover, [])
 })
-await test('every node pins agentType + model + effort, and models match the agent files', async () => {
+await test('every node pins agentType + model + effort, and both match the agent files', async () => {
   const { calls } = await run(fn, {
     checker: [failWith('t1'), failWith('t1'), pass_()],
     fixer: [fixed(), fixed()],
@@ -132,11 +132,13 @@ await test('every node pins agentType + model + effort, and models match the age
   for (const c of calls) {
     assert.ok(c.agentType && c.model && c.effort, `unpinned call: ${c.label}`)
     assert.ok(c.schema && c.schema.type === 'object', `call without schema: ${c.label}`)
-    assert.equal(c.model, agentModel(c.agentType), `${c.agentType}: workflow model ${c.model} != agents/${c.agentType}.md model ${agentModel(c.agentType)}`)
+    assert.equal(c.model, agentField(c.agentType, 'model'), `${c.agentType}: workflow model ${c.model} != agents/${c.agentType}.md model ${agentField(c.agentType, 'model')}`)
+    assert.equal(c.effort, agentField(c.agentType, 'effort'), `${c.agentType}: workflow effort ${c.effort} != agents/${c.agentType}.md effort ${agentField(c.agentType, 'effort')}`)
     seen.add(c.agentType)
   }
   assert.deepEqual([...seen].sort(), ['advisor', 'checker', 'fixer', 'reviewer'])
   assert.equal(calls.find(c => c.agentType === 'advisor').model, 'fable')
+  for (const c of calls) assert.equal(c.effort, 'high', `${c.agentType}: effort ${c.effort}, the graph runs every node at high`)
 })
 await test('MEDIUM/LOW findings only -> done, findings noted, no fix', async () => {
   const { result, calls } = await run(fn, { checker: [pass_()], reviewer: [review([finding('MEDIUM', 'm'), finding('LOW', 'l')])] }, ARGS)

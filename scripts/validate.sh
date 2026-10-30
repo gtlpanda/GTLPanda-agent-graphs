@@ -44,6 +44,12 @@ for key in model advisorModel; do
     *) bad "settings.json: $key '$val' is not a documented alias or model id" ;;
   esac
 done
+effort_level="$(jq -r '.effortLevel // "missing"' settings.json)"
+case "$effort_level" in
+  low|medium|high|xhigh|max) ok "settings.json effortLevel=$effort_level" ;;
+  missing) bad "settings.json: effortLevel missing (the graph expects a high-effort orchestrator)" ;;
+  *) bad "settings.json: effortLevel '$effort_level' is not low|medium|high|xhigh|max" ;;
+esac
 if [ "$(jq -r '.disableAllHooks // false' settings.json)" = "true" ]; then
   bad "settings.json: disableAllHooks=true breaks /goal"
 else ok "hooks not disabled"; fi
@@ -71,7 +77,7 @@ agents=(agents/*.md)
 for f in "${agents[@]}"; do
   base="$(basename "$f" .md)"
   if ! frontmatter "$f" >/dev/null; then bad "$f: no frontmatter block"; continue; fi
-  name="$(fm_get "$f" name)"; desc="$(fm_get "$f" description)"; model="$(fm_get "$f" model)"; tools="$(fm_get "$f" tools)"
+  name="$(fm_get "$f" name)"; desc="$(fm_get "$f" description)"; model="$(fm_get "$f" model)"; effort="$(fm_get "$f" effort)"; tools="$(fm_get "$f" tools)"
   [ -n "$name" ] || bad "$f: 'name' missing"
   [ -n "$desc" ] || bad "$f: 'description' missing"
   [ "$name" = "$base" ] || bad "$f: name '$name' does not match filename"
@@ -81,8 +87,13 @@ for f in "${agents[@]}"; do
     "") bad "$f: 'model' missing" ;;
     *) bad "$f: model '$model' is not a documented alias or model id" ;;
   esac
+  case "$effort" in
+    low|medium|high|xhigh|max) ;;
+    "") bad "$f: 'effort' missing (agents in this repo pin effort explicitly)" ;;
+    *) bad "$f: effort '$effort' is not low|medium|high|xhigh|max" ;;
+  esac
   [ -n "$tools" ] || bad "$f: 'tools' missing (agents in this repo declare tools explicitly)"
-  [ -n "$name" ] && [ -n "$desc" ] && [ -n "$model" ] && [ -n "$tools" ] && [ "$name" = "$base" ] && ok "agent $name (model=$model)"
+  [ -n "$name" ] && [ -n "$desc" ] && [ -n "$model" ] && [ -n "$effort" ] && [ -n "$tools" ] && [ "$name" = "$base" ] && ok "agent $name (model=$model, effort=$effort)"
 done
 
 # ---- Workflows (routing is tested by scripts/test-workflow.sh) ----
