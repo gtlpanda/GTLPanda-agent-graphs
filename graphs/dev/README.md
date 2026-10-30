@@ -14,9 +14,11 @@ Code routes; agents are leaves and never call each other.
 
 ```
 planner --> advisor(plan gate) --revise (max 2)--> planner
+                               --revise at the cap, all issues blocking:false--> planner (final, structure-checked, not gated) --> approved
+                               --revise at the cap, any blocking issue--> escalate
                                --blocked--> needs-human (questions)
-                               --approve--> plan-ready      (approval: human, the default: /dev shows the plan, you approve, it re-runs with args.plan)
-                                        --> build          (approval: advisor, or args.plan given and approved)
+                               --approve--> plan-ready      (approval: human, the workflow default; /dev --review)
+                                        --> build          (approval: advisor, /dev's default; or args.plan given and approved)
 build:   scouts (all components, in parallel, read-only)
          for each component in build order:
            implementer --> checker --FAIL--> implementer (one retry, gets the failure) --> checker --FAIL--> escalate (resumable)
@@ -35,7 +37,7 @@ build is repaired by the QA graph it calls.
 |--------------------|--------------------------------|--------|--------|-----------------------------------------|
 | Orchestrator       | the `/dev` session             | opus   | high   | once per task; branches, commits        |
 | Advisor            | `core/agents/advisor.md`       | fable  | high   | plan gate (and QA's decision points)    |
-| Planner            | `agents/planner.md`            | sonnet | high   | until the plan is approved (max 3)      |
+| Planner            | `agents/planner.md`            | sonnet | high   | until approved (max 3, +1 final if all issues are non-blocking) |
 | Scout              | `agents/scout.md`              | sonnet | high   | once per component, in parallel         |
 | Implementer        | `agents/implementer.md`        | sonnet | high   | once per component, plus retries        |
 | Checker            | `core/agents/checker.md`       | haiku  | high   | after every implementer run             |
@@ -61,7 +63,8 @@ planning), `completed` (component ids already built; resume skips them),
 - Complexity gate: more than 8 files or 2+ new services → the advisor sends it
   back to be split or justified.
 
-**plan gate** (advisor): `{verdict: approve|revise|blocked, issues[], questions[]}`.
+**plan gate** (advisor): `{verdict: approve|revise|blocked, issues[] {n, issue, fix, blocking}, questions[]}`.
+A missing or non-boolean `blocking` counts as blocking.
 
 **scout brief** per component: `{reuse[] (file:line + what), must_preserve[], interfaces[], edge_cases[], test_patterns}`.
 
@@ -75,7 +78,8 @@ evidence is a passing test at `file:line` that asserts the criterion; plus
 `behavior_changes_missing[]` (a change the code makes that the plan never listed).
 
 **ledger:** `status` (`plan-ready` | `needs-human` | `escalate` | `done`),
-`reason`, `plan`, `completed[]`, per-component results, `acceptance`, `touched`,
+`reason`, `plan`, `planApproved` (approved for the build; `/dev` saves it for `--resume`),
+`planSettled` (the final revision closed non-blocking issues ungated), `completed[]`, per-component results, `acceptance`, `touched`,
 `qa` (the QA child's ledger), and the child's `stuckSig`, so `/loop`'s
 cross-iteration stuck detection keeps working for dev-started QA runs.
 
@@ -91,15 +95,19 @@ cross-iteration stuck detection keeps working for dev-started QA runs.
 
 ## `/dev` (orchestrator skill)
 
+Unattended by default: questions come before any code exists (dirty tree,
+`needs-human`), and every later stop is a report, never a question.
+
 1. Branch: if on the default branch, create `dev/<slug>`. Detect the base.
-2. Run `dev-build`. On `plan-ready`, show the acceptance criteria and
-   components, ask for approval or edits, save the plan to
-   `$(git rev-parse --git-path harness-dev)/plan.json`, and re-run with it.
+2. Run `dev-build` with `approval: advisor`. With `/dev --review`, it stops at
+   `plan-ready`: show the acceptance criteria and components, ask for approval
+   or edits, save the plan to `$(git rev-parse --git-path harness-dev)/plan.json`,
+   and re-run with it.
 3. On `done`: run `/verify` itself, then commit. One commit per component when
    their touched files do not overlap, otherwise one commit listing them.
-4. On `escalate` or `needs-human`: report what is blocked and how to resume
-   (`/dev --resume` re-runs with the saved plan and `completed`).
-5. `/dev --auto`: the advisor approves the plan; for unattended runs.
+4. On `needs-human`: ask the advisor's questions once, then re-plan with the answers.
+5. On `escalate`: report what is blocked and how to resume (`/dev --resume`
+   re-runs with the saved plan and `completed`).
 
 ## Changes to the QA graph
 

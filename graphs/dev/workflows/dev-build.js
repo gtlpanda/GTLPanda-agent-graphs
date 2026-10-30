@@ -15,7 +15,9 @@ export const meta = {
 
 // Graph. Code routes; agents are leaves and never call each other.
 //
-//   planner --> advisor(gate) --revise--> planner (at most MAX_PLAN_ROUNDS planner calls)
+//   planner --> advisor(gate) --revise--> planner (at most MAX_PLAN_ROUNDS gated planner calls)
+//                             --revise at the cap, every issue non-blocking--> planner(final, structure-checked, not gated)
+//                             --revise at the cap, any issue blocking--> escalate
 //                             --blocked--> needs-human
 //                             --approve--> plan-ready (approval: human) | build (approval: advisor)
 //   args.plan + planApproved --> build (no planner, no gate)
@@ -93,7 +95,7 @@ const GATE_SCHEMA = {
   type: 'object',
   properties: {
     verdict: { type: 'string', enum: ['approve', 'revise', 'blocked'] },
-    issues: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, issue: STR, fix: STR }, required: ['n', 'issue', 'fix'] } },
+    issues: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, issue: STR, fix: STR, blocking: { type: 'boolean' } }, required: ['n', 'issue', 'fix', 'blocking'] } },
     questions: STRS,
   },
   required: ['verdict', 'issues', 'questions'],
@@ -163,6 +165,8 @@ const ledger = {
   plan: null,          // the plan being built (or awaiting approval)
   planRounds: 0,       // planner calls this run
   gate: null,          // the advisor's last plan-gate result
+  planSettled: false,  // true when the final revision at the cap closed only non-blocking issues, ungated
+  planApproved: false, // true once the plan is approved for the build; /dev saves it so --resume can use it
   questions: [],       // for the human, when status is needs-human
   completed: [...COMPLETED],   // component ids built and checked; /dev passes them back to resume
   components: {},      // id -> { build, checks }
@@ -258,6 +262,12 @@ function planProblems(plan) {
   }
   return problems
 }
+// True only for a non-empty issue list where every issue says blocking: false.
+// A missing or non-boolean blocking counts as blocking, so the cap only relaxes
+// on the advisor's explicit word.
+function onlyNonBlocking(issues) {
+  return Array.isArray(issues) && issues.length > 0 && issues.every(i => i && i.blocking === false)
+}
 function planFiles(plan) {
   return [...new Set(plan.components.flatMap(c => c.files))]
 }
@@ -301,7 +311,7 @@ Plan:
 ${json(plan)}
 
 It touches ${planFiles(plan).length} distinct file(s) across ${plan.components.length} component(s).
-Gate it following your "Gating a plan" instructions. verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix (empty when approving). questions: only when blocked.`
+Gate it following your "Gating a plan" instructions. verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix and blocking true or false (empty when approving). questions: only when blocked.`
 }
 
 function scoutPrompt(plan, c) {
@@ -399,22 +409,36 @@ let plan = GIVEN_PLAN
 if (!PLAN_APPROVED) {
   let issues = null
   let approved = false
+  let settled = false   // true when the final revision closed non-blocking issues without another gate
   while (!approved) {
     if (!plan || issues) {
-      if (ledger.planRounds >= MAX_PLAN_ROUNDS) {
+      // At the cap, a plan whose open issues are all non-blocking (wording the
+      // implementer could settle from the code) gets one final revision that
+      // is structure-checked but not gated again. Anything else escalates.
+      const final = ledger.planRounds >= MAX_PLAN_ROUNDS
+      if (final && !onlyNonBlocking(issues)) {
         return finish('escalate', `plan not approved after ${MAX_PLAN_ROUNDS} planner round(s)`, { plan, gate: ledger.gate })
       }
       phase('Plan')
       ledger.planRounds += 1
-      const next = await runNode('plan', `plan #${ledger.planRounds}`, planPrompt(plan, issues), PLAN_SCHEMA)
+      const label = `plan #${ledger.planRounds}${final ? ' (final)' : ''}`
+      const next = await runNode('plan', label, planPrompt(plan, issues), PLAN_SCHEMA)
       if (!next) return finish('escalate', nodeFailure('plan'), { plan })
       plan = next
-      ledger.history.push({ node: 'plan', round: ledger.planRounds, components: plan.components.length, acceptance: plan.acceptance.length })
+      ledger.history.push({ node: 'plan', round: ledger.planRounds, final, components: plan.components.length, acceptance: plan.acceptance.length })
+      if (final) {
+        const problems = planProblems(plan)
+        if (problems.length) {
+          return finish('escalate', `final plan revision is malformed: ${problems.join('; ')}`, { plan, gate: ledger.gate })
+        }
+        settled = true
+        break
+      }
     }
     const problems = planProblems(plan)
     if (problems.length) {
       ledger.history.push({ node: 'plan-check', problems })
-      issues = problems.map((issue, i) => ({ n: i + 1, issue, fix: 'restructure the plan so this holds' }))
+      issues = problems.map((issue, i) => ({ n: i + 1, issue, fix: 'restructure the plan so this holds', blocking: true }))
       continue
     }
     phase('Gate')
@@ -429,9 +453,15 @@ if (!PLAN_APPROVED) {
     else issues = gate.issues
   }
   ledger.plan = plan
-  if (APPROVAL === 'human') return finish('plan-ready', 'plan approved by the advisor; waiting for human approval')
+  ledger.planSettled = settled
+  if (settled) log(`plan settled: ${issues.length} non-blocking issue(s) closed by the final revision without another gate`)
+  if (APPROVAL === 'human') {
+    const by = settled ? 'plan settled by a final revision of non-blocking issues' : 'plan approved by the advisor'
+    return finish('plan-ready', `${by}; waiting for human approval`)
+  }
 }
 ledger.plan = plan
+ledger.planApproved = true
 const files = planFiles(plan)
 if (files.length > MAX_PLAN_FILES) log(`plan touches ${files.length} files (over ${MAX_PLAN_FILES}); it was approved with that size`)
 

@@ -231,3 +231,29 @@ Render services are the first candidates, and it has no health URL, so its
 verdicts will be UNVERIFIED until one is configured.
 
 **Stats.** TEST-WORKFLOW 109/0 (31 release routing tests).
+
+## 7. /dev runs unattended after up-front questions (2026-10-30)
+
+**What changed.** Plain `/dev` now lets the advisor approve the plan (`--review` restores the human
+approval stop; `--auto` is accepted as the default). Questions happen only before any code exists
+(the dirty tree, `needs-human`); every later stop is a report. At the plan round cap, a plan whose
+open gate issues are all `blocking: false` gets one final planner revision that is structure-checked
+but not gated, then builds (`ledger.planSettled`). Any blocking issue escalates as before.
+
+**Why.** In a real `/dev` run on Terracotta PR 4a, the gate said revise three times (7, 8, then 4
+issues, the last all wording) and the run escalated. `--auto` could not have prevented that,
+because the cap was checked before the approval mode was read. The orchestrator then applied the
+round-3 fixes by hand, which is what the final revision now does.
+
+**Key details.**
+- Strict by default: a missing or non-boolean `blocking`, an empty issue list, or a structural
+  problem from `planProblems()` counts as blocking. At most 4 planner calls.
+- `ledger.planApproved` (new): `/dev` saves the plan whenever it is true, so `--resume` works after a
+  build escalates in the advisor-approved default. Caught by the reviewer: the only `plan.json`
+  write was in the `plan-ready` step, which the new default skips. Fixed before commit.
+- `loop.md` unchanged: that session had no `/loop` iteration.
+
+**Untested live.** Mock-tested only; no live `/dev` run with the new cap behavior yet.
+
+**Stats.** TEST-WORKFLOW 116/0 (7 new dev routing tests); 7 mutations, each caught; 1 HIGH review
+finding fixed.

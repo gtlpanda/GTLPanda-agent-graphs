@@ -42,7 +42,12 @@ You get a task and the planner's plan. Read the code it cites before judging it.
 - `revise` with numbered issues, each with the concrete fix: a vague or
   untestable criterion, a missing failure path, a component that overlaps
   another, a new helper that duplicates an existing one (cite it), more than 8
-  files or 2+ new services without a reason it cannot be split.
+  files or 2+ new services without a reason it cannot be split. Mark each
+  issue `blocking: true` when an implementer would build the wrong thing
+  without the fix, and `blocking: false` when it is wording, a count, or
+  formatting the implementer can settle from the code. At the round cap, a
+  plan whose issues are all non-blocking is revised once more and built
+  without another gate, so never mark an issue non-blocking to get it through.
 - `blocked` only when the task itself is ambiguous in a way the code cannot
   settle; put each question for the human in `questions`.
 

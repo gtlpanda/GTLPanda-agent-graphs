@@ -22,7 +22,9 @@ const PLAN = (over = {}) => ({
   ...over,
 })
 const approve = { verdict: 'approve', issues: [], questions: [] }
+// revise() leaves blocking unset on purpose: a missing blocking must count as blocking.
 const revise = (...issues) => ({ verdict: 'revise', issues: issues.map((issue, i) => ({ n: i + 1, issue, fix: 'fix it' })), questions: [] })
+const nits = (...issues) => ({ verdict: 'revise', issues: issues.map((issue, i) => ({ n: i + 1, issue, fix: 'fix it', blocking: false })), questions: [] })
 const brief = () => ({ reuse: [], must_preserve: [], interfaces: [], edge_cases: [], test_patterns: 'node --test' })
 const built = (touched = ['src/a.js'], over = {}) => ({ done: true, touched, tests_added: [], test_changes: [], verify_verdict: 'PASS', unchecked: [], summary: 'ok', ...over })
 const met = (ids = ['AC1', 'AC2']) => ({ criteria: ids.map(id => ({ id, status: 'MET', evidence: `test/a.test.js:3 asserts ${id}; node --test passes` })), behavior_changes_missing: [] })
@@ -175,6 +177,79 @@ await test('still not approved after 3 planner rounds -> escalate, last plan and
   assert.match(result.reason, /not approved after 3 planner round/)
   assert.equal(calls.filter(c => c.agentType === 'planner').length, 3)
   assert.equal(result.gate.issues[0].issue, 'c')
+  assert.equal(result.planSettled, false)
+})
+await test('at the cap with only non-blocking issues: one final ungated revision, then the build runs', async () => {
+  const { result, calls } = await run(fn, {
+    planner: [PLAN(), PLAN(), PLAN(), p => { assert.match(p, /Revise this plan/); assert.match(p, /AC8 wording/); return PLAN() }],
+    advisor: [revise('a'), revise('b'), nits('AC8 wording', 'count is 3')],
+    ...BUILD_OK(),
+  }, ARGS)
+  assert.equal(result.status, 'done')
+  assert.equal(types(calls), `planner,advisor,planner,advisor,planner,advisor,planner,scout,scout,implementer,checker,implementer,checker,acceptance-auditor,${QA}`)
+  assert.equal(result.planRounds, 4)
+  assert.equal(result.planSettled, true)
+  assert.equal(calls.filter(c => c.label === 'plan #4 (final)').length, 1)
+})
+await test('at the cap, one blocking issue among non-blocking ones -> escalate, no final revision', async () => {
+  const mixed = nits('wording', 'missing failure path')
+  mixed.issues[1].blocking = true
+  const { result, calls } = await run(fn, { planner: [PLAN(), PLAN(), PLAN()], advisor: [revise('a'), revise('b'), mixed] }, ARGS)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /not approved after 3 planner round/)
+  assert.equal(calls.filter(c => c.agentType === 'planner').length, 3)
+  assert.equal(result.planSettled, false)
+})
+await test('at the cap, a non-boolean blocking or a revise with no issues counts as blocking -> escalate', async () => {
+  const stringy = nits('wording')
+  stringy.issues[0].blocking = 'false'
+  for (const last of [stringy, nits()]) {
+    const { result, calls } = await run(fn, { planner: [PLAN(), PLAN(), PLAN()], advisor: [revise('a'), revise('b'), last] }, ARGS)
+    assert.equal(result.status, 'escalate')
+    assert.equal(calls.filter(c => c.agentType === 'planner').length, 3)
+  }
+})
+await test('at the cap, a final revision that breaks structure -> escalate, nothing built', async () => {
+  const broken = PLAN({ components: [component('C1', ['src/a.js'], ['C2']), component('C2', ['src/b.js'])] })
+  const { result, calls } = await run(fn, {
+    planner: [PLAN(), PLAN(), PLAN(), broken],
+    advisor: [revise('a'), revise('b'), nits('wording')],
+  }, ARGS)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /final plan revision is malformed: component C1 depends on C2/)
+  assert.equal(types(calls), 'planner,advisor,planner,advisor,planner,advisor,planner')
+  assert.equal(result.planSettled, false)
+})
+await test('at the cap with human approval: the settled plan stops at plan-ready and says it was settled, not approved', async () => {
+  const { result, calls } = await run(fn, {
+    planner: [PLAN(), PLAN(), PLAN(), PLAN()],
+    advisor: [revise('a'), revise('b'), nits('wording')],
+  }, { repo: '/tmp/fixture', task: 't' })
+  assert.equal(result.status, 'plan-ready')
+  assert.match(result.reason, /settled by a final revision of non-blocking issues/)
+  assert.equal(types(calls), 'planner,advisor,planner,advisor,planner,advisor,planner')
+})
+await test('planApproved is true once the build starts, even when the build escalates, and false for every planning stop', async () => {
+  const buildFails = await run(fn, { planner: [PLAN()], advisor: [approve], scout: [brief(), brief()],
+    implementer: [built(['src/a.js']), built(['src/a.js'])], checker: [failWith('x'), failWith('x')] }, ARGS)
+  assert.equal(buildFails.result.status, 'escalate')
+  assert.equal(buildFails.result.planApproved, true)
+  const stops = [
+    await run(fn, { planner: [PLAN()], advisor: [approve] }, { repo: '/tmp/fixture', task: 't' }),
+    await run(fn, { planner: [PLAN(), PLAN(), PLAN()], advisor: [revise('a'), revise('b'), revise('c')] }, ARGS),
+    await run(fn, { planner: [PLAN()], advisor: [{ verdict: 'blocked', issues: [], questions: ['q'] }] }, ARGS),
+  ]
+  assert.deepEqual(stops.map(s => [s.result.status, s.result.planApproved]), [['plan-ready', false], ['escalate', false], ['needs-human', false]])
+})
+await test('structural issues the code raises are blocking, so they never use the final revision', async () => {
+  const outOfOrder = PLAN({ components: [component('C1', ['src/a.js'], ['C2']), component('C2', ['src/b.js'])] })
+  const { result, calls } = await run(fn, {
+    planner: [PLAN(), PLAN(), outOfOrder],
+    advisor: [nits('a'), nits('b')],
+  }, ARGS)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /not approved after 3 planner round/)
+  assert.equal(calls.filter(c => c.agentType === 'planner').length, 3)
 })
 await test('blocked -> needs-human with the advisor questions, nothing built', async () => {
   const { result, calls } = await run(fn, { planner: [PLAN()], advisor: [{ verdict: 'blocked', issues: [], questions: ['soft or hard delete?'] }] }, ARGS)
