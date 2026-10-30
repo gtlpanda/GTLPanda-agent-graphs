@@ -69,6 +69,10 @@ for d in skills agents workflows; do
   dups="$(for e in core/"$d"/* graphs/*/"$d"/*; do basename "$e"; done | sort | uniq -d)"
   if [ -n "$dups" ]; then bad "duplicate $d name(s) across core/ and graphs/: $(echo $dups)"; else ok "$d names unique across core/ and graphs/"; fi
 done
+# Claude Code lists skills and workflows together, so a skill and a workflow may not share a name.
+dups="$( { for e in core/skills/* graphs/*/skills/*; do basename "$e"; done
+           for e in core/workflows/*.js graphs/*/workflows/*.js; do basename "$e" .js; done; } | sort | uniq -d)"
+if [ -n "$dups" ]; then bad "a skill and a workflow share a name (both appear in the skills list): $(echo $dups)"; else ok "skill and workflow names do not collide"; fi
 
 # ---- Skills ----
 skills=(core/skills/*/SKILL.md graphs/*/skills/*/SKILL.md)
