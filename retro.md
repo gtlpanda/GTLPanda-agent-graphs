@@ -135,3 +135,28 @@ there is only one `~/.claude/loop.md`.
 owns the default `/loop`.
 
 **Stats.** 3 commits. TEST: PASS (TEST-INSTALL 73/0, TEST-WORKFLOW 33/0, TEST-SECRETS 22/0).
+
+## 4. QA auditor node in the QA graph (2026-10-30)
+
+**What changed.** New read-only `qa-auditor` agent (sonnet, high) in
+`graphs/qa/agents/`. It runs after review is clean and traces behavior across
+files: data flows, states and transitions, failure modes, authorization, input
+validation, integration seams. Its HIGH/CRITICAL findings go through the same
+advisor-confirm → fix → check → review path as review findings; then QA
+re-audits only the files changed since its last run.
+
+**Key details.**
+- Named `qa-auditor`, not `qa-engineer`: a private agent by that name lives in
+  `~/.claude/agents/`, and install would have backed it up and replaced it.
+- The confirm/fix block that review used is now one `confirmAndFix(source, …)`
+  shared by review and QA. Signatures carry the source (`review|…`, `qa|…`),
+  and noted/refuted findings record it.
+- Behavior change: when the advisor refutes every blocking review finding, the
+  run continues to QA instead of ending `done`.
+- Mutations, each caught: QA never narrowing to the fix diff, fixes not
+  tracked for QA, review-refuted skipping QA, QA signatures labeled `review`.
+
+**Untested live.** Routing is tested with mocked agents only; no live run of
+the QA node yet.
+
+**Stats.** TEST-WORKFLOW 40/0 (7 new QA tests; 16 existing tests updated for the extra node).

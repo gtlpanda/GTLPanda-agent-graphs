@@ -1,11 +1,12 @@
 export const meta = {
   name: 'harness-repair',
-  description: 'Check, fix, review graph for one repo: routes on structured verify and review results, stops on pass, a fix-round cap, or no progress',
+  description: 'Check, fix, review, QA graph for one repo: routes on structured verify, review, and QA results, stops on pass, a fix-round cap, or no progress',
   whenToUse: 'Run by /loop (loop.md step 3) once per iteration. args: {repo (required, absolute), base?, maxFixRounds?, knownStuckSigs?}',
   phases: [
     { title: 'Check', detail: 'checker runs verify.sh; the gate reads its VERIFY line', model: 'haiku' },
     { title: 'Fix', detail: 'fixer makes the smallest change for failures or confirmed findings', model: 'sonnet' },
     { title: 'Review', detail: 'reviewer reviews the branch, then only what each fix touched', model: 'sonnet' },
+    { title: 'QA', detail: 'qa-auditor traces behavior across files once review is clean, then only what later fixes touched', model: 'sonnet' },
     { title: 'Advise', detail: 'advisor confirms blocking findings and unsticks a repeated failure', model: 'fable' },
   ],
 }
@@ -13,8 +14,10 @@ export const meta = {
 // Graph. Code routes; agents are leaves and never call each other.
 //
 //   check --FAIL--> fix --> check                 the fixer's own verify run is never the gate
-//   check --PASS--> review --nothing blocking--> done
+//   check --PASS--> review --nothing blocking--> qa --nothing blocking--> done
 //   review --HIGH/CRITICAL--> advise(confirm) --real--> fix --> check --> review(touched files only)
+//   qa --HIGH/CRITICAL--> advise(confirm) --real--> fix --> check --> review(touched) --> qa(touched since last qa)
+//   every blocking finding refuted: review continues to qa; qa is done
 //   same failure signature twice in a row --> advise(unstick) once --> fix with its strategy, else escalate
 //
 // Stops with status 'done' or 'escalate' (fix-round cap, no progress, a node
@@ -28,6 +31,7 @@ const NODES = {
   fix:    { agentType: 'fixer',    model: 'sonnet', effort: 'high', phase: 'Fix' },
   review: { agentType: 'reviewer', model: 'sonnet', effort: 'high', phase: 'Review' },
   advise: { agentType: 'advisor',  model: 'fable',  effort: 'high', phase: 'Advise' },
+  qa:     { agentType: 'qa-auditor', model: 'sonnet', effort: 'high', phase: 'QA' },
 }
 const BLOCKING = ['CRITICAL', 'HIGH']
 const DEFAULT_MAX_FIX_ROUNDS = 3
@@ -237,6 +241,24 @@ ${json(scope.prior)}
 Report a prior finding again only if it is still present. Report any new defect the fix introduced. files_reviewed = how many of those files you read. An empty findings list is a valid answer.`
 }
 
+function qaPrompt(scope) {
+  const severity = 'Severity: CRITICAL = data loss, security or authorization bypass, crash; HIGH = broken feature, stuck state, wrong result from a race or bad transition; MEDIUM = degraded handling; LOW = robustness.'
+  if (scope.kind === 'branch') {
+    return `${where}
+Audit this branch's behavior, committed and uncommitted changes, following your instructions: trace each changed flow end to end, its states and failure modes, authorization, input validation, and integration seams.${BASE ? ` Base branch: ${BASE}.` : ' Detect the base branch (the default branch of origin).'} The reviewer already passed this diff for line-level bugs; report what only shows up across files.
+${severity}
+Put every finding in the structured output with its severity, file, line, why (the failure scenario), and fix. files_reviewed = how many files you read. An empty findings list is a valid answer.`
+  }
+  return `${where}
+Fixes changed these files since your last audit: ${json(scope.files)}
+Audit ONLY the behavior those changes affect: re-trace the flows that pass through them. Ignore the rest of the branch.${scope.prior.length ? `
+These findings were the reason for the latest fix:
+${json(scope.prior)}
+Report a prior finding again only if it is still present.` : ''} Report any new defect the changes introduced.
+${severity}
+files_reviewed = how many files you read. An empty findings list is a valid answer.`
+}
+
 function confirmPrompt(findings, who) {
   const indexed = findings.map((f, index) => ({ index, ...f }))
   return `${where}
@@ -272,12 +294,15 @@ const advisedSigs = new Set()      // signatures the advisor already tried to un
 let strategy = null                // advisor strategy for the next verify fix
 let reviewScope = { kind: 'branch' }
 let touchedSinceReview = []
+let qaScope = { kind: 'branch' }
+let touchedSinceQa = []
 let checks = 0
 
 function recordFix(fix) {
   addUnique(ledger.touched, fix.touched, asIs)
   addUnique(ledger.fixed, fix.fixed, asIs)
   addUnique(touchedSinceReview, fix.touched, asIs)
+  addUnique(touchedSinceQa, fix.touched, asIs)
 }
 
 // Note MEDIUM/LOW findings (not fixed by the graph); return the blocking ones.
@@ -286,7 +311,7 @@ function triage(source, findings) {
   return findings.filter(f => BLOCKING.includes(f.severity))
 }
 
-// The advisor confirms blocking findings from `source` (a NODES key) in
+// The advisor confirms blocking findings from `source` ('review' or 'qa') in
 // one batched call, then the fixer fixes the confirmed ones. Returns
 // { finished } to end the run, { confirmed } after a fix round, or {} when the
 // advisor refuted every finding.
@@ -387,9 +412,31 @@ while (true) {
   touchedSinceReview = []
 
   const reviewBlocking = triage('review', review.findings)
-  if (!reviewBlocking.length) return finish('done', 'VERIFY: PASS and no HIGH/CRITICAL findings')
-  const outcome = await confirmAndFix('review', reviewBlocking)
+  if (reviewBlocking.length) {
+    const outcome = await confirmAndFix('review', reviewBlocking)
+    if (outcome.finished) return outcome.finished
+    if (outcome.confirmed) {
+      reviewScope = { kind: 'fix', prior: outcome.confirmed }
+      continue
+    }
+    // every blocking review finding was refuted: go on to QA
+  }
+
+  // ----- QA (verification passed, review clean) -----
+  phase('QA')
+  const qScope = qaScope.kind === 'fix'
+    ? { kind: 'fix', files: touchedSinceQa, prior: qaScope.prior }
+    : qaScope
+  const qa = await runNode('qa', qScope.kind === 'fix' ? 'qa: fix diff' : 'qa: branch', qaPrompt(qScope), REVIEW_SCHEMA)
+  if (!qa) return finish('escalate', nodeFailure('qa'))
+  ledger.history.push({ node: 'qa', scope: qScope.kind, files: qScope.files || null, findings: qa.findings.length })
+  touchedSinceQa = []
+
+  const qaBlocking = triage('qa', qa.findings)
+  if (!qaBlocking.length) return finish('done', 'VERIFY: PASS and no HIGH/CRITICAL review or QA findings')
+  const outcome = await confirmAndFix('qa', qaBlocking)
   if (outcome.finished) return outcome.finished
-  if (!outcome.confirmed) return finish('done', 'VERIFY: PASS; every blocking finding was refuted by the advisor')
+  if (!outcome.confirmed) return finish('done', 'VERIFY: PASS; every blocking QA finding was refuted by the advisor')
   reviewScope = { kind: 'fix', prior: outcome.confirmed }
+  qaScope = { kind: 'fix', prior: outcome.confirmed }
 }

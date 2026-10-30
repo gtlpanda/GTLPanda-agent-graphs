@@ -11,7 +11,7 @@ when a step needs a human decision; say what you need and why.
    - If CI is red, read the failing job's log, fix the cause, push.
    - If there are merge conflicts with the base branch, rebase or merge and resolve.
 3. **Repair graph.** These instructions are the opt-in to the Workflow tool for
-   this step. The graph checks, fixes, reviews, and stops on its own; you own
+   this step. The graph checks, fixes, reviews, QA-audits, and stops on its own; you own
    its state and every commit.
    1. Read the ledger at `"$(git rev-parse --git-path harness-loop)/ledger.json"`
       (inside `.git`, never committed). Missing or unparseable means

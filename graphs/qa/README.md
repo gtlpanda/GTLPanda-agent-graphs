@@ -7,8 +7,9 @@ each other.
 
 ```
 check --FAIL--> fix --> check            (the fixer's own verify run is never the gate)
-check --PASS--> review --nothing HIGH/CRITICAL--> done
+check --PASS--> review --nothing HIGH/CRITICAL--> qa --nothing HIGH/CRITICAL--> done
 review --HIGH/CRITICAL--> advisor confirms --real--> fix --> check --> review (touched files only)
+qa --HIGH/CRITICAL--> advisor confirms --real--> fix --> check --> review (touched) --> qa (touched since last qa)
 same failure twice in a row --> advisor unsticks once --> fix with its strategy, else escalate
 ```
 
@@ -19,6 +20,7 @@ same failure twice in a row --> advisor unsticks once --> fix with its strategy,
 | Checker      | `agents/checker.md`        | haiku  | high   | every check                     |
 | Fixer        | `agents/fixer.md`          | sonnet | high   | each fix round                  |
 | Reviewer     | `agents/reviewer.md`       | sonnet | high   | after each passing check        |
+| QA auditor   | `agents/qa-auditor.md`     | sonnet | high   | once review is clean            |
 
 The root `settings.json` sets `model: opus`, `advisorModel: fable`, and
 `effortLevel: high`, so the orchestrator runs at high and its own advisor
@@ -35,7 +37,11 @@ Routing rules, all in code and all tested:
 - At most `maxFixRounds` (default 3) fix rounds per run. A failure whose
   signature (step, exit code, first error) repeats goes to the advisor once;
   if it repeats after the advisor's strategy, the run escalates.
-- Blocking findings are confirmed by the advisor in one batched call before a
+- QA runs only on code that passes verify and review, so it never spends a
+  call on a diff that is about to change. The first QA run audits the whole
+  branch; after a QA-driven fix it audits only the files changed since its
+  last run. If the advisor refutes every blocking review finding, QA still runs.
+- Blocking findings (from review or QA) are confirmed by the advisor in one batched call before a
   fix round is spent. Refuted ones are recorded, not fixed. MEDIUM/LOW are
   noted, not fixed.
 - A node that returns nothing escalates; nothing crashes the loop.
@@ -48,18 +54,21 @@ Known limits:
 - Repo content (test output, file text) flows verbatim into the fixer's and
   advisor's prompts, and the fixer can write files and run Bash. Run the
   unattended loop only on branches whose code you trust.
-- `reviewer` and `advisor` are read-only by instruction, not by tool list:
-  both have Bash so they can run `git diff` and friends.
+- `reviewer`, `qa-auditor`, and `advisor` are read-only by instruction, not by tool list:
+  all have Bash so they can run `git diff` and friends.
 - Before committing, `/loop` re-runs `/verify` itself rather than trusting the
   checker's transcribed block.
 
-Cost and speed: a clean iteration is two calls (haiku check, sonnet review).
+Cost and speed: a clean iteration is three calls (haiku check, sonnet review,
+sonnet QA).
 Fable runs only at decision points, and its confirmations are batched.
 Fixes run one at a time on one working tree; no worktrees, no merge step.
 
 **Agents** (`agents/`, linked into `~/.claude/agents/`): `checker` (haiku) runs verify and reports
 failures; `fixer` (sonnet) implements fixes and re-verifies; `reviewer`
-(sonnet) reviews diffs, read-only; `advisor` (fable) confirms findings,
+(sonnet) reviews diffs, read-only; `qa-auditor` (sonnet) traces behavior
+across files (data flows, states, failure modes, auth, validation, seams),
+read-only; `advisor` (fable) confirms findings,
 unsticks loops, and answers judgment calls, read-only.
 
 Routing tests: `tests/harness-repair.test.mjs`, run by `scripts/test-workflow.sh`.
