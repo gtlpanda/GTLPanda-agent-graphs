@@ -5,7 +5,7 @@ then hands the branch to the [QA graph](../qa/README.md) as a child workflow.
 Entry point: the `/dev` skill. `/loop` stays the maintenance loop for branches
 that already exist.
 
-Status: **design**. Nothing below is built yet; this is the spec the build follows.
+Status: **built; routing tested with mocked agents** (`tests/dev-build.test.mjs`). Not yet run live.
 
 ## Graph
 
@@ -102,17 +102,18 @@ cross-iteration stuck detection keeps working for dev-started QA runs.
 
 ## Changes to the QA graph
 
-- `harness-review` gains one rule from `dry`: duplicated rule-enforcing logic
-  (auth, validation, billing, limits) is HIGH, because the copies drift. Other
-  duplication is MEDIUM/LOW and noted, not fixed.
+- `harness-review` has a "Duplicated rules" check, from `dry`: copied logic
+  that enforces a rule (auth, validation, billing, limits) drifts. HIGH when the
+  copies already differ or sit on a security or money path, MEDIUM otherwise.
+  Repetition with independent reasons to change is not a finding.
 
-## Build order
+## Files
 
-Each step is a commit with `VERIFY: PASS`:
-1. Test harness `workflow()` mock; `advisor` and `checker` to `core/agents/`. The 40 QA tests pass unchanged.
-2. Dev agent files.
-3. `dev-build.js` and its routing tests, starting with the QA handoff contract.
-4. `/dev` skill; this README moves from design to as-built; credits.
+- `workflows/dev-build.js`: the graph. Helpers marked `// shared` are copied
+  verbatim from the QA graph's script, and a test fails if they drift.
+- `agents/`: planner, scout, implementer, acceptance-auditor.
+- `skills/dev/SKILL.md`: the `/dev` orchestrator.
+- `tests/dev-build.test.mjs`: routing tests, run by `scripts/test-workflow.sh`.
 
 ## Credits
 
