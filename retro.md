@@ -156,7 +156,12 @@ re-audits only the files changed since its last run.
 - Mutations, each caught: QA never narrowing to the fix diff, fixes not
   tracked for QA, review-refuted skipping QA, QA signatures labeled `review`.
 
-**Untested live.** Routing is tested with mocked agents only; no live run of
-the QA node yet.
+**Live run** (`claude -p` on a fixture whose branch adds a `deleteRoute` with
+no ownership check; tests pass): checker → reviewer (CRITICAL authz bypass,
+HIGH missing negative test) → advisor confirmed both, one by running the code
+→ fixer added the check and two tests → checker PASS → reviewer of the fix,
+clean → qa-auditor on the branch → done. About $1.30. QA's only finding (LOW)
+was that the fix was uncommitted, which is by design (`/loop` commits); the
+QA prompt now says so (`0b29ce8`).
 
 **Stats.** TEST-WORKFLOW 40/0 (7 new QA tests; 16 existing tests updated for the extra node).

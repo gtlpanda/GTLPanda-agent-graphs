@@ -34,7 +34,7 @@ await test('every phase() title used in the script is declared in meta.phases', 
 
 console.log('== harness-repair: routing')
 await test('PASS + clean review + clean QA -> done in three calls (haiku checker, sonnet reviewer, sonnet qa-auditor)', async () => {
-  const { result, calls, leftover } = await run(fn, { checker: [pass_()], reviewer: [review([])], 'qa-auditor': [p => { assert.match(p, /Audit this branch's behavior/); return review([]) }] }, ARGS)
+  const { result, calls, leftover } = await run(fn, { checker: [pass_()], reviewer: [review([])], 'qa-auditor': [p => { assert.match(p, /Audit this branch's behavior/); assert.match(p, /do not report that changes are uncommitted/); return review([]) }] }, ARGS)
   assert.equal(result.status, 'done')
   assert.match(result.reason, /no HIGH\/CRITICAL review or QA findings/)
   assert.equal(types(calls), 'checker,reviewer,qa-auditor')
