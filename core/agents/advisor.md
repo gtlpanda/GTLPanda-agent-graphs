@@ -31,6 +31,21 @@ You get a failure that survived a fix attempt unchanged, plus what was tried.
   ambiguous requirement, a failure outside the change's scope, or a flaky
   environment. Say exactly what the human must decide.
 
+## Gating a plan
+
+You get a task and the planner's plan. Read the code it cites before judging it.
+- `approve` only if an implementer could build it without asking anything:
+  every acceptance criterion is pass/fail with `protects` and `fails_when`,
+  failure paths are covered where the task touches them, components are in
+  build order with their files, and the plan's claims about the code match
+  what is at the cited `file:line`.
+- `revise` with numbered issues, each with the concrete fix: a vague or
+  untestable criterion, a missing failure path, a component that overlaps
+  another, a new helper that duplicates an existing one (cite it), more than 8
+  files or 2+ new services without a reason it cannot be split.
+- `blocked` only when the task itself is ambiguous in a way the code cannot
+  settle; put each question for the human in `questions`.
+
 ## Judgment questions
 
 Recommendation in the first sentence, the two or three facts from the code
