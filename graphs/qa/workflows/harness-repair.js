@@ -242,7 +242,7 @@ Report a prior finding again only if it is still present. Report any new defect 
 }
 
 function qaPrompt(scope) {
-  const severity = 'Severity: CRITICAL = data loss, security or authorization bypass, crash; HIGH = broken feature, stuck state, wrong result from a race or bad transition; MEDIUM = degraded handling; LOW = robustness.'
+  const severity = 'Severity: CRITICAL = data loss, security or authorization bypass, crash; HIGH = broken feature, stuck state, wrong result from a race or bad transition; MEDIUM = degraded handling; LOW = robustness.\nUncommitted changes are this run\'s fixes; the caller commits them after the run. Audit the working tree as the code that will ship, and do not report that changes are uncommitted.'
   if (scope.kind === 'branch') {
     return `${where}
 Audit this branch's behavior, committed and uncommitted changes, following your instructions: trace each changed flow end to end, its states and failure modes, authorization, input validation, and integration seams.${BASE ? ` Base branch: ${BASE}.` : ' Detect the base branch (the default branch of origin).'} The reviewer already passed this diff for line-level bugs; report what only shows up across files.
