@@ -1,0 +1,123 @@
+# Dev graph (`dev-build`)
+
+Takes a task, plans it, builds it with tests, proves each acceptance criterion,
+then hands the branch to the [QA graph](../qa/README.md) as a child workflow.
+Entry point: the `/dev` skill. `/loop` stays the maintenance loop for branches
+that already exist.
+
+Status: **design**. Nothing below is built yet; this is the spec the build follows.
+
+## Graph
+
+Code routes; agents are leaves and never call each other.
+
+```
+planner --> advisor(plan gate) --revise (max 2)--> planner
+                               --blocked--> needs-human (questions)
+                               --approve--> plan-ready      (approval: human, the default: /dev shows the plan, you approve, it re-runs with args.plan)
+                                        --> build          (approval: advisor, or args.plan given and approved)
+build:   scouts (all components, in parallel, read-only)
+         for each component in build order:
+           implementer --> checker --FAIL--> implementer (one retry, gets the failure) --> checker --FAIL--> escalate (resumable)
+accept:  acceptance-auditor --UNMET--> implementer (one rework round) --> checker --> acceptance-auditor --UNMET--> escalate
+handoff: workflow('harness-repair', {repo, base, maxFixRounds, knownStuckSigs})   check, fix, review, QA, advisor; its ledger is returned as qa
+```
+
+Fix rounds, stuck signatures, and advisor-unstick live only in the QA graph.
+Workflow scripts cannot import each other, so the dev graph does not copy that
+loop: a component that fails verify twice escalates, and everything after the
+build is repaired by the QA graph it calls.
+
+## Roles
+
+| Role               | Who                            | Model  | Effort | Called                                  |
+|--------------------|--------------------------------|--------|--------|-----------------------------------------|
+| Orchestrator       | the `/dev` session             | opus   | high   | once per task; branches, commits        |
+| Advisor            | `core/agents/advisor.md`       | fable  | high   | plan gate (and QA's decision points)    |
+| Planner            | `agents/planner.md`            | sonnet | high   | until the plan is approved (max 3)      |
+| Scout              | `agents/scout.md`              | sonnet | high   | once per component, in parallel         |
+| Implementer        | `agents/implementer.md`        | sonnet | high   | once per component, plus retries        |
+| Checker            | `core/agents/checker.md`       | haiku  | high   | after every implementer run             |
+| Acceptance auditor | `agents/acceptance-auditor.md` | sonnet | high   | after the build, and after a rework     |
+
+`advisor` and `checker` move to `core/agents/` because both graphs use them.
+
+## Contracts
+
+All routing reads schemas, never prose.
+
+**args:** `repo` (absolute, required), `task` (required unless `plan`), `base`,
+`approval` (`human` default | `advisor`), `plan` + `planApproved` (skip
+planning), `completed` (component ids already built; resume skips them),
+`maxFixRounds` and `knownStuckSigs` (passed through to the QA child).
+
+**plan** (planner output, gated by the advisor):
+- `acceptance[]`: `{id: "AC1", criterion, protects, fails_when, no_claim}`.
+  Numbered, pass/fail, no subjective language ("edge cases are handled" is rejected).
+- `components[]` in build order: `{id: "C1", title, files[], depends_on[], tests[]}`.
+  Self-contained, non-overlapping, together exhaustive; shared dependencies first, glue last.
+- `behavior_changes[]`, `out_of_scope[]`, `risks[]` (`{risk, mitigation}`).
+- Complexity gate: more than 8 files or 2+ new services → the advisor sends it
+  back to be split or justified.
+
+**plan gate** (advisor): `{verdict: approve|revise|blocked, issues[], questions[]}`.
+
+**scout brief** per component: `{reuse[] (file:line + what), must_preserve[], interfaces[], edge_cases[], test_patterns}`.
+
+**implementer report:** `{done, touched[], tests_added[] {file, name, protects, fails_when}, test_changes[], verify_verdict, unchecked[]}`.
+`test_changes` lists any change to a test, timeout, threshold, snapshot, or
+suppression, first and with its reason. `verify_verdict` is a claim: the gate is
+the checker's VERIFY line, never the implementer's own run.
+
+**acceptance:** per criterion `{id, status: MET|UNMET, evidence}`, where
+evidence is a passing test at `file:line` that asserts the criterion; plus
+`behavior_changes_missing[]` (a change the code makes that the plan never listed).
+
+**ledger:** `status` (`plan-ready` | `needs-human` | `escalate` | `done`),
+`reason`, `plan`, `completed[]`, per-component results, `acceptance`, `touched`,
+`qa` (the QA child's ledger), and the child's `stuckSig`, so `/loop`'s
+cross-iteration stuck detection keeps working for dev-started QA runs.
+
+## The implementer's rules
+
+- Test first. Every test passes the value bar (what it protects, what
+  regression fails it, why existing coverage misses it, no test-only seams) and
+  the regression proof (fails before the change, passes after).
+- Real code and real tests in the same change; a stub or a deferred test is not done.
+- Read before writing: every function it calls, by its signature, not from memory.
+- Minimal scope: anything outside the component goes in `unchecked`, not in the diff.
+- Never commit. Never loosen a test, timeout, or threshold to get green.
+
+## `/dev` (orchestrator skill)
+
+1. Branch: if on the default branch, create `dev/<slug>`. Detect the base.
+2. Run `dev-build`. On `plan-ready`, show the acceptance criteria and
+   components, ask for approval or edits, save the plan to
+   `$(git rev-parse --git-path harness-dev)/plan.json`, and re-run with it.
+3. On `done`: run `/verify` itself, then commit. One commit per component when
+   their touched files do not overlap, otherwise one commit listing them.
+4. On `escalate` or `needs-human`: report what is blocked and how to resume
+   (`/dev --resume` re-runs with the saved plan and `completed`).
+5. `/dev --auto`: the advisor approves the plan; for unattended runs.
+
+## Changes to the QA graph
+
+- `harness-review` gains one rule from `dry`: duplicated rule-enforcing logic
+  (auth, validation, billing, limits) is HIGH, because the copies drift. Other
+  duplication is MEDIUM/LOW and noted, not fixed.
+
+## Build order
+
+Each step is a commit with `VERIFY: PASS`:
+1. Test harness `workflow()` mock; `advisor` and `checker` to `core/agents/`. The 40 QA tests pass unchanged.
+2. Dev agent files.
+3. `dev-build.js` and its routing tests, starting with the QA handoff contract.
+4. `/dev` skill; this README moves from design to as-built; credits.
+
+## Credits
+
+Several implementer and planner rules are adapted from
+[gstack](https://github.com/garrytan/gstack) (MIT, © Garry Tan): the
+implementing-agent rules and acceptance-criteria form (`spec`), the test value
+bar and regression proof (`test-audit`), the complexity gate (`plan-eng-review`),
+and the stop rules (`investigate`).
