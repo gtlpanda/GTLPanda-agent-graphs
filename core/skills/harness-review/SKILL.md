@@ -29,6 +29,15 @@ the full file for anything the diff touches when a hunk is not self-explanatory.
 - State mutations in shared objects, race conditions on concurrent paths.
 - Tests that cannot fail (assert on the wrong thing, mock the unit under test).
 
+**Duplicated rules**
+- The diff copies logic that enforces a rule (authorization, validation,
+  billing, limits, retries) instead of calling the existing code that does it.
+  The test: if the rule changes, must both copies change? If yes, they will
+  drift. Cite both locations. HIGH when the copies already differ or one sits
+  on a security or money path; MEDIUM otherwise.
+- Repetition that is not a shared rule (similar-looking code with independent
+  reasons to change) is not a finding.
+
 **Security**
 - Secrets, tokens, or credentials in code, config, logs, or test fixtures.
 - Injection: shell, SQL, path traversal, template, SSRF on user-controlled input.
