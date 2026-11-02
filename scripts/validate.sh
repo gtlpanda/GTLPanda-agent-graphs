@@ -130,6 +130,25 @@ if command -v shellcheck >/dev/null 2>&1; then
   if shellcheck -S warning install.sh scripts/*.sh core/skills/*/*.sh graphs/*/skills/*/*.sh .githooks/*; then ok "shellcheck"; else bad "shellcheck"; fi
 else echo "note  shellcheck not installed; skipped"; fi
 
+# ---- Orchestrator rules (prose the routing tests cannot reach) ----
+# Each rule came from a real run; dropping one silently would bring back the failure it fixed.
+rule() { # rule <file> <fixed string> <what it guards>
+  if grep -qF -- "$2" "$1"; then ok "rule in $1: $3"; else bad "$1 lost a rule: $3 (expected text: $2)"; fi
+}
+rule loop.md 'blockedOn' 'notify once per human block, tracked in the ledger'
+rule loop.md 'being blocked is not idle' 'a block never ends the loop'
+rule loop.md 'idleRuns' 'idle iterations are counted in the ledger'
+rule loop.md 'When it reaches 2' 'a truly idle loop ends itself'
+rule loop.md 'Stopping an iteration never skips steps 5 to 7' 'an escalation still notifies'
+rule loop.md 'ScheduleWakeup with `stop: true`' 'how an idle loop ends'
+rule graphs/dev/skills/dev/SKILL.md 'run-script.mjs' 'an approved plan runs via a generated script, never retyped'
+rule graphs/dev/skills/dev/SKILL.md 'keptChanges' 'advisor-kept changes are reported and in the commit'
+rule graphs/dev/skills/dev/SKILL.md 'blockedChanges' 'blocked unplanned changes are put to the human'
+rule graphs/release/skills/release-pr/SKILL.md '## Notifications' 'release stops reach a user who walked away'
+rule graphs/dev/agents/implementer.md 'one table-driven test per function' 'lean tests: data variations share one test'
+rule graphs/dev/agents/implementer.md 'assert the rule the text must keep' 'copy tests assert rules, not whole sentences'
+rule graphs/dev/skills/dev/SKILL.md 'Test ratio:' '/dev reports the test-to-code ratio every build'
+
 # ---- Required files ----
 for f in install.sh README.md CLAUDE.md settings.json loop.md .gitignore .githooks/pre-commit; do
   [ -f "$f" ] && ok "present $f" || bad "missing $f"

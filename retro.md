@@ -257,3 +257,60 @@ round-3 fixes by hand, which is what the final revision now does.
 
 **Stats.** TEST-WORKFLOW 116/0 (7 new dev routing tests); 7 mutations, each caught; 1 HIGH review
 finding fixed.
+
+## 8. Hardening from the first real runs (2026-11-02)
+
+**What changed.**
+- `/dev` runs an approved plan from a generated script instead of inline args:
+  `graphs/dev/skills/dev/run-script.mjs` writes `plan.json` into a copy of `dev-build.js` by replacing
+  its one `const INJECTED_PLAN = null` line, proves the plan round-trips and that exactly one line
+  changed, and `/dev` runs the copy with `scriptPath`. A plan given both ways escalates.
+- Acceptance triage: unplanned behavior changes from the first audit go to the advisor before any
+  rework. `keep` (must cite `goal` or a real acceptance id) is added to `plan.behavior_changes` and
+  reported as decided without the human; `remove` goes to the rework; any `blocking` escalates with
+  `blockedChanges`. Code overrules a bad triage: no decision, two decisions, or an uncited keep is blocking.
+- `loop.md`: a block on a human sends one push notification per distinct block (`blockedOn` in the
+  ledger) and never ends the loop; two truly idle iterations in a row end it.
+- `/dev` notifies on `done` and states expected durations at launch; `/release-pr` notifies on every
+  stop that waits on the user.
+- Leaner tests: the implementer puts data-only variations in one table-driven test per function and
+  asserts user-facing text by its rule, not the whole sentence; `/dev` reports a test ratio per build.
+
+**Why.** Evidence from Terracotta tc-wt-p2 (sessions 9f9f0138, fba91340; run records in
+`~/.claude/projects/<proj>/<session>/workflows/wf_*.json`):
+- 4 of 7 dev-build runs used hand-patched script copies: the plan is 52 KB and workflow scripts have
+  no filesystem access, so the orchestrator could only retype it or patch line 143 by hand.
+- Acceptance escalated on both real builds after one rework (3, then 1 unplanned changes); the human
+  kept the 4b change. The 4a changes were not benign (scan poll spanning pages, a stale flag), which is
+  why a keep must cite what it serves and anything touching cost, contracts, or data is blocking.
+- 27 hourly "nothing actionable" wakeups were not idle: each was blocked on the user's merge, with a
+  watcher armed. Nothing told the user for ~40 hours. My first proposal (stop after 2 idle wakeups)
+  would have killed that loop; corrected before building (lessons.md, "A status line is not a diagnosis").
+- Entry 7's cap behavior now has live evidence: run wf_ea206ca0 got 1 blocking + 5 non-blocking issues
+  at the cap and escalated as designed.
+
+**Test volume.** Measured on Terracotta, frontend lines only: the two `/dev` builds carry 2.4x and
+2.8x test lines per code line; comparable non-`/dev` feature PRs 0.6x-1.6x (median ~1.25). No
+duplicated test bodies, and the two follow-up fixes rewrote 0 existing test lines, so no maintenance
+cost is shown yet. The bulk is exact-wording tests (94 of 122 cases in `assessmentsVoice.test.js`
+assert copy). Untested hypothesis for the cause: 26 acceptance criteria plus scout edge cases, each
+given its own test. Re-measure after 3 builds with the new rule.
+
+**Review.** The reviewer found 1 MEDIUM and 2 LOW; all fixed with tests:
+- MEDIUM: kept changes vanished from the report after an escalate and `--resume`. They now live in
+  `plan.kept_changes`, which `/dev` saves and resume passes back; `ledger.keptChanges` is that array.
+- LOW: `loop.md` "stop the iteration" on escalate could skip the new notify step, and the idle count
+  had no storage. Now stopping never skips steps 5 to 7, and `idleRuns` lives in the ledger.
+- LOW: a `__proto__` key in plan.json would change the plan as an object literal. The plan is now
+  embedded as `JSON.parse("<string>")`, which reads it exactly as plan.json is read.
+- Found while testing the MEDIUM fix: the workflow mutated the caller's `args.plan`, which leaked
+  kept changes between tests. It now works on a copy.
+
+**Untested live.** Triage, the run script under the real Workflow tool (including a `scriptPath`
+inside `.git/`), and every `loop.md` / notification rule. The prose rules are only checked for
+presence by `validate.sh`. Release graph: still never run live; routing merges through it waits on one
+live run.
+
+**Stats.** TEST-WORKFLOW 129/0, up from 116: 7 run-script tests, 6 triage tests, and the old
+unplanned-change test rewritten for triage; 11 mutations, each caught; validate.sh gains 13 rule
+checks, one bite-tested by deleting the idle rule. VERIFY: PASS.
