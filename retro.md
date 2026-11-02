@@ -330,7 +330,9 @@ checks, one bite-tested by deleting the idle rule. VERIFY: PASS.
 
 **What changed.** One rule in `core/agents/advisor.md` triage: when a change leaves state behind (a
 flag, timer, poll, subscription, cache entry), follow it into the next run, mount, or navigation;
-state left stale for the next one is a defect (`remove`). `validate.sh` checks the rule is present.
+state left stale for the next one is a defect: `remove` when it lives only in memory, `blocking`
+when it is persisted or shared beyond the session. `validate.sh` checks the rule is present. The
+persisted/shared clause came from the PR review, after the A/B below; the A/B case is in-memory.
 
 **Why.** First live test of entry 8's triage, by replay: the exact prompt `dev-build.js` builds,
 from each build's pre-decision plan and the auditor's real findings, sent to the real advisor
@@ -347,15 +349,15 @@ in the plan, and for 4a #2 (stale `detailsOpen`) also fixed the code.
 Routing on the old-rule decisions: both builds `done`, nothing blocked, citations valid. The old
 rule saw the next-run effect and kept it anyway; the new rule removes it.
 
-**Replay contamination, twice.** The merged code held two hand edits made 4 minutes after the 4a
-escalation: the store fix (`assessmentRun.js:220`) and a test whose names state the answer. The
-first replay "refuted" the defect by citing the fix; the second reverted the fix but not the test,
-and the advisor cited the test. The A/B above ran on a snapshot with both reverted, checked
+**Replay contamination, three runs.** The merged code held two hand edits made 4 minutes after the
+4a escalation: the store fix (`assessmentRun.js:220`) and a test whose names state the answer. The
+first 4a replay "refuted" the defect by citing the fix; the next two (old rule, then new rule)
+reverted the fix but not the test, and the new-rule run cited the test. The A/B above ran on a snapshot with both reverted, checked
 against every Edit/Write in the session from escalation to merge (lessons.md).
 
 **Untested.** One sample per arm, and outputs vary run to run: the rule can flip this call, not
 proven that it always will. Prompts reached the agents as a file, and the code as a non-git
 snapshot; the runtime's StructuredOutput enforcement was not exercised.
 
-**Stats.** 6 advisor runs (2 contaminated, discarded as evidence), ~337k agent tokens, 1.4 to 4.4
-minutes each. VERIFY: PASS.
+**Stats.** 6 advisor runs: the 3 in the table, plus 3 contaminated 4a replays discarded as evidence.
+~337k agent tokens (from the run notifications), 1.4 to 4.4 minutes each. VERIFY: PASS.
