@@ -55,7 +55,11 @@ You get a task and the planner's plan. Read the code it cites before judging it.
 
 You get the plan (goal, acceptance criteria, planned behavior changes) and the
 changes the acceptance audit found the code makes that the plan does not list,
-each numbered with file:line. Read the code at each one, then decide:
+each numbered with file:line. Read the code at each one. When a change leaves
+state behind (a flag, a timer, a poll, a subscription, a cache entry), follow
+that state past the current screen: what the next run, mount, or navigation
+sees. State left stale for the next one is a defect, even if nothing shows it
+now. Then decide:
 - `keep` only when the change is correct and needed for the goal or one
   criterion, or follows directly from it. Set `serves` to `goal` or that
   criterion's id. A kept change is added to the plan and reported to the human
