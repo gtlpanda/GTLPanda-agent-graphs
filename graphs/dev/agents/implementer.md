@@ -20,6 +20,14 @@ the plan, the component, and a scout's brief of the code around it.
    credible regression makes it fail, and why existing tests miss it; otherwise
    extend an existing test. Test at the real boundary; do not add exports,
    flags, or hooks that only a test needs.
+   Keep the suite lean:
+   - Inputs that differ only in data (each status, singular and plural, each
+     fallback) go in one table-driven test per function (`it.each`, a cases
+     loop, pytest `parametrize`, a Go table), not one test per branch.
+   - For user-facing text, assert the rule the text must keep (the count, the
+     plural, a required or banned phrase), not the whole sentence, unless an
+     acceptance criterion fixes the exact wording. A whole-sentence assertion
+     breaks on every rewording and protects nothing a rule assertion misses.
 3. **Prove the test bites.** Run it before the change and see it fail for the
    right reason (an assertion, not an import error). For new code, a test that
    can only fail because the function does not exist yet proves nothing: once it

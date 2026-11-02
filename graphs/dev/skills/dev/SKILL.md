@@ -87,7 +87,12 @@ plan). No code exists yet, so this is still up front.
 
 Stop and report; do not ask. If a PushNotification tool is available, send
 the one-line `reason` so a user who walked away learns the run stopped. Report `reason`, `completed`, the last VERIFY block if any, and any QA
-`unconfirmed` findings. Leave the uncommitted changes in place and list them
+`unconfirmed` findings. List every `ledger.keptChanges` entry under "decided
+without you"; they stay in the saved plan and are reported again at `done`.
+When `ledger.blockedChanges` is not empty, list each
+change with its file:line and the advisor's reason: these are the decisions the
+human must make. To keep one, add it to `behavior_changes` in `$D/plan.json`;
+to drop one, say so; then `/dev --resume`. Leave the uncommitted changes in place and list them
 (`git status --short`). Say how to continue: fix by hand, or `/dev --resume`
 once the blocker is cleared.
 
@@ -108,7 +113,17 @@ once the blocker is cleared.
    - QA fixes (`ledger.qa.fixed`) go in a final `QA fixes` commit when their
      files do not overlap the component commits; otherwise they ride in the
      single commit.
+   Every entry in `ledger.keptChanges` goes in the commit body under
+   "Kept by the advisor (not in the approved plan)", with its file:line,
+   `serves`, and reason.
 4. Do not push unless the user asks; offer to.
-5. Report in at most five lines: what was built, criteria met (n/n), QA result
+5. If a PushNotification tool is available, send one line: done, criteria met
+   (n/n), and the commit count.
+6. Test ratio, measured the same way every time so builds compare:
+   `git diff --numstat "$BASE"...HEAD | awk '$1 != "-" && $3 !~ /\.md$|lock|\.json$|\.snap$/ { if ($3 ~ /(^|\/)(tests?|__tests__)\/|[._](test|spec)\.[a-z]+$|_test\.go$/) t += $1; else c += $1 } END { printf "Test ratio: tests +%d / code +%d lines (%.1fx)\n", t, c, c ? t/c : 0 }'`.
+   Quote its line in the report. For reference, the user's comparable feature
+   PRs ran 0.6x-1.6x; above 2x, name the test files that carry most of it.
+7. Report in at most five lines: what was built, criteria met (n/n), QA result
    with its fix rounds, the commits, and anything in `noted` worth a follow-up.
-   Then list the plan's `risks` and any choices you made under "When to ask".
+   Then list the plan's `risks`, every `keptChanges` entry under "decided
+   without you", and any choices you made under "When to ask".

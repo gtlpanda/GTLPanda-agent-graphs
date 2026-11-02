@@ -22,7 +22,10 @@ planner --> advisor(plan gate) --revise (max 2)--> planner
 build:   scouts (all components, in parallel, read-only)
          for each component in build order:
            implementer --> checker --FAIL--> implementer (one retry, gets the failure) --> checker --FAIL--> escalate (resumable)
-accept:  acceptance-auditor --UNMET--> implementer (one rework round) --> checker --> acceptance-auditor --UNMET--> escalate
+accept:  acceptance-auditor --unplanned change--> advisor (triage, once) --any blocking--> escalate (blockedChanges)
+                                                                         --keep--> into plan.behavior_changes (keptChanges)
+                                                                         --remove--> rework
+         acceptance-auditor --UNMET or remove--> implementer (one rework round) --> checker --> acceptance-auditor --still--> escalate
 handoff: workflow('harness-repair', {repo, base, maxFixRounds, knownStuckSigs})   check, fix, review, QA, advisor; its ledger is returned as qa
 ```
 
@@ -36,7 +39,7 @@ build is repaired by the QA graph it calls.
 | Role               | Who                            | Model  | Effort | Called                                  |
 |--------------------|--------------------------------|--------|--------|-----------------------------------------|
 | Orchestrator       | the `/dev` session             | opus   | high   | once per task; branches, commits        |
-| Advisor            | `core/agents/advisor.md`       | fable  | high   | plan gate (and QA's decision points)    |
+| Advisor            | `core/agents/advisor.md`       | fable  | high   | plan gate, acceptance triage (and QA's decision points) |
 | Planner            | `agents/planner.md`            | sonnet | high   | until approved (max 3, +1 final if all issues are non-blocking) |
 | Scout              | `agents/scout.md`              | sonnet | high   | once per component, in parallel         |
 | Implementer        | `agents/implementer.md`        | sonnet | high   | once per component, plus retries        |
@@ -77,9 +80,16 @@ the checker's VERIFY line, never the implementer's own run.
 evidence is a passing test at `file:line` that asserts the criterion; plus
 `behavior_changes_missing[]` (a change the code makes that the plan never listed).
 
+**triage** (advisor, on the first audit's unplanned changes): per change `{n, decision: keep|remove|blocking, serves, reason}`.
+Code has the last word: no decision, two decisions, or a `keep` whose `serves` is neither `goal` nor a real
+acceptance id counts as blocking.
+
 **ledger:** `status` (`plan-ready` | `needs-human` | `escalate` | `done`),
 `reason`, `plan`, `planApproved` (approved for the build; `/dev` saves it for `--resume`),
 `planSettled` (the final revision closed non-blocking issues ungated), `completed[]`, per-component results, `acceptance`, `touched`,
+`triage`, `keptChanges[]` (the same array as `plan.kept_changes`, so it survives `--resume`; reported and
+put in the commit body), `blockedChanges[]` (for the human). The workflow works on a copy of `args.plan`
+and never changes the caller's object.
 `qa` (the QA child's ledger), and the child's `stuckSig`, so `/loop`'s
 cross-iteration stuck detection keeps working for dev-started QA runs.
 
@@ -92,6 +102,10 @@ cross-iteration stuck detection keeps working for dev-started QA runs.
 - Read before writing: every function it calls, by its signature, not from memory.
 - Minimal scope: anything outside the component goes in `unchecked`, not in the diff.
 - Never commit. Never loosen a test, timeout, or threshold to get green.
+- Lean suite: data-only variations share one table-driven test per function; user-facing text is
+  asserted by its rule (count, plural, required or banned phrase), not the whole sentence. `/dev`
+  reports `Test ratio: tests +N / code +M lines` on every build (the user's comparable feature PRs:
+  0.6x-1.6x; the first two `/dev` builds: 2.4x and 2.8x).
 
 ## `/dev` (orchestrator skill)
 
