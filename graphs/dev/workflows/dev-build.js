@@ -584,7 +584,9 @@ for (let round = 1; round <= 2; round += 1) {
   if (!unmet.length && !unplanned.length) break
   if (round === 2) {
     const gaps = [unmet.length ? `unmet ${unmet.map(a => a.id).join(', ')}` : '', unplanned.length ? `${unplanned.length} unplanned behavior change(s)` : ''].filter(Boolean).join('; ')
-    return finish('escalate', `acceptance still failing after one rework: ${gaps}`)
+    // No second triage: what the rework left behind goes to the human, listed.
+    const left = unplanned.map(c => ({ ...c, reason: 'still in the code after the acceptance rework' }))
+    return finish('escalate', `acceptance still failing after one rework: ${gaps}`, { blockedChanges: left })
   }
   let removes = []
   if (unplanned.length) {
@@ -594,12 +596,14 @@ for (let round = 1; round <= 2; round += 1) {
     ledger.triage = triage
     const sorted = sortTriage(unplanned, triage.decisions, plan)
     ledger.history.push({ node: 'triage', keep: sorted.keep.length, remove: sorted.remove.length, blocking: sorted.blocking.length })
-    if (sorted.blocking.length) {
-      return finish('escalate', `${sorted.blocking.length} unplanned behavior change(s) need a human decision`, { blockedChanges: sorted.blocking })
-    }
+    // Keeps go into the plan before any exit, so a blocking escalation still
+    // saves them and a resume does not triage them again.
     for (const k of sorted.keep) plan.behavior_changes.push(`${k.change} (kept by the advisor; serves ${k.serves}: ${k.reason}) [${k.file}:${k.line}]`)
     ledger.keptChanges.push(...sorted.keep)
     if (sorted.keep.length) log(`advisor kept ${sorted.keep.length} unplanned change(s); they are now in the plan and reported as decided without you`)
+    if (sorted.blocking.length) {
+      return finish('escalate', `${sorted.blocking.length} unplanned behavior change(s) need a human decision`, { blockedChanges: sorted.blocking })
+    }
     removes = sorted.remove
   }
   if (!unmet.length && !removes.length) break
