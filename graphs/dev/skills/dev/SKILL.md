@@ -103,7 +103,9 @@ without you"; they stay in the saved plan and are reported again at `done`.
 When `ledger.blockedChanges` is not empty, list each
 change with its file:line and the advisor's reason: these are the decisions the
 human must make. To keep one, add it to `behavior_changes` in `$D/plan.json`;
-to drop one, say so; then `/dev --resume`. Leave the uncommitted changes in place and list them
+to drop one, revert that change in the code yourself (with the user's
+go-ahead), run `/verify`, and confirm it passes. Then `/dev --resume`: the
+re-audit no longer sees a dropped change, and sees a kept one as planned. Leave the uncommitted changes in place and list them
 (`git status --short`). Say how to continue: fix by hand, or `/dev --resume`
 once the blocker is cleared.
 
@@ -131,7 +133,7 @@ once the blocker is cleared.
 5. If a PushNotification tool is available, send one line: done, criteria met
    (n/n), and the commit count.
 6. Test ratio, measured the same way every time so builds compare:
-   `git diff --numstat "$BASE"...HEAD | awk '$1 != "-" && $3 !~ /\.md$|lock|\.json$|\.snap$/ { if ($3 ~ /(^|\/)(tests?|__tests__)\/|[._](test|spec)\.[a-z]+$|_test\.go$/) t += $1; else c += $1 } END { printf "Test ratio: tests +%d / code +%d lines (%.1fx)\n", t, c, c ? t/c : 0 }'`.
+   `git diff --numstat "$BASE"...HEAD | awk '$1 != "-" && $3 !~ /\.md$|\.lock$|(^|\/)pnpm-lock\.yaml$|\.json$|\.snap$/ { if ($3 ~ /(^|\/)(tests?|__tests__)\/|[._](test|spec)\.[a-z]+$|_test\.go$|(^|\/)test_[^\/]*\.py$/) t += $1; else c += $1 } END { printf "Test ratio: tests +%d / code +%d lines (%.1fx)\n", t, c, c ? t/c : 0 }'`.
    Quote its line in the report. For reference, the user's comparable feature
    PRs ran 0.6x-1.6x; above 2x, name the test files that carry most of it.
 7. Report in at most five lines: what was built, criteria met (n/n), QA result

@@ -1,8 +1,9 @@
 # Default /loop instructions
 
 Run when `/loop` is invoked with no prompt. Each iteration, in order. When a
-step needs a human decision, skip to steps 5 and 6: say what you need and why,
-and notify. Stopping an iteration never skips steps 5 to 7.
+step needs a human decision, skip to steps 5 to 7: say what you need and why,
+notify, and count the iteration as not idle.
+Stopping an iteration never skips steps 5 to 7.
 
 1. **Unfinished work.** Finish anything still in progress from this conversation
    before starting new work.
@@ -33,7 +34,7 @@ and notify. Stopping an iteration never skips steps 5 to 7.
       `git status --short` and confirm the changed files match `touched`. If
       `touched` is non-empty, commit exactly those files in one commit whose
       message lists the result's `fixed` list; push only if the branch has a PR.
-   5. On `escalate`: stop the iteration's work, then run steps 5 and 6. Report
+   5. On `escalate`: stop the iteration's work, then run steps 5 to 7. Report
       `reason`, `lastVerify`, any `unconfirmed` findings, and what the human must
       decide; that decision is the action step 6 notifies about. Leave the
       fixer's uncommitted changes in place and list them.

@@ -306,11 +306,22 @@ given its own test. Re-measure after 3 builds with the new rule.
 - Found while testing the MEDIUM fix: the workflow mutated the caller's `args.plan`, which leaked
   kept changes between tests. It now works on a copy.
 
+A second review of PR #2 found 1 MEDIUM and 4 LOW; all fixed with tests before merge:
+- MEDIUM: the first `loop.md` fix was incomplete. The header and step 3.5 still said "steps 5 and 6",
+  so an escalated iteration skipped step 7 and never reset `idleRuns`. This entry claimed the fix
+  before that was true; now every place says 5 to 7, and a blocked iteration counts as not idle.
+- LOW: a blocking triage exit dropped the keeps from the same triage; they now go into the plan first.
+- LOW: the round-2 acceptance exit gave only a count; it now lists the changes in `blockedChanges`.
+- LOW: "to drop one, say so" had no mechanism; the orchestrator now reverts the change, runs
+  `/verify`, then resumes.
+- LOW: the test-ratio command dropped files like `clock.ts` (unanchored `lock`) and counted pytest's
+  `test_*.py` as code; both fixed, and it still reads 2.8x on Terracotta PR 4b.
+
 **Untested live.** Triage, the run script under the real Workflow tool (including a `scriptPath`
 inside `.git/`), and every `loop.md` / notification rule. The prose rules are only checked for
 presence by `validate.sh`. Release graph: still never run live; routing merges through it waits on one
 live run.
 
 **Stats.** TEST-WORKFLOW 129/0, up from 116: 7 run-script tests, 6 triage tests, and the old
-unplanned-change test rewritten for triage; 11 mutations, each caught; validate.sh gains 13 rule
+unplanned-change test rewritten for triage; 13 mutations, each caught; validate.sh gains 13 rule
 checks, one bite-tested by deleting the idle rule. VERIFY: PASS.

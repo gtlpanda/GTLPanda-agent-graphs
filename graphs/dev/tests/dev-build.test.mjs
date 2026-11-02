@@ -421,6 +421,8 @@ await test('any blocking decision -> escalate with the blocked changes, no rewor
   assert.match(result.reason, /1 unplanned behavior change\(s\) need a human decision/)
   assert.deepEqual(result.blockedChanges.map(b => b.change), ['scan poll spans pages'])
   assert.equal(calls.filter(c => c.agentType === 'implementer').length, 2)
+  assert.deepEqual(result.keptChanges.map(k => k.change), ['409 marks the row'], 'keeps survive a blocking exit')
+  assert.ok(result.plan.behavior_changes.some(b => b.startsWith('409 marks the row (kept by the advisor')), 'and are in the saved plan')
 })
 await test('code overrules a bad triage: no decision, two decisions, or a keep citing nothing real -> blocking', async () => {
   const twice = decide(['remove', ''])
@@ -466,6 +468,7 @@ await test('a new unplanned change on the re-audit escalates; triage runs only o
   assert.equal(result.status, 'escalate')
   assert.match(result.reason, /acceptance still failing after one rework: 1 unplanned/)
   assert.equal(calls.filter(c => c.label === 'triage: unplanned changes').length, 1)
+  assert.deepEqual(result.blockedChanges.map(b => [b.change, b.file, b.reason]), [['b', 'src/a.js', 'still in the code after the acceptance rework']])
 })
 await test('still failing acceptance after the rework -> escalate naming the gaps, no QA', async () => {
   const unmet2 = { criteria: [{ id: 'AC1', status: 'MET', evidence: 'e' }, { id: 'AC2', status: 'UNMET', evidence: 'x' }], behavior_changes_missing: [] }
