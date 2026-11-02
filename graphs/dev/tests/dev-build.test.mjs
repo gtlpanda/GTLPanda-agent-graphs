@@ -267,7 +267,7 @@ await test('a structurally broken plan goes back to the planner without spending
   assert.equal(types(calls), 'planner,planner,advisor')
 })
 await test('a malformed plan in args -> escalate before any agent runs', async () => {
-  for (const bad of [PLAN({ acceptance: [] }), PLAN({ components: [component('C1', [])] }), PLAN({ components: [component('C1', ['a']), component('C1', ['b'])] })]) {
+  for (const bad of [PLAN({ acceptance: [] }), PLAN({ components: [component('C1', [])] }), PLAN({ components: [component('C1', ['a']), component('C1', ['b'])] }), PLAN({ behavior_changes: 'none' }), PLAN({ kept_changes: 'x' })]) {
     const { result, calls } = await run(fn, {}, { repo: '/tmp/fixture', plan: bad, planApproved: true })
     assert.equal(result.status, 'escalate')
     assert.match(result.reason, /args\.plan is malformed/)
@@ -358,14 +358,112 @@ await test('a criterion the auditor did not report on counts as unmet', async ()
   }, APPROVED)
   assert.equal(calls.filter(c => c.agentType === 'acceptance-auditor').length, 2)
 })
-await test('an unplanned behavior change triggers the rework too', async () => {
-  const { result } = await run(fn, {
+const change = (text, line = 4) => ({ change: text, file: 'src/a.js', line })
+const withChanges = (...cs) => ({ ...met(), behavior_changes_missing: cs })
+const decide = (...ds) => ({ decisions: ds.map(([decision, serves], i) => ({ n: i + 1, decision, serves, reason: `because ${i + 1}` })) })
+await test('an unplanned change the advisor says to remove goes to the rework, with its reason', async () => {
+  const { result, calls } = await run(fn, {
     ...BUILD_OK(),
-    implementer: [built(), built(['src/b.js']), p => { assert.match(p, /Behavior changes the plan does not list/); assert.match(p, /GET now returns 410/); return built() }],
+    advisor: [decide(['remove', ''])],
+    implementer: [built(), built(['src/b.js']), p => { assert.match(p, /advisor decided must go/); assert.match(p, /GET now returns 410/); assert.match(p, /because 1/); return built() }],
     checker: [pass_(), pass_(), pass_()],
-    'acceptance-auditor': [{ ...met(), behavior_changes_missing: [{ change: 'GET now returns 410', file: 'src/a.js', line: 4 }] }, met()],
+    'acceptance-auditor': [withChanges(change('GET now returns 410')), met()],
   }, APPROVED)
   assert.equal(result.status, 'done')
+  assert.ok(types(calls).endsWith(`acceptance-auditor,advisor,implementer,checker,acceptance-auditor,${QA}`))
+  assert.deepEqual(result.keptChanges, [])
+})
+await test('every unplanned change kept: no rework, no second audit; the plan, ledger, and log record them', async () => {
+  const { result, calls, logs } = await run(fn, {
+    ...BUILD_OK(),
+    advisor: [p => {
+      assert.match(p, /Triaging unplanned behavior changes/)
+      assert.match(p, /"n": 1,\s+"change": "409 marks the row"/)
+      assert.match(p, /"file": "src\/a.js"/)
+      return decide(['keep', 'AC2'], ['keep', 'goal'])
+    }],
+    'acceptance-auditor': [withChanges(change('409 marks the row'), change('poll stops on unmount', 9))],
+  }, APPROVED)
+  assert.equal(result.status, 'done')
+  assert.ok(types(calls).endsWith(`acceptance-auditor,advisor,${QA}`))
+  const triage = calls.find(c => c.label === 'triage: unplanned changes')
+  assert.deepEqual([triage.phase, triage.model, triage.effort], ['Triage', agentField('advisor', 'model'), 'high'])
+  assert.deepEqual(result.keptChanges.map(k => [k.change, k.serves]), [['409 marks the row', 'AC2'], ['poll stops on unmount', 'goal']])
+  assert.equal(result.plan.behavior_changes.length, 3)
+  assert.match(result.plan.behavior_changes[1], /^409 marks the row \(kept by the advisor; serves AC2: because 1\) \[src\/a.js:4\]$/)
+  assert.ok(logs.some(l => /advisor kept 2 unplanned change\(s\)/.test(l)))
+  assert.deepEqual(APPROVED.plan, PLAN(), 'the caller\'s args.plan is never changed')
+})
+await test('keep and remove mixed: only the removes reach the rework, and the re-audit sees the keeps as planned', async () => {
+  const { result } = await run(fn, {
+    ...BUILD_OK(),
+    advisor: [decide(['keep', 'goal'], ['remove', ''])],
+    implementer: [built(), built(['src/b.js']), p => {
+      const gaps = p.slice(p.indexOf('advisor decided must go'))
+      assert.match(gaps, /stale flag/)
+      assert.doesNotMatch(gaps, /409 marks the row/, 'a kept change is never sent to be undone')
+      return built()
+    }],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [withChanges(change('409 marks the row'), change('stale flag', 7)), p => { assert.match(p, /409 marks the row \(kept by the advisor/); return met() }],
+  }, APPROVED)
+  assert.equal(result.status, 'done')
+})
+await test('any blocking decision -> escalate with the blocked changes, no rework, no QA', async () => {
+  const { result, calls } = await run(fn, {
+    ...BUILD_OK(), implementer: [built(), built(['src/b.js'])], [QA]: [],
+    advisor: [decide(['keep', 'goal'], ['blocking', ''])],
+    'acceptance-auditor': [withChanges(change('409 marks the row'), change('scan poll spans pages', 153))],
+  }, APPROVED)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /1 unplanned behavior change\(s\) need a human decision/)
+  assert.deepEqual(result.blockedChanges.map(b => b.change), ['scan poll spans pages'])
+  assert.equal(calls.filter(c => c.agentType === 'implementer').length, 2)
+})
+await test('code overrules a bad triage: no decision, two decisions, or a keep citing nothing real -> blocking', async () => {
+  const twice = decide(['remove', ''])
+  twice.decisions.push({ n: 1, decision: 'keep', serves: 'goal', reason: 'r' })
+  for (const [triage, why] of [
+    [{ decisions: [] }, /no decision/],
+    [twice, /conflicting decisions/],
+    [decide(['keep', 'AC9']), /kept without citing the goal or an acceptance id \(serves: "AC9"\)/],
+    [decide(['keep', '']), /kept without citing/],
+  ]) {
+    const { result } = await run(fn, {
+      ...BUILD_OK(), implementer: [built(), built(['src/b.js'])], [QA]: [],
+      advisor: [triage], 'acceptance-auditor': [withChanges(change('GET now returns 410'))],
+    }, APPROVED)
+    assert.equal(result.status, 'escalate')
+    assert.match(result.blockedChanges[0].reason, why)
+  }
+})
+await test('kept changes survive an escalation and a --resume: the saved plan carries them and done reports them', async () => {
+  const first = await run(fn, {
+    ...BUILD_OK(), [QA]: [],
+    advisor: [decide(['keep', 'goal'], ['remove', ''])],
+    implementer: [built(), built(['src/b.js']), built()],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [withChanges(change('409 marks the row'), change('stale flag', 7)), withChanges(change('stale flag', 7))],
+  }, APPROVED)
+  assert.equal(first.result.status, 'escalate')
+  assert.deepEqual(first.result.plan.kept_changes.map(k => k.change), ['409 marks the row'])
+  const saved = JSON.parse(JSON.stringify(first.result.plan))   // what /dev writes to plan.json
+  const resumed = await run(fn, { 'acceptance-auditor': [met()], [QA]: [QA_DONE] },
+    { repo: '/tmp/fixture', plan: saved, planApproved: true, completed: ['C1', 'C2'] })
+  assert.equal(resumed.result.status, 'done')
+  assert.deepEqual(resumed.result.keptChanges.map(k => [k.change, k.serves]), [['409 marks the row', 'goal']])
+})
+await test('a new unplanned change on the re-audit escalates; triage runs only once', async () => {
+  const { result, calls } = await run(fn, {
+    ...BUILD_OK(), [QA]: [],
+    advisor: [decide(['remove', ''])],
+    implementer: [built(), built(['src/b.js']), built()],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [withChanges(change('a')), withChanges(change('b'))],
+  }, APPROVED)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /acceptance still failing after one rework: 1 unplanned/)
+  assert.equal(calls.filter(c => c.label === 'triage: unplanned changes').length, 1)
 })
 await test('still failing acceptance after the rework -> escalate naming the gaps, no QA', async () => {
   const unmet2 = { criteria: [{ id: 'AC1', status: 'MET', evidence: 'e' }, { id: 'AC2', status: 'UNMET', evidence: 'x' }], behavior_changes_missing: [] }
@@ -395,6 +493,7 @@ await test('a node returning null or throwing -> escalate naming it, never a cra
     [{ scout: [brief(), brief()], implementer: [null] }, APPROVED, 'implementer'],
     [{ scout: [brief(), brief()], implementer: [built()], checker: [{ throws: "agent type 'checker' not found" }] }, APPROVED, "checker failed: agent type 'checker' not found"],
     [{ ...BUILD_OK(), 'acceptance-auditor': [null], [QA]: [] }, APPROVED, 'acceptance-auditor'],
+    [{ ...BUILD_OK(), advisor: [null], 'acceptance-auditor': [{ ...met(), behavior_changes_missing: [{ change: 'c', file: 'f', line: 1 }] }], [QA]: [] }, APPROVED, 'advisor returned no result on the unplanned behavior changes'],
   ]) {
     const { result } = await run(fn, script, a)
     assert.equal(result.status, 'escalate', who)

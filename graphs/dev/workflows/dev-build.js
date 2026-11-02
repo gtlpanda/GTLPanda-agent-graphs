@@ -9,6 +9,7 @@ export const meta = {
     { title: 'Build', detail: 'implementer builds each component tests-first; one retry on a failed check', model: 'sonnet' },
     { title: 'Check', detail: 'checker runs verify.sh; the gate reads its VERIFY line', model: 'haiku' },
     { title: 'Accept', detail: 'acceptance-auditor maps every criterion to a passing test', model: 'sonnet' },
+    { title: 'Triage', detail: 'advisor decides keep, remove, or blocking for each unplanned behavior change', model: 'fable' },
     { title: 'QA', detail: 'the harness-repair graph, as a child workflow' },
   ],
 }
@@ -22,7 +23,10 @@ export const meta = {
 //                             --approve--> plan-ready (approval: human) | build (approval: advisor)
 //   args.plan + planApproved --> build (no planner, no gate)
 //   build: scouts in parallel; per component in order: implementer --> check --FAIL--> implementer(retry) --> check --FAIL--> escalate
-//   accept: acceptance-auditor --UNMET or unplanned change--> implementer(rework) --> check --> acceptance-auditor --still--> escalate
+//   accept: acceptance-auditor --unplanned change--> advisor(triage) --any blocking--> escalate
+//                                                                    --keep--> added to plan.behavior_changes, reported
+//                                                                    --remove--> rework
+//           acceptance-auditor --UNMET or remove--> implementer(rework) --> check --> acceptance-auditor --still--> escalate
 //   handoff: workflow('harness-repair') --> its status becomes ours
 //
 // Fix rounds, stuck signatures, and advisor-unstick live only in the QA graph;
@@ -39,6 +43,7 @@ const NODES = {
   build:  { agentType: 'implementer',        model: 'sonnet', effort: 'high', phase: 'Build' },
   check:  { agentType: 'checker',            model: 'haiku',  effort: 'high', phase: 'Check' },
   accept: { agentType: 'acceptance-auditor', model: 'sonnet', effort: 'high', phase: 'Accept' },
+  triage: { agentType: 'advisor',            model: 'fable',  effort: 'high', phase: 'Triage' },
 }
 const MAX_PLAN_ROUNDS = 3
 const MAX_PLAN_FILES = 8
@@ -138,6 +143,20 @@ const ACCEPT_SCHEMA = {
   },
   required: ['criteria', 'behavior_changes_missing'],
 }
+const TRIAGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    decisions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { n: { type: 'integer' }, decision: { type: 'string', enum: ['keep', 'remove', 'blocking'] }, serves: STR, reason: STR },
+        required: ['n', 'decision', 'serves', 'reason'],
+      },
+    },
+  },
+  required: ['decisions'],
+}
 
 // ---------- args ----------
 const A = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
@@ -145,7 +164,9 @@ const REPO = typeof A.repo === 'string' && A.repo.startsWith('/') ? A.repo : nul
 const TASK = typeof A.task === 'string' && A.task.trim() !== '' ? A.task.trim() : null
 const BASE = typeof A.base === 'string' && A.base !== '' ? A.base : null
 const APPROVAL = A.approval === 'advisor' ? 'advisor' : 'human'
-const GIVEN_PLAN = A.plan && typeof A.plan === 'object' && !Array.isArray(A.plan) ? A.plan : null
+// A copy: triage adds to the plan (behavior_changes, kept_changes), and the
+// caller's args must come back untouched.
+const GIVEN_PLAN = A.plan && typeof A.plan === 'object' && !Array.isArray(A.plan) ? JSON.parse(JSON.stringify(A.plan)) : null
 const PLAN_APPROVED = GIVEN_PLAN !== null && A.planApproved === true
 const COMPLETED = Array.isArray(A.completed) ? A.completed.filter(s => typeof s === 'string') : []
 
@@ -171,6 +192,9 @@ const ledger = {
   completed: [...COMPLETED],   // component ids built and checked; /dev passes them back to resume
   components: {},      // id -> { build, checks }
   acceptance: null,    // the acceptance-auditor's last result
+  triage: null,        // the advisor's triage of unplanned behavior changes, if one ran
+  keptChanges: [],     // unplanned changes the advisor kept (the plan's kept_changes, so a resume keeps them); reported as decided without the human
+  blockedChanges: [],  // unplanned changes that need a human decision (status escalate)
   touched: [],         // every file an implementer or the QA graph changed this run
   qa: null,            // the QA child's ledger
   stuckSig: null,      // the QA child's stuckSig, for /loop's knownStuckSigs
@@ -245,6 +269,8 @@ function planProblems(plan) {
   const comps = Array.isArray(plan.components) ? plan.components : []
   if (!acc.length) problems.push('no acceptance criteria')
   if (!comps.length) problems.push('no components')
+  if (!Array.isArray(plan.behavior_changes)) problems.push('behavior_changes must be a list (empty is fine)')
+  if (plan.kept_changes !== undefined && !Array.isArray(plan.kept_changes)) problems.push('kept_changes, when present, must be a list')
   const accIds = acc.map(a => a && a.id)
   if (new Set(accIds).size !== accIds.length || accIds.some(id => typeof id !== 'string' || !id)) problems.push('acceptance ids must be unique, non-empty strings')
   for (const a of acc) {
@@ -267,6 +293,27 @@ function planProblems(plan) {
 // on the advisor's explicit word.
 function onlyNonBlocking(issues) {
   return Array.isArray(issues) && issues.length > 0 && issues.every(i => i && i.blocking === false)
+}
+// Splits the advisor's triage into keep / remove / blocking. Code has the last
+// word: a change with no decision or two decisions, or a keep that cites
+// neither "goal" nor a real acceptance id, counts as blocking.
+function sortTriage(unplanned, decisions, plan) {
+  const out = { keep: [], remove: [], blocking: [] }
+  const ids = new Set(plan.acceptance.map(a => a.id))
+  const all = Array.isArray(decisions) ? decisions : []
+  unplanned.forEach((change, i) => {
+    const mine = all.filter(d => d && d.n === i + 1)
+    if (mine.length !== 1) {
+      out.blocking.push({ ...change, reason: mine.length ? 'the advisor gave conflicting decisions' : 'the advisor gave no decision' })
+      return
+    }
+    const d = mine[0]
+    if (d.decision === 'keep' && (d.serves === 'goal' || ids.has(d.serves))) out.keep.push({ ...change, serves: d.serves, reason: d.reason })
+    else if (d.decision === 'keep') out.blocking.push({ ...change, reason: `kept without citing the goal or an acceptance id (serves: ${JSON.stringify(d.serves)})` })
+    else if (d.decision === 'remove') out.remove.push({ ...change, reason: d.reason })
+    else out.blocking.push({ ...change, reason: d.reason })
+  })
+  return out
 }
 function planFiles(plan) {
   return [...new Set(plan.components.flatMap(c => c.files))]
@@ -359,7 +406,22 @@ ${json(plan.behavior_changes)}
 Audit the branch (committed and uncommitted changes) following your instructions. Return one entry per criterion id, MET only with a passing assertion at file:line as evidence. behavior_changes_missing: changes the code makes that the plan does not list (empty is a valid answer).`
 }
 
-function reworkPrompt(plan, unmet, unplanned) {
+function triagePrompt(plan, unplanned) {
+  return `${where}
+${baseNote}
+Goal: ${plan.goal}
+Acceptance criteria:
+${json(plan.acceptance)}
+Planned behavior changes:
+${json(plan.behavior_changes)}
+
+The acceptance audit found the code makes these behavior changes the plan does not list (n is each one's number):
+${json(unplanned.map((c, i) => ({ n: i + 1, ...c })))}
+
+Triage each one following your "Triaging unplanned behavior changes" instructions. decisions: exactly one per n. decision: keep, remove, or blocking. serves: "goal" or the acceptance id the change is needed for (required for keep, empty otherwise). reason: one sentence citing file:line.`
+}
+
+function reworkPrompt(plan, unmet, removes) {
   return `${where}
 Goal: ${plan.goal}
 Acceptance criteria:
@@ -369,8 +431,8 @@ Planned behavior changes: ${json(plan.behavior_changes)}
 The acceptance audit found gaps. Close them following your instructions (tests first, never commit):
 ${unmet.length ? `Unmet criteria (each needs a passing test that asserts it):
 ${json(unmet)}
-` : ''}${unplanned.length ? `Behavior changes the plan does not list. Remove each one unless an acceptance criterion requires it; if it is required, say so in unchecked:
-${json(unplanned)}
+` : ''}${removes.length ? `Behavior changes the plan does not list, which the advisor decided must go (reason given for each). Undo each one, or fix it if it is a defect, keeping every acceptance criterion passing:
+${json(removes)}
 ` : ''}
 Fill the structured output as for a component build.`
 }
@@ -462,6 +524,11 @@ if (!PLAN_APPROVED) {
 }
 ledger.plan = plan
 ledger.planApproved = true
+// Kept changes live in the plan, which /dev saves and --resume passes back, so
+// a resumed build still reports what the advisor kept in an earlier run.
+// ledger.keptChanges is the same array, not a copy.
+if (!Array.isArray(plan.kept_changes)) plan.kept_changes = []
+ledger.keptChanges = plan.kept_changes
 const files = planFiles(plan)
 if (files.length > MAX_PLAN_FILES) log(`plan touches ${files.length} files (over ${MAX_PLAN_FILES}); it was approved with that size`)
 
@@ -492,6 +559,10 @@ for (let i = 0; i < todo.length; i += 1) {
 }
 
 // ----- accept: every criterion proven by a passing assertion -----
+// Unplanned changes from the first audit go to the advisor before any rework:
+// in both real runs before triage, a rework told to remove them did not clear
+// them, and the human chose to keep at least one. The second audit has no triage: anything still
+// open escalates.
 for (let round = 1; round <= 2; round += 1) {
   phase('Accept')
   const acc = await runNode('accept', `accept #${round}`, acceptPrompt(plan), ACCEPT_SCHEMA)
@@ -509,8 +580,25 @@ for (let round = 1; round <= 2; round += 1) {
     const gaps = [unmet.length ? `unmet ${unmet.map(a => a.id).join(', ')}` : '', unplanned.length ? `${unplanned.length} unplanned behavior change(s)` : ''].filter(Boolean).join('; ')
     return finish('escalate', `acceptance still failing after one rework: ${gaps}`)
   }
+  let removes = []
+  if (unplanned.length) {
+    phase('Triage')
+    const triage = await runNode('triage', 'triage: unplanned changes', triagePrompt(plan, unplanned), TRIAGE_SCHEMA)
+    if (!triage) return finish('escalate', nodeFailure('triage', 'on the unplanned behavior changes'))
+    ledger.triage = triage
+    const sorted = sortTriage(unplanned, triage.decisions, plan)
+    ledger.history.push({ node: 'triage', keep: sorted.keep.length, remove: sorted.remove.length, blocking: sorted.blocking.length })
+    if (sorted.blocking.length) {
+      return finish('escalate', `${sorted.blocking.length} unplanned behavior change(s) need a human decision`, { blockedChanges: sorted.blocking })
+    }
+    for (const k of sorted.keep) plan.behavior_changes.push(`${k.change} (kept by the advisor; serves ${k.serves}: ${k.reason}) [${k.file}:${k.line}]`)
+    ledger.keptChanges.push(...sorted.keep)
+    if (sorted.keep.length) log(`advisor kept ${sorted.keep.length} unplanned change(s); they are now in the plan and reported as decided without you`)
+    removes = sorted.remove
+  }
+  if (!unmet.length && !removes.length) break
   phase('Build')
-  const rework = await runNode('build', 'rework: acceptance', reworkPrompt(plan, unmet, unplanned), BUILD_SCHEMA)
+  const rework = await runNode('build', 'rework: acceptance', reworkPrompt(plan, unmet, removes), BUILD_SCHEMA)
   if (!rework) return finish('escalate', nodeFailure('build', 'on the acceptance rework'))
   recordBuild('rework', rework)
   if (!rework.done) return finish('escalate', `implementer could not close the acceptance gaps: ${rework.summary}`)
