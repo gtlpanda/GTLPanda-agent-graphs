@@ -86,3 +86,12 @@ when there are no warnings), or **stop**. On approve, save the approval
 
 End with at most five lines: merged (SHA), deploy verdicts, docs changed,
 release notes, anything left for the user.
+
+## Notifications
+
+Whenever the run ends or waits on the user (`done`, `done-with-concerns`,
+`rollback-recommended`, `blocked`, `escalate`, `needs-config`, or the approval
+question in step 4), send one PushNotification if the tool is available: the
+PR, the status, and the one action the user must take, if any (for example
+`#276 ready-to-merge at a79b606c: approve the merge`). A user who walked away
+must learn the release is waiting on them without checking the session.
