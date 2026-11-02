@@ -50,9 +50,20 @@ absolute path of `~/.claude/workflows/dev-build.js`). Args:
 - New task: `{"repo": REPO, "task": <task text>, "base": BASE, "approval": "advisor" (or "human" with --review), "maxFixRounds": 3, "knownStuckSigs": [...]}`.
   Save the task text to `$D/task.txt` and delete any `$D/plan.json` from an
   earlier task, so `--resume` never builds a plan this task did not approve.
-- `--resume`: read `$D/plan.json` and `$D/ledger.json`; run with
-  `{"repo", "base", "plan": <plan>, "planApproved": true, "completed": <ledger.completed>, "maxFixRounds": 3, "knownStuckSigs": [...]}`.
-  If either file is missing or does not parse, say so and stop.
+- `--resume`: read `$D/ledger.json`, then run the approved plan (below) with
+  `{"repo", "base", "planApproved": true, "completed": <ledger.completed>, "maxFixRounds": 3, "knownStuckSigs": [...]}`.
+  If `$D/plan.json` or `$D/ledger.json` is missing or does not parse, say so and stop.
+
+**Running an approved plan.** Never pass the plan in `args` and never retype
+it: a real plan is ~50 KB and workflow scripts cannot read files. Write it into
+a run script instead:
+`node ~/.claude/skills/dev/run-script.mjs "$D/plan.json" "$D/run.js"`.
+Its output must start with `run-script: wrote <path>`; anything else, report it
+and stop. Then call the Workflow tool with `scriptPath` set to that printed
+absolute path, and the args without `plan`.
+
+Say at launch how long it usually takes (first real runs: planning about 30
+minutes, a build of 7-8 components 55-85 minutes, a resume 10-15 minutes).
 
 After every run, write the returned ledger to `$D/ledger.json`. If
 `ledger.planApproved` is true, also save `ledger.plan` to `$D/plan.json`, so
@@ -72,7 +83,7 @@ final revision closed them without another gate.
 
 Ask with AskUserQuestion: **Approve** (recommended), **Edit** (they say what),
 or **Stop**.
-- Approve: run again with `{"repo", "base", "plan": <plan>, "planApproved": true, "maxFixRounds": 3, "knownStuckSigs": [...]}`.
+- Approve: run the approved plan (section 2) with `{"repo", "base", "planApproved": true, "maxFixRounds": 3, "knownStuckSigs": [...]}`.
 - Edit: change `plan.json` exactly as asked, show what changed, and ask again.
   The workflow re-checks its structure either way.
 - Stop: leave the plan saved and say how to resume.

@@ -159,7 +159,12 @@ const TRIAGE_SCHEMA = {
 }
 
 // ---------- args ----------
-const A = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
+// Workflow scripts cannot read files, and a real approved plan is ~50 KB, too
+// big to retype as an argument. skills/dev/run-script.mjs writes plan.json into
+// a copy of this script by replacing this one line; nothing else changes.
+const INJECTED_PLAN = null
+const RAW_ARGS = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
+const A = INJECTED_PLAN === null ? RAW_ARGS : { ...RAW_ARGS, plan: INJECTED_PLAN }
 const REPO = typeof A.repo === 'string' && A.repo.startsWith('/') ? A.repo : null
 const TASK = typeof A.task === 'string' && A.task.trim() !== '' ? A.task.trim() : null
 const BASE = typeof A.base === 'string' && A.base !== '' ? A.base : null
@@ -459,6 +464,7 @@ function recordBuild(id, build) {
 
 // ---------- graph ----------
 if (!REPO) return finish('escalate', 'args.repo is required and must be an absolute path')
+if (INJECTED_PLAN !== null && RAW_ARGS.plan !== undefined) return finish('escalate', 'plan given twice: written into the run script and passed in args.plan; pass only one')
 if (!TASK && !GIVEN_PLAN) return finish('escalate', 'args.task is required unless args.plan is given')
 if (GIVEN_PLAN) {
   const problems = planProblems(GIVEN_PLAN)
