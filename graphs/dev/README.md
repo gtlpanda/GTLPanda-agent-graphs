@@ -5,8 +5,9 @@ then hands the branch to the [QA graph](../qa/README.md) as a child workflow.
 Entry point: the `/dev` skill. `/loop` stays the maintenance loop for branches
 that already exist.
 
-Status: **built**. Routing is tested with mocked agents (`tests/dev-build.test.mjs`), and one live run
-on a fixture finished `done` (see the root `retro.md`, entry 5).
+Status: **built**. Routing is tested with mocked agents (`tests/dev-build.test.mjs`). Live: one fixture
+run (retro entry 5), then two real builds on Terracotta that both reached `done` (retro entry 8).
+Acceptance triage and the run script (retro entry 8) are tested with mocks only, not yet live.
 
 ## Graph
 
@@ -116,7 +117,10 @@ Unattended by default: questions come before any code exists (dirty tree,
 2. Run `dev-build` with `approval: advisor`. With `/dev --review`, it stops at
    `plan-ready`: show the acceptance criteria and components, ask for approval
    or edits, save the plan to `$(git rev-parse --git-path harness-dev)/plan.json`,
-   and re-run with it.
+   and re-run with it. An approved plan is never passed in `args`: workflow scripts
+   cannot read files and a real plan is ~50 KB, so `skills/dev/run-script.mjs`
+   writes it into a copy of `dev-build.js` (one line, `const INJECTED_PLAN = null`,
+   changes) and `/dev` runs that copy with `scriptPath`.
 3. On `done`: run `/verify` itself, then commit. One commit per component when
    their touched files do not overlap, otherwise one commit listing them.
 4. On `needs-human`: ask the advisor's questions once, then re-plan with the answers.

@@ -1,7 +1,9 @@
 // dev-build.test.mjs — routing tests for the dev-build graph against scripted
 // agents and a scripted QA child workflow. Run by scripts/test-workflow.mjs.
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, symlinkSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
+import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import { test, load, run, agentField } from '../../../scripts/workflow-harness.mjs'
@@ -499,4 +501,81 @@ await test('a node returning null or throwing -> escalate naming it, never a cra
     assert.equal(result.status, 'escalate', who)
     assert.match(result.reason, new RegExp(who), who)
   }
+})
+
+console.log('== dev-build: run-script.mjs writes the approved plan into a copy')
+const RUN_SCRIPT = join(here, '..', 'skills', 'dev', 'run-script.mjs')
+const runScript = (...a) => spawnSync('node', [RUN_SCRIPT, ...a], { encoding: 'utf8' })
+const tmp = () => mkdtempSync(join(tmpdir(), 'run-script-'))
+await test('dev-build.js carries the INJECTED_PLAN seam exactly once', () => {
+  assert.equal(src.split('\n').filter(l => l === 'const INJECTED_PLAN = null').length, 1)
+})
+await test('the generated copy runs the approved plan: no planner, no gate, plan unchanged', async () => {
+  const d = tmp()
+  writeFileSync(join(d, 'plan.json'), JSON.stringify(PLAN()))
+  const r = runScript(join(d, 'plan.json'), join(d, 'run.js'), wfFile)
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /^run-script: wrote \/.*run\.js \(plan \d+ bytes, 1 line changed/)
+  const copy = load(join(d, 'run.js'))
+  assert.deepEqual(copy.meta, meta)
+  const { result, calls } = await run(copy.fn, BUILD_OK(), { repo: '/tmp/fixture', planApproved: true })
+  assert.equal(result.status, 'done')
+  assert.equal(types(calls), `scout,scout,implementer,checker,implementer,checker,acceptance-auditor,${QA}`)
+  assert.deepEqual(result.plan, { ...PLAN(), kept_changes: [] })
+})
+await test('a "__proto__" key in plan.json survives into the run as a plain key, as JSON.parse reads it', async () => {
+  const d = tmp()
+  const text = JSON.stringify(PLAN()).replace(/^\{/, '{"__proto__": {"injected": true},')
+  writeFileSync(join(d, 'plan.json'), text)
+  const r = runScript(join(d, 'plan.json'), join(d, 'run.js'), wfFile)
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  const { result } = await run(load(join(d, 'run.js')).fn, BUILD_OK(), { repo: '/tmp/fixture', planApproved: true })
+  assert.equal(result.status, 'done')
+  assert.ok(Object.prototype.hasOwnProperty.call(result.plan, '__proto__'), 'the key is an own property, not the prototype')
+  assert.equal(result.plan.injected, undefined, 'the key did not become the prototype')
+})
+await test('reached through a symlink, as install.sh links it, it finds dev-build.js on its own', () => {
+  const d = tmp()
+  writeFileSync(join(d, 'plan.json'), JSON.stringify(PLAN()))
+  symlinkSync(RUN_SCRIPT, join(d, 'linked.mjs'))
+  const r = spawnSync('node', [join(d, 'linked.mjs'), join(d, 'plan.json'), join(d, 'run.js')], { encoding: 'utf8' })
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.ok(r.stdout.includes(wfFile), r.stdout)
+})
+await test('bad plan input -> FAIL, exit 1, nothing written', () => {
+  const d = tmp()
+  writeFileSync(join(d, 'bad.json'), '{"goal": ')
+  writeFileSync(join(d, 'arr.json'), '[1]')
+  for (const [a, why] of [
+    [[join(d, 'missing.json'), join(d, 'out.js'), wfFile], /cannot read plan/],
+    [[join(d, 'bad.json'), join(d, 'out.js'), wfFile], /not valid JSON/],
+    [[join(d, 'arr.json'), join(d, 'out.js'), wfFile], /must be a JSON object/],
+    [[join(d, 'arr.json')], /usage/],
+  ]) {
+    const r = runScript(...a)
+    assert.equal(r.status, 1, a.join(' '))
+    assert.match(r.stdout, why)
+    assert.ok(!existsSync(join(d, 'out.js')), 'nothing written on failure')
+  }
+})
+await test('a workflow without the seam, or with it twice -> FAIL, nothing written', () => {
+  const d = tmp()
+  writeFileSync(join(d, 'plan.json'), JSON.stringify(PLAN()))
+  writeFileSync(join(d, 'none.js'), src.replace('const INJECTED_PLAN = null', 'const INJECTED_PLAN = undefined'))
+  writeFileSync(join(d, 'twice.js'), src.replace('const INJECTED_PLAN = null', 'const INJECTED_PLAN = null\nconst INJECTED_PLAN = null'))
+  for (const [f, n] of [['none.js', 0], ['twice.js', 2]]) {
+    const r = runScript(join(d, 'plan.json'), join(d, 'out.js'), join(d, f))
+    assert.equal(r.status, 1)
+    assert.match(r.stdout, new RegExp(`exactly once; found ${n}`))
+    assert.ok(!existsSync(join(d, 'out.js')))
+  }
+})
+await test('a plan both written into the copy and passed in args -> escalate before any agent runs', async () => {
+  const d = tmp()
+  writeFileSync(join(d, 'plan.json'), JSON.stringify(PLAN()))
+  assert.equal(runScript(join(d, 'plan.json'), join(d, 'run.js'), wfFile).status, 0)
+  const { result, calls } = await run(load(join(d, 'run.js')).fn, {}, { repo: '/tmp/fixture', plan: PLAN(), planApproved: true })
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /plan given twice/)
+  assert.equal(calls.length, 0)
 })
