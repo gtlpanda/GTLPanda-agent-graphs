@@ -59,7 +59,9 @@ each numbered with file:line. Read the code at each one. When a change leaves
 state behind (a flag, a timer, a poll, a subscription, a cache entry), follow
 that state past the current screen: what the next run, mount, or navigation
 sees. State left stale for the next one is a defect, even if nothing shows it
-now. Then decide:
+now: `remove` when it lives only in memory for this session, `blocking` when
+it is persisted or shared beyond the session (storage, a database, another
+user or service). Then decide:
 - `keep` only when the change is correct and needed for the goal or one
   criterion, or follows directly from it. Set `serves` to `goal` or that
   criterion's id. A kept change is added to the plan and reported to the human
