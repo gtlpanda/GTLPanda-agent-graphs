@@ -104,4 +104,7 @@ records the owner's path.
   neither `built` nor created by an earlier component of the plan; or builds an
   owner somewhere other than the map's `owner` path when one is set. With no
   map, any non-empty `owners_used` or `owners_created` is `blocking: true`.
+- **Acceptance auditor**: an owner the plan builds counts only when the map
+  parses, its entry is `built`, and its `owner` file exists; any other map
+  change is unplanned. A missing record gets one rework, then escalates.
 - **Reviewer**: a copy of a mapped item is HIGH (see `harness-review`).
