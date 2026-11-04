@@ -521,9 +521,10 @@ function ownerNote(plan, gaps, removes) {
     removes.some(r => r && r.file === MAP_FILE) ? 'undo the map changes listed for removal above' : '',
   ].filter(Boolean)
   const rule = allowed.length ? `edit ${MAP_FILE} only to ${allowed.join(' and to ')}` : `do not edit ${MAP_FILE} in a rework`
+  const others = allowed.length > 1 ? 'change no other entry except to undo the map changes listed for removal above' : 'change no other entry'
   return `Knowledge-map owners per component: import them, never rewrite one; ${rule}.
 ${json(owners)}
-${gaps.length ? `Owner records missing. For each, the owner file must exist at the path you record (create or move it if needed), then set the entry's owner to that path and its status to "built"; change no other entry. If ${MAP_FILE} does not parse, first repair its syntax only, keeping every entry's content.
+${gaps.length ? `Owner records missing. For each, the owner file must exist at the path you record (create or move it if needed), then set the entry's owner to that path and its status to "built"; ${others}. If ${MAP_FILE} does not parse, first repair its syntax only, keeping every entry's content.
 ${json(gaps)}
 ` : ''}`
 }
