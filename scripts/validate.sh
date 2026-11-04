@@ -16,6 +16,9 @@ done
 # Print frontmatter body (between the first two '---' lines) of a markdown file.
 frontmatter() { awk 'NR==1 && $0!="---"{exit 1} NR>1 && $0=="---"{exit} NR>1{print}' "$1"; }
 fm_get() { frontmatter "$1" | awk -v k="$2" -F': *' '$1==k{sub(/^[^:]*: */,""); print; exit}'; }
+# Print a block-list key's items, one per line ("skills:" then "- name" lines, any indent,
+# optionally quoted).
+fm_list() { frontmatter "$1" | awk -v k="$2" '$0==k":"{on=1; next} on && /^ *- /{sub(/^ *- */,""); gsub(/^["\x27]|["\x27] *$/,""); print; next} on{exit}'; }
 
 # ---- JSON ----
 for f in settings.json; do
@@ -110,6 +113,12 @@ for f in "${agents[@]}"; do
   esac
   [ -n "$tools" ] || bad "$f: 'tools' missing (agents in this repo declare tools explicitly)"
   [ -n "$name" ] && [ -n "$desc" ] && [ -n "$model" ] && [ -n "$effort" ] && [ -n "$tools" ] && [ "$name" = "$base" ] && ok "agent $name (model=$model, effort=$effort)"
+  # A preloaded skill that does not exist leaves the agent silently without its rules.
+  [ -z "$(fm_get "$f" skills)" ] || bad "$f: write 'skills:' as a block list ('  - name' lines), not inline"
+  while IFS= read -r s; do
+    if [ -f "core/skills/$s/SKILL.md" ] || compgen -G "graphs/*/skills/$s/SKILL.md" >/dev/null; then ok "agent $name preloads skill $s"
+    else bad "$f: preloads skill '$s', which is not in core/skills/ or graphs/*/skills/"; fi
+  done < <(fm_list "$f" skills)
 done
 
 # ---- Workflows (routing is tested by scripts/test-workflow.sh) ----
@@ -149,6 +158,14 @@ rule graphs/dev/agents/implementer.md 'one table-driven test per function' 'lean
 rule graphs/dev/agents/implementer.md 'assert the rule the text must keep' 'copy tests assert rules, not whole sentences'
 rule graphs/dev/skills/dev/SKILL.md 'Test ratio:' '/dev reports the test-to-code ratio every build'
 rule core/agents/advisor.md 'State left stale for the next one is a defect' 'triage follows leftover state into the next run'
+rule graphs/dev/agents/implementer.md 'Change no other entry, and add none' 'only /blueprint adds knowledge-map entries'
+rule core/agents/advisor.md 'following the Advisor rules in your `knowledge-map`' 'the plan gate checks the knowledge map'
+# harness-review runs standalone without the knowledge-map skill, so it keeps a copy of the
+# same-knowledge test; the knowledge-map skill is the source and the copy must match it exactly.
+same_test="$(grep -m1 '^\*\*Same-knowledge test:\*\*' core/skills/knowledge-map/SKILL.md)"
+if [ -z "$same_test" ]; then bad "core/skills/knowledge-map/SKILL.md lost its '**Same-knowledge test:**' line"
+elif grep -qxF -- "$same_test" core/skills/harness-review/SKILL.md; then ok "harness-review's same-knowledge test matches knowledge-map"
+else bad "core/skills/harness-review/SKILL.md: the same-knowledge test differs from knowledge-map's; copy the line exactly"; fi
 
 # ---- Required files ----
 for f in install.sh README.md CLAUDE.md settings.json loop.md .gitignore .githooks/pre-commit; do

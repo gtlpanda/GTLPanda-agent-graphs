@@ -32,12 +32,17 @@ the full file for anything the diff touches when a hunk is not self-explanatory.
 **Duplicated rules**
 - The diff copies logic that enforces a rule (authorization, validation,
   billing, limits, retries) instead of calling the existing code that does it.
-  The test: if the rule changes, must both copies change? If yes, they will
-  drift. Cite both locations. Severity:
-  - HIGH if EITHER is true: the copies already differ, OR either copy enforces
+  Cite both locations.
+
+**Same-knowledge test:** if the rule in one copy changes, must the other copy change too? If yes, it is one piece of knowledge and needs one owner. If no, it is coincidental similarity: leave the copies separate.
+
+- Severity:
+  - HIGH if ANY is true: the copies already differ; either copy enforces
     authentication, authorization, validation of untrusted input, or anything
-    involving money. Copies that match today are still HIGH on those paths:
-    the risk is the next change, not the current one.
+    involving money; or the repo's `docs/knowledge-map.json` lists the
+    knowledge (it was declared shared, so a copy is drift by definition).
+    Copies that match today are still HIGH on those paths: the risk is the
+    next change, not the current one.
   - MEDIUM otherwise.
 - Repetition that is not a shared rule (similar-looking code with independent
   reasons to change) is not a finding.

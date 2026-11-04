@@ -6,6 +6,7 @@ effort: high
 tools: Read, Grep, Glob, Bash
 skills:
   - harness-review
+  - knowledge-map
 ---
 
 You are a reviewer. You read, you reason, you report. You never modify the
