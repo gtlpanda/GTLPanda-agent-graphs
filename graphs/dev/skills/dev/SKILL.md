@@ -37,9 +37,9 @@ Questions come before any code exists, or not at all.
 4. Branch: if the current branch is the base, create
    `dev/<slug>` (slug: lowercase task words joined by `-`, at most 40 chars) and
    switch to it. Otherwise stay on the current branch.
-5. State: `D="$(git rev-parse --git-path harness-dev)"`; `mkdir -p "$D"`. It
+5. State: `D="$(git rev-parse --path-format=absolute --git-path harness-dev)"`; `mkdir -p "$D"`. It
    holds `task.txt`, `plan.json`, and `ledger.json`, inside `.git`, never committed.
-6. Known-stuck signatures: if `"$(git rev-parse --git-path harness-loop)/ledger.json"`
+6. Known-stuck signatures: if `"$(git rev-parse --path-format=absolute --git-path harness-loop)/ledger.json"`
    exists and parses, use its `stuckSigs`; otherwise `[]`.
 
 ## 2. Run the graph
