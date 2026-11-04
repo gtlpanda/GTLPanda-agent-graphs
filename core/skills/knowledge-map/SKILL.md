@@ -29,7 +29,7 @@ the map: `/blueprint` does.
 | `authn`, `authz`, `input-validation` (untrusted input), `money` | its first caller |
 | every other kind | its second caller, counting the callers the map plans (`used_by`) as well as real ones |
 
-One caller and no planned second caller: no owner, it stays local.
+Any other kind with one caller and no planned second caller: no owner, it stays local.
 
 Kinds: `authn`, `authz`, `input-validation`, `money`, `limit`, `retry`,
 `type`, `constant`, `error-shape`, `client`, `fixture`.
@@ -46,7 +46,8 @@ Each is a finding; cite `file:line`.
   domain modules named for what they know (`policies/workspace`, `billing/price`).
 - One owner serving different callers through a boolean or enum flag, or 4+
   parameters to cover their cases: the callers hold different knowledge. Split it.
-- An owner with one caller and no planned second caller.
+- An owner with one caller and no planned second caller, for any kind except
+  `authn`, `authz`, `input-validation`, and `money` (those get one from the first).
 - Re-implementing an item the map owns, or a second module claiming one.
 - The same list or shape kept by hand in two places (frontend and backend types,
   form and API validation): name one source and generate or import the other.
