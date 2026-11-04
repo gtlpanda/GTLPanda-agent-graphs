@@ -57,7 +57,8 @@ absolute path of `~/.claude/workflows/dev-build.js`). Args:
 **Running an approved plan.** Never pass the plan in `args` and never retype
 it: a real plan is ~50 KB and workflow scripts cannot read files. Write it into
 a run script instead:
-`node ~/.claude/skills/dev/run-script.mjs "$D/plan.json" "$D/run.js"`.
+`node ~/.claude/skills/workflow-state/run-script.mjs INJECTED_PLAN "$D/plan.json" ~/.claude/workflows/dev-build.js "$D/run.js"`
+(the shared `workflow-state` skill).
 Its output must start with `run-script: wrote <path>`; anything else, report it
 and stop. Then call the Workflow tool with `scriptPath` set to that printed
 absolute path, and the args without `plan`.

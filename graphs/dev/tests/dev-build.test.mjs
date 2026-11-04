@@ -1,6 +1,6 @@
 // dev-build.test.mjs — routing tests for the dev-build graph against scripted
 // agents and a scripted QA child workflow. Run by scripts/test-workflow.mjs.
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, symlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdtempSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -507,8 +507,9 @@ await test('a node returning null or throwing -> escalate naming it, never a cra
 })
 
 console.log('== dev-build: run-script.mjs writes the approved plan into a copy')
-const RUN_SCRIPT = join(here, '..', 'skills', 'dev', 'run-script.mjs')
-const runScript = (...a) => spawnSync('node', [RUN_SCRIPT, ...a], { encoding: 'utf8' })
+const RUN_SCRIPT = join(here, '..', '..', '..', 'core', 'skills', 'workflow-state', 'run-script.mjs')
+// Same argument order as /dev's call: plan, out, workflow; the seam is always INJECTED_PLAN here.
+const runScript = (planPath, outPath, wf) => spawnSync('node', [RUN_SCRIPT, 'INJECTED_PLAN', planPath, wf, outPath].filter(a => a !== undefined), { encoding: 'utf8' })
 const tmp = () => mkdtempSync(join(tmpdir(), 'run-script-'))
 await test('dev-build.js carries the INJECTED_PLAN seam exactly once', () => {
   assert.equal(src.split('\n').filter(l => l === 'const INJECTED_PLAN = null').length, 1)
@@ -518,7 +519,7 @@ await test('the generated copy runs the approved plan: no planner, no gate, plan
   writeFileSync(join(d, 'plan.json'), JSON.stringify(PLAN()))
   const r = runScript(join(d, 'plan.json'), join(d, 'run.js'), wfFile)
   assert.equal(r.status, 0, r.stdout + r.stderr)
-  assert.match(r.stdout, /^run-script: wrote \/.*run\.js \(plan \d+ bytes, 1 line changed/)
+  assert.match(r.stdout, /^run-script: wrote \/.*run\.js \(INJECTED_PLAN \d+ bytes, 1 line changed/)
   const copy = load(join(d, 'run.js'))
   assert.deepEqual(copy.meta, meta)
   const { result, calls } = await run(copy.fn, BUILD_OK(), { repo: '/tmp/fixture', planApproved: true })
@@ -537,23 +538,25 @@ await test('a "__proto__" key in plan.json survives into the run as a plain key,
   assert.ok(Object.prototype.hasOwnProperty.call(result.plan, '__proto__'), 'the key is an own property, not the prototype')
   assert.equal(result.plan.injected, undefined, 'the key did not become the prototype')
 })
-await test('reached through a symlink, as install.sh links it, it finds dev-build.js on its own', () => {
+await test('a seam name that is not INJECTED_<NAME> -> FAIL, nothing written', () => {
   const d = tmp()
   writeFileSync(join(d, 'plan.json'), JSON.stringify(PLAN()))
-  symlinkSync(RUN_SCRIPT, join(d, 'linked.mjs'))
-  const r = spawnSync('node', [join(d, 'linked.mjs'), join(d, 'plan.json'), join(d, 'run.js')], { encoding: 'utf8' })
-  assert.equal(r.status, 0, r.stdout + r.stderr)
-  assert.ok(r.stdout.includes(wfFile), r.stdout)
+  for (const seam of ['PLAN', 'injected_plan', 'INJECTED_', 'INJECTED_PLAN; x']) {
+    const r = spawnSync('node', [RUN_SCRIPT, seam, join(d, 'plan.json'), wfFile, join(d, 'out.js')], { encoding: 'utf8' })
+    assert.equal(r.status, 1, seam)
+    assert.match(r.stdout, /must look like INJECTED_PLAN/)
+    assert.ok(!existsSync(join(d, 'out.js')))
+  }
 })
 await test('bad plan input -> FAIL, exit 1, nothing written', () => {
   const d = tmp()
   writeFileSync(join(d, 'bad.json'), '{"goal": ')
   writeFileSync(join(d, 'arr.json'), '[1]')
   for (const [a, why] of [
-    [[join(d, 'missing.json'), join(d, 'out.js'), wfFile], /cannot read plan/],
+    [[join(d, 'missing.json'), join(d, 'out.js'), wfFile], /cannot read state/],
     [[join(d, 'bad.json'), join(d, 'out.js'), wfFile], /not valid JSON/],
     [[join(d, 'arr.json'), join(d, 'out.js'), wfFile], /must be a JSON object/],
-    [[join(d, 'arr.json')], /usage/],
+    [[join(d, 'arr.json'), join(d, 'out.js')], /usage/],
   ]) {
     const r = runScript(...a)
     assert.equal(r.status, 1, a.join(' '))
