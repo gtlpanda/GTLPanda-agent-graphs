@@ -48,6 +48,9 @@ const NODES = {
 const MAX_PLAN_ROUNDS = 3
 const MAX_PLAN_FILES = 8
 const QA_WORKFLOW = 'harness-repair'
+// The repo's knowledge map and its id format; the knowledge-map skill defines both.
+const MAP_FILE = 'docs/knowledge-map.json'
+const OWNER_ID = /^K\d+$/
 
 // ---------- schemas ----------
 const STR = { type: 'string' }
@@ -85,8 +88,8 @@ const PLAN_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { id: STR, title: STR, files: STRS, depends_on: STRS, tests: STRS },
-        required: ['id', 'title', 'files', 'depends_on', 'tests'],
+        properties: { id: STR, title: STR, files: STRS, depends_on: STRS, tests: STRS, owners_used: STRS, owners_created: STRS },
+        required: ['id', 'title', 'files', 'depends_on', 'tests', 'owners_used', 'owners_created'],
       },
     },
     behavior_changes: STRS,
@@ -109,12 +112,13 @@ const SCOUT_SCHEMA = {
   type: 'object',
   properties: {
     reuse: { type: 'array', items: { type: 'object', properties: { file: STR, line: { type: 'integer' }, what: STR }, required: ['file', 'line', 'what'] } },
+    owners: { type: 'array', items: { type: 'object', properties: { id: STR, owner: STR, what: STR }, required: ['id', 'owner', 'what'] } },
     must_preserve: STRS,
     interfaces: STRS,
     edge_cases: STRS,
     test_patterns: STR,
   },
-  required: ['reuse', 'must_preserve', 'interfaces', 'edge_cases', 'test_patterns'],
+  required: ['reuse', 'owners', 'must_preserve', 'interfaces', 'edge_cases', 'test_patterns'],
 }
 const BUILD_SCHEMA = {
   type: 'object',
@@ -282,6 +286,7 @@ function planProblems(plan) {
     if (!a || !['criterion', 'protects', 'fails_when'].every(k => typeof a[k] === 'string' && a[k].trim())) problems.push(`acceptance ${a && a.id}: criterion, protects, and fails_when must be non-empty`)
   }
   const seen = new Set()
+  const creators = new Map()
   for (const c of comps) {
     if (!c || typeof c.id !== 'string' || !c.id) { problems.push('every component needs a non-empty id'); continue }
     if (seen.has(c.id)) problems.push(`component id ${c.id} is used twice`)
@@ -289,7 +294,40 @@ function planProblems(plan) {
     for (const d of Array.isArray(c.depends_on) ? c.depends_on : []) {
       if (!seen.has(d)) problems.push(`component ${c.id} depends on ${d}, which is not an earlier component (components must be in build order)`)
     }
+    problems.push(...ownerProblems(c, creators))
     seen.add(c.id)
+  }
+  // An owner built by this plan must exist before a component imports it.
+  const order = comps.map(c => c && c.id)
+  for (const c of comps) {
+    for (const id of c && Array.isArray(c.owners_used) ? c.owners_used : []) {
+      const by = creators.get(id)
+      if (by && by !== c.id && order.indexOf(by) > order.indexOf(c.id)) problems.push(`component ${c.id} uses ${id} before ${by} creates it; put ${by} first`)
+    }
+  }
+  return problems
+}
+// One owner per piece of knowledge, checked within the plan (the map file itself
+// cannot be read here; the advisor gate checks the plan against it). A plan saved
+// before owner fields existed has neither field: missing counts as empty.
+function ownerProblems(c, creators) {
+  const problems = []
+  const lists = {}
+  for (const key of ['owners_used', 'owners_created']) {
+    const list = c[key] === undefined ? [] : c[key]
+    if (!Array.isArray(list)) { problems.push(`component ${c.id}: ${key} must be a list of knowledge-map ids`); lists[key] = []; continue }
+    for (const id of list) {
+      if (typeof id !== 'string' || !OWNER_ID.test(id)) problems.push(`component ${c.id}: ${JSON.stringify(id)} in ${key} is not a knowledge-map id (K1, K2, ...)`)
+    }
+    lists[key] = list
+  }
+  for (const id of lists.owners_created) {
+    if (lists.owners_used.includes(id)) problems.push(`component ${c.id} both uses and creates ${id}`)
+    if (creators.has(id)) problems.push(`${id} is created by both ${creators.get(id)} and ${c.id}; one owner per piece of knowledge`)
+    else creators.set(id, c.id)
+  }
+  if (lists.owners_created.length && !(Array.isArray(c.files) && c.files.includes(MAP_FILE))) {
+    problems.push(`component ${c.id} creates owners but does not list ${MAP_FILE} in files, so it may not record them`)
   }
   return problems
 }
@@ -320,8 +358,9 @@ function sortTriage(unplanned, decisions, plan) {
   })
   return out
 }
+// The map file is bookkeeping, not code, so it never counts toward MAX_PLAN_FILES.
 function planFiles(plan) {
-  return [...new Set(plan.components.flatMap(c => c.files))]
+  return [...new Set(plan.components.flatMap(c => c.files))].filter(f => f !== MAP_FILE)
 }
 
 // ---------- prompts ----------
@@ -351,7 +390,7 @@ ${json(prior)}
 Fix every one of these issues:
 ${json(issues)}` : ''}
 
-Fill the structured output. Acceptance ids are AC1, AC2, ...; component ids are C1, C2, ... in build order, and depends_on lists only earlier component ids. questions is empty unless the task is ambiguous in a way the code cannot settle.`
+Fill the structured output. Acceptance ids are AC1, AC2, ...; component ids are C1, C2, ... in build order, and depends_on lists only earlier component ids. owners_used and owners_created hold ${MAP_FILE} ids per your knowledge-map skill, both empty when the repo has no ${MAP_FILE}. questions is empty unless the task is ambiguous in a way the code cannot settle.`
 }
 
 function gatePrompt(plan) {
@@ -362,7 +401,8 @@ ${TASK || '(given as a plan)'}
 Plan:
 ${json(plan)}
 
-It touches ${planFiles(plan).length} distinct file(s) across ${plan.components.length} component(s).
+It touches ${planFiles(plan).length} distinct file(s) across ${plan.components.length} component(s), not counting ${MAP_FILE}.
+If the repo has ${MAP_FILE}, check every component against it; if it has none, every owners_used and owners_created must be empty.
 Gate it following your "Gating a plan" instructions. verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix and blocking true or false (empty when approving). questions: only when blocked.`
 }
 
@@ -373,7 +413,7 @@ Component to research (it is not built yet):
 ${json(c)}
 Acceptance criteria of the whole plan, for context:
 ${json(plan.acceptance)}
-Research it following your instructions and fill the structured output. Cite file:line for everything.`
+Research it following your instructions and fill the structured output. Cite file:line for everything. owners: the ${MAP_FILE} items this component must use; empty when the repo has no ${MAP_FILE}.`
 }
 
 function buildPrompt(plan, c, brief, failed) {
@@ -438,8 +478,19 @@ ${unmet.length ? `Unmet criteria (each needs a passing test that asserts it):
 ${json(unmet)}
 ` : ''}${removes.length ? `Behavior changes the plan does not list, which the advisor decided must go (reason given for each). Undo each one, or fix it if it is a defect, keeping every acceptance criterion passing:
 ${json(removes)}
-` : ''}
+` : ''}${ownerNote(plan)}
 Fill the structured output as for a component build.`
+}
+// Owner context for a rework, which sees no component or brief. Empty for a plan
+// without owners, so those reworks get the prompt they always had.
+function ownerNote(plan) {
+  const owners = plan.components
+    .map(c => ({ id: c.id, owners_used: c.owners_used || [], owners_created: c.owners_created || [] }))
+    .filter(o => o.owners_used.length || o.owners_created.length)
+  if (!owners.length) return ''
+  return `Knowledge-map owners per component: import them, never rewrite one; do not edit ${MAP_FILE} in a rework.
+${json(owners)}
+`
 }
 
 // ---------- nodes with routing ----------
