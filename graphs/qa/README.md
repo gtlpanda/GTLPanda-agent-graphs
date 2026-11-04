@@ -44,6 +44,8 @@ Routing rules, all in code and all tested:
 - Blocking findings (from review or QA) are confirmed by the advisor in one batched call before a
   fix round is spent. Refuted ones are recorded, not fixed. MEDIUM/LOW are
   noted, not fixed.
+- The reviewer preloads `knowledge-map` with `harness-review`: a copy of anything the repo's
+  `docs/knowledge-map.json` lists is HIGH, so it is confirmed and fixed like any blocking finding.
 - A node that returns nothing escalates; nothing crashes the loop.
 - The run returns a ledger. `/loop` stores it in
   `$(git rev-parse --git-path harness-loop)/ledger.json` and passes escalated

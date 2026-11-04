@@ -361,3 +361,36 @@ snapshot; the runtime's StructuredOutput enforcement was not exercised.
 
 **Stats.** 6 advisor runs: the 3 in the table, plus 3 contaminated 4a replays discarded as evidence.
 ~337k agent tokens (from the run notifications), 1.4 to 4.4 minutes each. VERIFY: PASS.
+
+## 10. Knowledge map: one owner per piece of shared knowledge (2026-11-04)
+
+**What changed.** New `core/skills/knowledge-map`: the same-knowledge test, when knowledge gets a
+single owner (auth, authz, untrusted-input validation, money: from the first caller; anything else:
+from the second, counting planned callers), anti-patterns, and the format of an optional per-repo
+`docs/knowledge-map.json`. Planner, scout, advisor, and reviewer preload it. `dev-build.js`: plan
+components carry `owners_used`/`owners_created`; `planProblems` rejects an owner created twice, used
+and created by one component, used before its creator, a malformed id, or a creator that does not
+list the map file; the map file never counts toward the 8-file cap; the scout brief gains `owners`;
+the gate checks the map (or, with none, that owner lists are empty); a rework is told the owners and
+may not edit the map. Only `/blueprint` (not built yet) adds map entries. `validate.sh` now parses
+`skills:` block lists and fails on a preloaded skill that does not exist, and keeps harness-review's
+copy of the same-knowledge test identical to the skill's (standalone `/harness-review` does not load
+the skill).
+
+**Why.** Step 1 toward `/blueprint` and an unattended autoloop. Each `/dev` run plans one slice
+against today's code, so "two real callers" cannot see callers a later slice adds, and copies pile up
+until review flags them (untested hypothesis: not counted in past builds). The map lets the planner
+count planned callers; this step makes it enforced before anything writes one.
+
+**Bugs caught.** Reviewer: 4 LOW (map file read as component overlap; the cap exemption reached only
+the gate prompt; scout paths stale for owners built in the same run; `fm_list` missed unindented and
+quoted items). QA auditor: 7 MEDIUM + 1 LOW, including that the first draft broke its own AC9 (with
+no map, the skill's thresholds replaced the planner's two-callers rule), owner ids accepted in a repo
+with no map, use-before-create passing, and the rework seeing no owners. All fixed with tests except
+QA #6 (mechanically checking the implementer's map edit), deferred to the user. Self-caught: a
+mutation (M8) survived because the gate prompt names the map path on another line too; a bite test
+undone with `git checkout` dropped uncommitted frontmatter (lessons.md).
+
+**Stats.** 13 files, +185/-21 plus the 106-line skill. 4 new routing tests (133 passed, 0 failed),
+13 mutations all caught, 5 validate bites (misspelled, inline, unindented, quoted-misspelled skill;
+drifted test copy). TEST: PASS, VERIFY: PASS.

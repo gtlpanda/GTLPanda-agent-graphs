@@ -284,6 +284,59 @@ await test('missing repo, or neither task nor plan -> escalate before any agent 
   }
 })
 
+console.log('== dev-build: knowledge-map owners')
+const MAP = 'docs/knowledge-map.json'
+const owning = (id, files, used, created, deps = []) => ({ ...component(id, files, deps), owners_used: used, owners_created: created })
+await test('a plan that breaks the one-owner rules is malformed, each with its reason', async () => {
+  const cases = [
+    [[owning('C1', ['src/a.js', MAP], [], ['K1']), owning('C2', ['src/b.js', MAP], [], ['K1'], ['C1'])], /K1 is created by both C1 and C2/],
+    [[owning('C1', ['src/a.js', MAP], ['K1'], ['K1'])], /C1 both uses and creates K1/],
+    [[owning('C1', ['src/a.js'], [], ['K1'])], /C1 creates owners but does not list docs\/knowledge-map\.json/],
+    [[owning('C1', ['src/a.js'], 'K1', [])], /C1: owners_used must be a list/],
+    [[owning('C1', ['src/a.js'], ['K1'], []), owning('C2', ['src/b.js', MAP], [], ['K1'], ['C1'])], /C1 uses K1 before C2 creates it/],
+    ...['k1', 'K', '', 'K1a', 7].map(bad => [[owning('C1', ['src/a.js'], [bad], [])], /C1: .* is not a knowledge-map id/]),
+  ]
+  for (const [components, why] of cases) {
+    const { result, calls } = await run(fn, {}, { repo: '/tmp/fixture', plan: PLAN({ components }), planApproved: true })
+    assert.equal(result.status, 'escalate')
+    assert.match(result.reason, why)
+    assert.equal(calls.length, 0)
+  }
+})
+await test('a valid owner plan builds; the map file never counts toward the file cap; implementer gets its owners', async () => {
+  const components = [owning('C1', ['src/a.js', MAP], [], ['K1']), owning('C2', ['src/b.js'], ['K1'], [], ['C1'])]
+  const { result, calls } = await run(fn, {
+    planner: [PLAN({ components })],
+    advisor: [p => { assert.match(p, /touches 2 distinct file\(s\)/); return approve }],
+    ...BUILD_OK(),
+  }, ARGS)
+  assert.equal(result.status, 'done')
+  assert.match(calls.find(c => c.agentType === 'implementer').prompt, /"owners_created": \[\s*"K1"\s*\]/)
+})
+await test('planner, scout, and gate carry the owners contract and point at the map', async () => {
+  const { calls } = await run(fn, { planner: [PLAN()], advisor: [approve], ...BUILD_OK() }, ARGS)
+  const of = t => calls.find(c => c.agentType === t)
+  assert.deepEqual(of('planner').schema.properties.components.items.required.filter(k => k.startsWith('owners_')), ['owners_used', 'owners_created'])
+  assert.ok(of('scout').schema.required.includes('owners'))
+  for (const t of ['planner', 'scout', 'advisor']) assert.match(of(t).prompt, /docs\/knowledge-map\.json/, `${t} prompt`)
+  assert.match(of('advisor').prompt, /has docs\/knowledge-map\.json, check every component against it/)
+  assert.match(of('advisor').prompt, /if it has none, every owners_used and owners_created must be empty/)
+})
+await test('a rework after an owner plan is told each component\'s owners and not to edit the map', async () => {
+  const components = [owning('C1', ['src/a.js', MAP], [], ['K1']), owning('C2', ['src/b.js'], ['K1'], [], ['C1'])]
+  const { result } = await run(fn, {
+    ...BUILD_OK(),
+    implementer: [built(), built(['src/b.js']), p => {
+      assert.match(p, /"owners_created": \[\s*"K1"\s*\]/)
+      assert.match(p, /do not edit docs\/knowledge-map\.json in a rework/)
+      return built(['test/b.test.js'])
+    }],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [{ criteria: [{ id: 'AC1', status: 'MET', evidence: 'e' }, { id: 'AC2', status: 'UNMET', evidence: 'gap' }], behavior_changes_missing: [] }, met()],
+  }, { repo: '/tmp/fixture', plan: PLAN({ components }), planApproved: true })
+  assert.equal(result.status, 'done')
+})
+
 console.log('== dev-build: build failures')
 const APPROVED = { repo: '/tmp/fixture', plan: PLAN(), planApproved: true }
 await test('a component failing verify gets one retry with the VERIFY block, then the build continues', async () => {
@@ -342,6 +395,7 @@ await test('UNMET -> one rework with the gap -> check -> re-audit MET -> QA', as
       assert.match(unmetSection, /"id": "AC2"/)
       assert.match(unmetSection, /no test asserts the 404/)
       assert.doesNotMatch(unmetSection, /"id": "AC1"/, 'only unmet criteria are sent as gaps')
+      assert.doesNotMatch(p, /knowledge-map/, 'a plan without owners gets the rework prompt it always had')
       return built(['test/b.test.js'])
     }],
     checker: [pass_(), pass_(), pass_()],
