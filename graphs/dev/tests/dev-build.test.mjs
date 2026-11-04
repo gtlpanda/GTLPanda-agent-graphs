@@ -405,6 +405,21 @@ await test('a map change triage says to remove reaches a rework that may undo it
   }, { repo: '/tmp/fixture', plan: OWNER_PLAN(), planApproved: true })
   assert.equal(result.status, 'done')
 })
+await test('a missing record and a map change to remove, together: the rework may do both, with no contradiction', async () => {
+  const stray = { change: 'adds entry K9', file: MAP, line: 12 }
+  const { result } = await run(fn, {
+    ...BUILD_OK(),
+    implementer: [built(), built(['src/b.js']), p => {
+      assert.match(p, /edit docs\/knowledge-map\.json only to fix the missing owner records below and to undo the map changes listed for removal above/)
+      assert.match(p, /change no other entry except to undo the map changes listed for removal above/)
+      return built([MAP])
+    }],
+    checker: [pass_(), pass_(), pass_()],
+    'acceptance-auditor': [{ ...metWith(...owners('MISSING', 'K1')), behavior_changes_missing: [stray] }, metWith(...owners('RECORDED', 'K1'))],
+    advisor: [{ decisions: [{ n: 1, decision: 'remove', serves: '', reason: 'only /blueprint adds entries' }] }],
+  }, { repo: '/tmp/fixture', plan: OWNER_PLAN(), planApproved: true })
+  assert.equal(result.status, 'done')
+})
 await test('the audit is told which owners to check only when the plan builds some', async () => {
   const withOwners = await run(fn, { ...BUILD_OK(), 'acceptance-auditor': [metWith(...owners('RECORDED', 'K1'))] }, { repo: '/tmp/fixture', plan: OWNER_PLAN(), planApproved: true })
   const ownerAudit = withOwners.calls.find(c => c.agentType === 'acceptance-auditor')
