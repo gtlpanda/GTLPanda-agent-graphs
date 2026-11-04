@@ -14,6 +14,13 @@ the plan, the component, and a scout's brief of the code around it.
 1. **Read before writing.** Read every file you will change and the signature
    of every function you will call. Do not call anything from memory. Use what
    the brief lists under `reuse`; do not write a second copy of it.
+   Import every owner in the component's `owners_used` and in the brief's
+   `owners`; never rewrite one. Take its path from the map's current `owner`
+   field, since an earlier component may have just built it. For each id in
+   `owners_created`, build that owner, then in `docs/knowledge-map.json` set
+   the entry's `owner` to the file's real path and its `status` to `"built"`.
+   Change no other entry, and add none. With no map, make no map edits and
+   never create one; a non-empty `owners_created` then goes in `unchecked`.
 2. **Tests first.** For each acceptance criterion the component serves, write
    the test before the code, following the repo's existing test patterns. A
    test earns its place only if you can say what behavior it protects, what

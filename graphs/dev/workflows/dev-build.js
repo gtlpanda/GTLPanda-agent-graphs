@@ -48,6 +48,9 @@ const NODES = {
 const MAX_PLAN_ROUNDS = 3
 const MAX_PLAN_FILES = 8
 const QA_WORKFLOW = 'harness-repair'
+// The repo's knowledge map and its id format; the knowledge-map skill defines both.
+const MAP_FILE = 'docs/knowledge-map.json'
+const OWNER_ID = /^K\d+$/
 
 // ---------- schemas ----------
 const STR = { type: 'string' }
@@ -85,8 +88,8 @@ const PLAN_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { id: STR, title: STR, files: STRS, depends_on: STRS, tests: STRS },
-        required: ['id', 'title', 'files', 'depends_on', 'tests'],
+        properties: { id: STR, title: STR, files: STRS, depends_on: STRS, tests: STRS, owners_used: STRS, owners_created: STRS },
+        required: ['id', 'title', 'files', 'depends_on', 'tests', 'owners_used', 'owners_created'],
       },
     },
     behavior_changes: STRS,
@@ -109,12 +112,13 @@ const SCOUT_SCHEMA = {
   type: 'object',
   properties: {
     reuse: { type: 'array', items: { type: 'object', properties: { file: STR, line: { type: 'integer' }, what: STR }, required: ['file', 'line', 'what'] } },
+    owners: { type: 'array', items: { type: 'object', properties: { id: STR, owner: STR, what: STR }, required: ['id', 'owner', 'what'] } },
     must_preserve: STRS,
     interfaces: STRS,
     edge_cases: STRS,
     test_patterns: STR,
   },
-  required: ['reuse', 'must_preserve', 'interfaces', 'edge_cases', 'test_patterns'],
+  required: ['reuse', 'owners', 'must_preserve', 'interfaces', 'edge_cases', 'test_patterns'],
 }
 const BUILD_SCHEMA = {
   type: 'object',
@@ -140,8 +144,12 @@ const ACCEPT_SCHEMA = {
       type: 'array',
       items: { type: 'object', properties: { change: STR, file: STR, line: { type: 'integer' } }, required: ['change', 'file', 'line'] },
     },
+    owners: {
+      type: 'array',
+      items: { type: 'object', properties: { id: STR, status: { type: 'string', enum: ['RECORDED', 'MISSING'] }, evidence: STR }, required: ['id', 'status', 'evidence'] },
+    },
   },
-  required: ['criteria', 'behavior_changes_missing'],
+  required: ['criteria', 'behavior_changes_missing', 'owners'],
 }
 const TRIAGE_SCHEMA = {
   type: 'object',
@@ -283,6 +291,7 @@ function planProblems(plan) {
     if (!a || !['criterion', 'protects', 'fails_when'].every(k => typeof a[k] === 'string' && a[k].trim())) problems.push(`acceptance ${a && a.id}: criterion, protects, and fails_when must be non-empty`)
   }
   const seen = new Set()
+  const creators = new Map()
   for (const c of comps) {
     if (!c || typeof c.id !== 'string' || !c.id) { problems.push('every component needs a non-empty id'); continue }
     if (seen.has(c.id)) problems.push(`component id ${c.id} is used twice`)
@@ -290,7 +299,40 @@ function planProblems(plan) {
     for (const d of Array.isArray(c.depends_on) ? c.depends_on : []) {
       if (!seen.has(d)) problems.push(`component ${c.id} depends on ${d}, which is not an earlier component (components must be in build order)`)
     }
+    problems.push(...ownerProblems(c, creators))
     seen.add(c.id)
+  }
+  // An owner built by this plan must exist before a component imports it.
+  const order = comps.map(c => c && c.id)
+  for (const c of comps) {
+    for (const id of c && Array.isArray(c.owners_used) ? c.owners_used : []) {
+      const by = creators.get(id)
+      if (by && by !== c.id && order.indexOf(by) > order.indexOf(c.id)) problems.push(`component ${c.id} uses ${id} before ${by} creates it; put ${by} first`)
+    }
+  }
+  return problems
+}
+// One owner per piece of knowledge, checked within the plan (the map file itself
+// cannot be read here; the advisor gate checks the plan against it). A plan saved
+// before owner fields existed has neither field: missing counts as empty.
+function ownerProblems(c, creators) {
+  const problems = []
+  const lists = {}
+  for (const key of ['owners_used', 'owners_created']) {
+    const list = c[key] === undefined ? [] : c[key]
+    if (!Array.isArray(list)) { problems.push(`component ${c.id}: ${key} must be a list of knowledge-map ids`); lists[key] = []; continue }
+    for (const id of list) {
+      if (typeof id !== 'string' || !OWNER_ID.test(id)) problems.push(`component ${c.id}: ${JSON.stringify(id)} in ${key} is not a knowledge-map id (K1, K2, ...)`)
+    }
+    lists[key] = list
+  }
+  for (const id of lists.owners_created) {
+    if (lists.owners_used.includes(id)) problems.push(`component ${c.id} both uses and creates ${id}`)
+    if (creators.has(id)) problems.push(`${id} is created by both ${creators.get(id)} and ${c.id}; one owner per piece of knowledge`)
+    else creators.set(id, c.id)
+  }
+  if (lists.owners_created.length && !(Array.isArray(c.files) && c.files.includes(MAP_FILE))) {
+    problems.push(`component ${c.id} creates owners but does not list ${MAP_FILE} in files, so it may not record them`)
   }
   return problems
 }
@@ -321,8 +363,24 @@ function sortTriage(unplanned, decisions, plan) {
   })
   return out
 }
+// Every owner id the plan's components build, once each.
+function plannedOwners(plan) {
+  return [...new Set(plan.components.flatMap(c => (Array.isArray(c.owners_created) ? c.owners_created : [])))]
+}
+// An owner the audit did not report RECORDED is a gap: no evidence, no record.
+// When one id is reported twice, any non-RECORDED entry wins, whatever the order.
+function ownerGaps(plan, reported) {
+  const byId = new Map()
+  for (const o of Array.isArray(reported) ? reported : []) {
+    if (o && (!byId.has(o.id) || o.status !== 'RECORDED')) byId.set(o.id, o)
+  }
+  return plannedOwners(plan)
+    .filter(id => !byId.has(id) || byId.get(id).status !== 'RECORDED')
+    .map(id => ({ id, auditor: byId.has(id) ? byId.get(id).evidence : 'not reported by the auditor' }))
+}
+// The map file is bookkeeping, not code, so it never counts toward MAX_PLAN_FILES.
 function planFiles(plan) {
-  return [...new Set(plan.components.flatMap(c => c.files))]
+  return [...new Set(plan.components.flatMap(c => c.files))].filter(f => f !== MAP_FILE)
 }
 
 // ---------- prompts ----------
@@ -352,7 +410,7 @@ ${json(prior)}
 Fix every one of these issues:
 ${json(issues)}` : ''}
 
-Fill the structured output. Acceptance ids are AC1, AC2, ...; component ids are C1, C2, ... in build order, and depends_on lists only earlier component ids. questions is empty unless the task is ambiguous in a way the code cannot settle.`
+Fill the structured output. Acceptance ids are AC1, AC2, ...; component ids are C1, C2, ... in build order, and depends_on lists only earlier component ids. owners_used and owners_created hold ${MAP_FILE} ids per your knowledge-map skill, both empty when the repo has no ${MAP_FILE}. questions is empty unless the task is ambiguous in a way the code cannot settle.`
 }
 
 function gatePrompt(plan) {
@@ -363,7 +421,8 @@ ${TASK || '(given as a plan)'}
 Plan:
 ${json(plan)}
 
-It touches ${planFiles(plan).length} distinct file(s) across ${plan.components.length} component(s).
+It touches ${planFiles(plan).length} distinct file(s) across ${plan.components.length} component(s), not counting ${MAP_FILE}.
+If the repo has ${MAP_FILE}, check every component against it; if it has none, every owners_used and owners_created must be empty.
 Gate it following your "Gating a plan" instructions. verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix and blocking true or false (empty when approving). questions: only when blocked.`
 }
 
@@ -374,7 +433,7 @@ Component to research (it is not built yet):
 ${json(c)}
 Acceptance criteria of the whole plan, for context:
 ${json(plan.acceptance)}
-Research it following your instructions and fill the structured output. Cite file:line for everything.`
+Research it following your instructions and fill the structured output. Cite file:line for everything. owners: the ${MAP_FILE} items this component must use; empty when the repo has no ${MAP_FILE}.`
 }
 
 function buildPrompt(plan, c, brief, failed) {
@@ -409,7 +468,14 @@ Acceptance criteria:
 ${json(plan.acceptance)}
 Planned behavior changes:
 ${json(plan.behavior_changes)}
-Audit the branch (committed and uncommitted changes) following your instructions. Return one entry per criterion id, MET only with a passing assertion at file:line as evidence. behavior_changes_missing: changes the code makes that the plan does not list (empty is a valid answer).`
+Audit the branch (committed and uncommitted changes) following your instructions. Return one entry per criterion id, MET only with a passing assertion at file:line as evidence. behavior_changes_missing: changes the code makes that the plan does not list (empty is a valid answer).
+${ownerAuditNote(plan)}`
+}
+function ownerAuditNote(plan) {
+  const ids = plannedOwners(plan)
+  if (!ids.length) return 'owners: empty (this plan builds no knowledge-map owners).'
+  return `Owners this plan builds: ${json(ids)}
+owners: one entry per id. RECORDED only if ${MAP_FILE} parses (run a JSON parse of it and quote the result), the id's entry has status "built", and its owner file exists; otherwise MISSING with the reason. Any other change to ${MAP_FILE} (another entry, a new entry) goes in behavior_changes_missing.`
 }
 
 function triagePrompt(plan, unplanned) {
@@ -427,7 +493,7 @@ ${json(unplanned.map((c, i) => ({ n: i + 1, ...c })))}
 Triage each one following your "Triaging unplanned behavior changes" instructions. decisions: exactly one per n. decision: keep, remove, or blocking. serves: "goal" or the acceptance id the change is needed for (required for keep, empty otherwise). reason: one sentence citing file:line.`
 }
 
-function reworkPrompt(plan, unmet, removes) {
+function reworkPrompt(plan, unmet, removes, gaps) {
   return `${where}
 Goal: ${plan.goal}
 Acceptance criteria:
@@ -439,8 +505,29 @@ ${unmet.length ? `Unmet criteria (each needs a passing test that asserts it):
 ${json(unmet)}
 ` : ''}${removes.length ? `Behavior changes the plan does not list, which the advisor decided must go (reason given for each). Undo each one, or fix it if it is a defect, keeping every acceptance criterion passing:
 ${json(removes)}
-` : ''}
+` : ''}${ownerNote(plan, gaps, removes)}
 Fill the structured output as for a component build.`
+}
+// Owner context for a rework, which sees no component or brief. Empty for a plan
+// without owners, so those reworks get the prompt they always had. The map may be
+// edited only to fix the owner records the audit found missing, or to undo a map
+// change the advisor said to remove.
+function ownerNote(plan, gaps, removes) {
+  const owners = plan.components
+    .map(c => ({ id: c.id, owners_used: c.owners_used || [], owners_created: c.owners_created || [] }))
+    .filter(o => o.owners_used.length || o.owners_created.length)
+  if (!owners.length) return ''
+  const allowed = [
+    gaps.length ? 'fix the missing owner records below' : '',
+    removes.some(r => r && r.file === MAP_FILE) ? 'undo the map changes listed for removal above' : '',
+  ].filter(Boolean)
+  const rule = allowed.length ? `edit ${MAP_FILE} only to ${allowed.join(' and to ')}` : `do not edit ${MAP_FILE} in a rework`
+  const others = allowed.length > 1 ? 'change no other entry except to undo the map changes listed for removal above' : 'change no other entry'
+  return `Knowledge-map owners per component: import them, never rewrite one; ${rule}.
+${json(owners)}
+${gaps.length ? `Owner records missing. For each, the owner file must exist at the path you record (create or move it if needed), then set the entry's owner to that path and its status to "built"; ${others}. If ${MAP_FILE} does not parse, first repair its syntax only, keeping every entry's content.
+${json(gaps)}
+` : ''}`
 }
 
 // ---------- nodes with routing ----------
@@ -581,10 +668,15 @@ for (let round = 1; round <= 2; round += 1) {
     .filter(a => !byId.has(a.id) || byId.get(a.id).status !== 'MET')
     .map(a => ({ ...a, auditor: byId.has(a.id) ? byId.get(a.id).evidence : 'not reported by the auditor' }))
   const unplanned = acc.behavior_changes_missing
-  ledger.history.push({ node: 'accept', round, unmet: unmet.map(a => a.id), unplanned: unplanned.length })
-  if (!unmet.length && !unplanned.length) break
+  const missingOwners = ownerGaps(plan, acc.owners)
+  ledger.history.push({ node: 'accept', round, unmet: unmet.map(a => a.id), unplanned: unplanned.length, ownersMissing: missingOwners.map(o => o.id) })
+  if (!unmet.length && !unplanned.length && !missingOwners.length) break
   if (round === 2) {
-    const gaps = [unmet.length ? `unmet ${unmet.map(a => a.id).join(', ')}` : '', unplanned.length ? `${unplanned.length} unplanned behavior change(s)` : ''].filter(Boolean).join('; ')
+    const gaps = [
+      unmet.length ? `unmet ${unmet.map(a => a.id).join(', ')}` : '',
+      unplanned.length ? `${unplanned.length} unplanned behavior change(s)` : '',
+      missingOwners.length ? `owner record(s) missing: ${missingOwners.map(o => o.id).join(', ')}` : '',
+    ].filter(Boolean).join('; ')
     // No second triage: what the rework left behind goes to the human, listed.
     const left = unplanned.map(c => ({ ...c, reason: 'still in the code after the acceptance rework' }))
     return finish('escalate', `acceptance still failing after one rework: ${gaps}`, { blockedChanges: left })
@@ -603,13 +695,14 @@ for (let round = 1; round <= 2; round += 1) {
     ledger.keptChanges.push(...sorted.keep)
     if (sorted.keep.length) log(`advisor kept ${sorted.keep.length} unplanned change(s); they are now in the plan and reported as decided without you`)
     if (sorted.blocking.length) {
-      return finish('escalate', `${sorted.blocking.length} unplanned behavior change(s) need a human decision`, { blockedChanges: sorted.blocking })
+      const alsoOwners = missingOwners.length ? `; owner record(s) also missing: ${missingOwners.map(o => o.id).join(', ')}` : ''
+      return finish('escalate', `${sorted.blocking.length} unplanned behavior change(s) need a human decision${alsoOwners}`, { blockedChanges: sorted.blocking })
     }
     removes = sorted.remove
   }
-  if (!unmet.length && !removes.length) break
+  if (!unmet.length && !removes.length && !missingOwners.length) break
   phase('Build')
-  const rework = await runNode('build', 'rework: acceptance', reworkPrompt(plan, unmet, removes), BUILD_SCHEMA)
+  const rework = await runNode('build', 'rework: acceptance', reworkPrompt(plan, unmet, removes, missingOwners), BUILD_SCHEMA)
   if (!rework) return finish('escalate', nodeFailure('build', 'on the acceptance rework'))
   recordBuild('rework', rework)
   if (!rework.done) return finish('escalate', `implementer could not close the acceptance gaps: ${rework.summary}`)

@@ -4,6 +4,8 @@ description: Turns a development task into an executable plan - numbered pass/fa
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Bash
+skills:
+  - knowledge-map
 ---
 
 You are the planner. You write the plan a separate implementer will follow
@@ -39,10 +41,12 @@ helpers), then independent components, then integration glue. For each: an id
 (`C1`, ...), the files it creates or changes, the components it depends on,
 and the tests it adds.
 
-Keep it small. If the plan touches more than 8 files or adds 2 or more new
+Keep it small. If the plan touches more than 8 files (the knowledge map file
+does not count, per your `knowledge-map` skill) or adds 2 or more new
 services or classes, split the task or say in one line why it cannot be split.
-Prefer extending an existing helper over adding a new one; a new abstraction
-needs at least two real callers.
+Prefer extending an existing helper over adding a new one. When a new shared
+owner is justified, and what goes in each component's `owners_used` and
+`owners_created`, follow your `knowledge-map` skill.
 
 ## Also list
 

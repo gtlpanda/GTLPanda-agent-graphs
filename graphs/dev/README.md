@@ -61,16 +61,26 @@ planning), `completed` (component ids already built; resume skips them),
 **plan** (planner output, gated by the advisor):
 - `acceptance[]`: `{id: "AC1", criterion, protects, fails_when, no_claim}`.
   Numbered, pass/fail, no subjective language ("edge cases are handled" is rejected).
-- `components[]` in build order: `{id: "C1", title, files[], depends_on[], tests[]}`.
+- `components[]` in build order: `{id: "C1", title, files[], depends_on[], tests[], owners_used[], owners_created[]}`.
   Self-contained, non-overlapping, together exhaustive; shared dependencies first, glue last.
+  `owners_*` are ids from the repo's `docs/knowledge-map.json` (`core/skills/knowledge-map`); empty
+  without a map. Code rejects an owner created twice, an id used and created by one component, an
+  id used before the component that creates it, an id not shaped `K<n>`, and a creating component
+  that does not list the map file. The advisor checks what code cannot read: ids against the map,
+  and non-empty owner lists in a repo with no map. A plan saved before these fields existed still
+  runs (missing counts as empty). The map file never counts toward the 8-file cap and is not
+  overlap; two creating components still share it, so `/dev` commits such a plan as one commit.
+  A rework is told each component's owners and may edit the map only to fix owner records the audit
+  found missing or to undo a map change the advisor said to remove.
 - `behavior_changes[]`, `out_of_scope[]`, `risks[]` (`{risk, mitigation}`).
 - Complexity gate: more than 8 files or 2+ new services → the advisor sends it
   back to be split or justified.
 
 **plan gate** (advisor): `{verdict: approve|revise|blocked, issues[] {n, issue, fix, blocking}, questions[]}`.
-A missing or non-boolean `blocking` counts as blocking.
+A missing or non-boolean `blocking` counts as blocking. With a knowledge map, the advisor reads it
+(workflow code cannot read files) and a component that breaks it is a blocking issue.
 
-**scout brief** per component: `{reuse[] (file:line + what), must_preserve[], interfaces[], edge_cases[], test_patterns}`.
+**scout brief** per component: `{reuse[] (file:line + what), owners[] {id, owner, what}, must_preserve[], interfaces[], edge_cases[], test_patterns}`.
 
 **implementer report:** `{done, touched[], tests_added[] {file, name, protects, fails_when}, test_changes[], verify_verdict, unchecked[]}`.
 `test_changes` lists any change to a test, timeout, threshold, snapshot, or
@@ -79,7 +89,11 @@ the checker's VERIFY line, never the implementer's own run.
 
 **acceptance:** per criterion `{id, status: MET|UNMET, evidence}`, where
 evidence is a passing test at `file:line` that asserts the criterion; plus
-`behavior_changes_missing[]` (a change the code makes that the plan never listed).
+`behavior_changes_missing[]` (a change the code makes that the plan never listed); plus
+`owners[] {id, status: RECORDED|MISSING, evidence}` for every owner the plan builds. RECORDED needs
+the map to parse, the entry `built`, and its owner file to exist. Code has the last word: an owner
+not reported RECORDED is missing, and rides the same one rework (allowed to fix only those map
+entries) and re-audit as an unmet criterion, then escalates by id.
 
 **triage** (advisor, on the first audit's unplanned changes): per change `{n, decision: keep|remove|blocking, serves, reason}`.
 Code has the last word: no decision, two decisions, or a `keep` whose `serves` is neither `goal` nor a real
@@ -101,6 +115,8 @@ cross-iteration stuck detection keeps working for dev-started QA runs.
   the regression proof (fails before the change, passes after).
 - Real code and real tests in the same change; a stub or a deferred test is not done.
 - Read before writing: every function it calls, by its signature, not from memory.
+- Owners: imports every `owners_used`, never rewrites one; for each `owners_created`, records the
+  real path and `status: "built"` in the map. It never adds a map entry; only `/blueprint` does.
 - Minimal scope: anything outside the component goes in `unchecked`, not in the diff.
 - Never commit. Never loosen a test, timeout, or threshold to get green.
 - Lean suite: data-only variations share one table-driven test per function; user-facing text is

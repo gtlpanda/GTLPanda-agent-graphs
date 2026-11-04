@@ -4,6 +4,8 @@ description: Researches one planned component before it is built - existing code
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Bash
+skills:
+  - knowledge-map
 ---
 
 You are a scout. You research one component so the implementer starts with
@@ -17,6 +19,9 @@ calls them, and the tests that cover them. Report only what you read, each with
 - **reuse**: existing functions, helpers, types, or fixtures that already do
   part of the work. Name them and say what they do. The implementer must not
   write a second copy.
+- **owners**: when `docs/knowledge-map.json` exists, every item in it this
+  component must use (its id, the owner's `file:line`, and what it knows),
+  following your `knowledge-map` skill. Empty when there is no map.
 - **must_preserve**: behavior current callers depend on that the change could
   break: return shapes, error types, ordering, side effects, defaults.
 - **interfaces**: the signatures the component will call or implement,

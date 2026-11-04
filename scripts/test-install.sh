@@ -5,7 +5,7 @@
 # byte-for-byte and leaves no link into the repo.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/claude-harness-test.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/pandastack-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 unset CLAUDE_CONFIG_DIR
