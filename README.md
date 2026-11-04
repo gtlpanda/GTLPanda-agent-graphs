@@ -1,4 +1,4 @@
-# GTLPanda-agent-graphs
+# PandaStack
 
 > **TL;DR** Hand Claude Code a task and get back a change that is planned,
 > built tests-first, reviewed, QA'd, and released on your approval. Three
@@ -11,7 +11,7 @@
 > /release-pr [PR#]   docs into the PR → you approve the exact commit → merge once → verify the deploy
 > ```
 >
-> Install: `git clone https://github.com/gtlpanda/GTLPanda-agent-graphs.git && cd GTLPanda-agent-graphs && ./install.sh`
+> Install: `git clone https://github.com/gtlpanda/PandaStack.git && cd PandaStack && ./install.sh`
 
 ## What drives it
 
@@ -59,8 +59,8 @@ name must be unique across `core/` and all graphs. `validate.sh` and
 ## Install
 
 ```bash
-git clone https://github.com/gtlpanda/GTLPanda-agent-graphs.git
-cd GTLPanda-agent-graphs
+git clone https://github.com/gtlpanda/PandaStack.git
+cd PandaStack
 ./install.sh --dry-run   # see what would change
 ./install.sh             # link it
 ```
@@ -101,7 +101,7 @@ not collide with gstack's `review`.
 ## Update
 
 ```bash
-cd GTLPanda-agent-graphs && git pull && ./install.sh
+cd PandaStack && git pull && ./install.sh
 ```
 
 Links point at the checkout, so most edits take effect on the next session

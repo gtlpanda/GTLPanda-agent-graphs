@@ -2,7 +2,7 @@
 # test-secrets.sh — prove the secret scanner and pre-commit hook actually block.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/claude-harness-secrets.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/pandastack-secrets.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 check() { if eval "$2"; then echo "  ok   $1"; pass=$((pass+1)); else echo "  FAIL $1" >&2; fail=$((fail+1)); fi; }
