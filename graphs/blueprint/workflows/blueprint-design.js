@@ -146,7 +146,9 @@ function briefProblems(brief) {
 }
 function questionProblems(qs, brief) {
   const problems = []
+  if (!Array.isArray(qs.questions) || !qs.questions.length) problems.push('questions must be a non-empty list')
   const list = Array.isArray(qs.questions) ? qs.questions : []
+  const contradictionIds = new Set((Array.isArray(brief.contradictions) ? brief.contradictions : []).map(x => x.id))
   const seen = new Set()
   for (const q of list) {
     const id = q && q.id
@@ -159,6 +161,10 @@ function questionProblems(qs, brief) {
     if (!options.some(o => o && o.label === q.recommended)) problems.push(`${id}: recommended ${JSON.stringify(q.recommended)} is not one of its options`)
     if (!nonEmpty(q.default_if_unasked)) problems.push(`${id}: default_if_unasked is empty`)
     if (!nonEmpty(q.question)) problems.push(`${id}: the question is empty`)
+    // Only real contradictions make a question undroppable at the cap.
+    for (const x of Array.isArray(q.resolves) ? q.resolves : []) {
+      if (!contradictionIds.has(x)) problems.push(`${id} resolves ${JSON.stringify(x)}, which is not a contradiction in the brief`)
+    }
   }
   const resolved = new Set(list.flatMap(q => (q && Array.isArray(q.resolves) ? q.resolves : [])))
   for (const x of Array.isArray(brief.contradictions) ? brief.contradictions : []) {
@@ -255,7 +261,7 @@ if (problems.length) {
 }
 const capped = capQuestions(qs.questions)
 if (capped.error) {
-  return finish('escalate', `${capped.error} contradictions need answers, more than the ${MAX_QUESTIONS}-question interview holds: fix the documents first`)
+  return finish('escalate', `${capped.error} questions resolve contradictions, more than the ${MAX_QUESTIONS}-question interview holds: fix the documents first`)
 }
 const trimmed = capped.trimmed.map(q => ({ from: q.id, assumption: q.default_if_unasked, why: `not asked (ranked below the ${MAX_QUESTIONS}-question cap): ${q.question}` }))
 ledger.history.push({ node: 'ask', questions: qs.questions.length, asked: capped.asked.length, trimmed: trimmed.length })

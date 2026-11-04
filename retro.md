@@ -361,3 +361,33 @@ snapshot; the runtime's StructuredOutput enforcement was not exercised.
 
 **Stats.** 6 advisor runs: the 3 in the table, plus 3 contaminated 4a replays discarded as evidence.
 ~337k agent tokens (from the run notifications), 1.4 to 4.4 minutes each. VERIFY: PASS.
+
+## 12. /blueprint run 1: intake and interview (2026-11-04)
+
+**What changed.** New graph `graphs/blueprint`, first of three planned PRs (B1 of B1-B3, plan in
+`tasks/todo.md`). `blueprint-design.js` run 1: `extractor` (sonnet) turns docs, the repo, and the
+request into a brief (R* requirements with sources, decisions already made, gaps, X* contradictions,
+constraints, existing stack); `questioner` (sonnet) ranks open decisions by cost to change, each with
+2-4 options, a recommendation, and a default, plus the preflight list and assumptions. Code checks
+both and sends each back once. At most 12 questions (user's choice); the rest become assumptions with
+their default; contradiction questions are always asked; more than 12 contradictions escalate. The
+`/blueprint` skill asks in rounds of four, never asks for secret values, and saves the answers as
+binding decisions in `.git`. `/dev`'s `run-script.mjs` moved to the shared `core/skills/workflow-state`
+(seam name and workflow path are arguments), as the user chose, so run 2 can reuse it.
+
+**Bugs caught.** Mutation B16 survived the first suite: the bad-`docs` test also lacked a request, so
+an earlier check escalated and the docs check was never reached (lessons.md). Reviewer: 2 MEDIUM (a
+missing `questions` list crashed the workflow instead of escalating; the preflight question broke
+AskUserQuestion's 2-4 option limit and the 12-question cap) and 1 LOW (a stale script path). QA
+auditor: 2 HIGH (`/dev` with a saved plan fails until `install.sh` re-links the moved script; the same
+preflight question), 4 MEDIUM (an empty folder inside another repo read as that repo; a stale
+`state.json` surviving "start over"; stray `resolves` ids making questions undroppable; secrets in
+free-text answers saved verbatim), and 6 LOW (wording of the cap escalation, doc paths resolved
+against the repo instead of the current directory, `--git-path` relative to the current directory in
+every graph's skill, unspecified overrides). All fixed; the code ones with tests. Preflight and
+overrides now come back in one free-text reply, so the 12-question cap holds.
+
+**Untested.** No live run: agents, prompts, and the skill's interview have only run against mocks.
+The default-stack rule lives in `questioner.md` until run 2's researcher needs it too.
+
+**Stats.** 17 routing tests (147 passed, 0 failed), 20 mutations caught, 1 after a test fix.

@@ -60,7 +60,8 @@ a run script instead:
 `node ~/.claude/skills/workflow-state/run-script.mjs INJECTED_PLAN "$D/plan.json" ~/.claude/workflows/dev-build.js "$D/run.js"`
 (the shared `workflow-state` skill).
 Its output must start with `run-script: wrote <path>`; anything else, report it
-and stop. Then call the Workflow tool with `scriptPath` set to that printed
+and stop. If node cannot find the script, it moved to the shared skill: tell
+the human to run `./install.sh` in their PandaStack checkout, then retry. Then call the Workflow tool with `scriptPath` set to that printed
 absolute path, and the args without `plan`.
 
 Say at launch how long it usually takes (first real runs: planning about 30

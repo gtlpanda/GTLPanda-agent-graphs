@@ -149,6 +149,8 @@ rule graphs/dev/agents/implementer.md 'one table-driven test per function' 'lean
 rule graphs/dev/agents/implementer.md 'assert the rule the text must keep' 'copy tests assert rules, not whole sentences'
 rule graphs/dev/skills/dev/SKILL.md 'Test ratio:' '/dev reports the test-to-code ratio every build'
 rule core/agents/advisor.md 'State left stale for the next one is a defect' 'triage follows leftover state into the next run'
+rule graphs/blueprint/skills/blueprint/SKILL.md 'Never ask for a secret value.' 'preflight records credentials by name only'
+rule graphs/blueprint/skills/blueprint/SKILL.md '`decisions` are binding.' 'interview answers bind every later stage'
 
 # ---- Required files ----
 for f in install.sh README.md CLAUDE.md settings.json loop.md .gitignore .githooks/pre-commit; do

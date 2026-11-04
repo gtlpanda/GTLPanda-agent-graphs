@@ -121,7 +121,7 @@ await test('more than 12 contradictions -> escalate: the documents need fixing b
   const qs = xs.map((x, i) => q(`Q${i + 1}`, { resolves: [x.id] }))
   const { result } = await run(fn, { extractor: [BRIEF({ contradictions: xs })], questioner: [QS(qs)] }, ARGS)
   assert.equal(result.status, 'escalate')
-  assert.match(result.reason, /13 contradictions/)
+  assert.match(result.reason, /13 questions resolve contradictions, more than the 12-question interview holds/)
 })
 
 console.log('== blueprint-design: structure checks')
@@ -174,6 +174,29 @@ await test('a contradiction no question resolves is a problem the questioner mus
   }, ARGS)
   assert.equal(result.status, 'escalate')
   assert.match(result.reason, /questions are malformed after one revision: .*X1/)
+})
+await test('a missing, non-list, or empty questions list is malformed, never a crash', async () => {
+  for (const bad of [null, 'x', [], {}]) {
+    const answer = { ...QS(), questions: bad }
+    const { result, calls } = await run(fn, {
+      extractor: [BRIEF()],
+      questioner: [answer, p => { assert.match(p, /questions must be a non-empty list/); return answer }],
+    }, ARGS)
+    assert.equal(result.status, 'escalate', JSON.stringify(bad))
+    assert.match(result.reason, /questions are malformed after one revision/)
+    assert.equal(types(calls), 'extractor,questioner,questioner')
+  }
+})
+await test('resolves may name only the brief\'s contradictions, so a stray id cannot make a question undroppable', async () => {
+  const { result } = await run(fn, {
+    extractor: [BRIEF()],
+    questioner: [QS([q('Q1', { resolves: ['X99'] }), q('Q2', { resolves: ['R1'] })]), p => {
+      assert.match(p, /Q1 resolves "X99", which is not a contradiction in the brief/)
+      assert.match(p, /Q2 resolves "R1", which is not a contradiction in the brief/)
+      return QS()
+    }],
+  }, ARGS)
+  assert.equal(result.status, 'needs-human')
 })
 await test('the recommended option is moved first, so the skill can mark it as recommended', async () => {
   const { result } = await run(fn, { extractor: [BRIEF()], questioner: [QS([q('Q1', { recommended: 'Option B' })])] }, ARGS)

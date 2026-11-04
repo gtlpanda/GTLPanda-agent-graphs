@@ -160,8 +160,9 @@ const TRIAGE_SCHEMA = {
 
 // ---------- args ----------
 // Workflow scripts cannot read files, and a real approved plan is ~50 KB, too
-// big to retype as an argument. skills/dev/run-script.mjs writes plan.json into
-// a copy of this script by replacing this one line; nothing else changes.
+// big to retype as an argument. core/skills/workflow-state/run-script.mjs (seam
+// INJECTED_PLAN) writes plan.json into a copy of this script by replacing this
+// one line; nothing else changes.
 const INJECTED_PLAN = null
 const RAW_ARGS = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
 const A = INJECTED_PLAN === null ? RAW_ARGS : { ...RAW_ARGS, plan: INJECTED_PLAN }
