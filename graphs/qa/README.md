@@ -48,7 +48,7 @@ Routing rules, all in code and all tested:
   `docs/knowledge-map.json` lists is HIGH, so it is confirmed and fixed like any blocking finding.
 - A node that returns nothing escalates; nothing crashes the loop.
 - The run returns a ledger. `/loop` stores it in
-  `$(git rev-parse --git-path harness-loop)/ledger.json` and passes escalated
+  `$(git rev-parse --path-format=absolute --git-path harness-loop)/ledger.json` and passes escalated
   signatures back as `knownStuckSigs`, so a stuck failure costs one checker
   call per iteration until a human changes something.
 

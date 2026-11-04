@@ -37,9 +37,9 @@ Questions come before any code exists, or not at all.
 4. Branch: if the current branch is the base, create
    `dev/<slug>` (slug: lowercase task words joined by `-`, at most 40 chars) and
    switch to it. Otherwise stay on the current branch.
-5. State: `D="$(git rev-parse --git-path harness-dev)"`; `mkdir -p "$D"`. It
+5. State: `D="$(git rev-parse --path-format=absolute --git-path harness-dev)"`; `mkdir -p "$D"`. It
    holds `task.txt`, `plan.json`, and `ledger.json`, inside `.git`, never committed.
-6. Known-stuck signatures: if `"$(git rev-parse --git-path harness-loop)/ledger.json"`
+6. Known-stuck signatures: if `"$(git rev-parse --path-format=absolute --git-path harness-loop)/ledger.json"`
    exists and parses, use its `stuckSigs`; otherwise `[]`.
 
 ## 2. Run the graph
@@ -57,9 +57,11 @@ absolute path of `~/.claude/workflows/dev-build.js`). Args:
 **Running an approved plan.** Never pass the plan in `args` and never retype
 it: a real plan is ~50 KB and workflow scripts cannot read files. Write it into
 a run script instead:
-`node ~/.claude/skills/dev/run-script.mjs "$D/plan.json" "$D/run.js"`.
+`node ~/.claude/skills/workflow-state/run-script.mjs INJECTED_PLAN "$D/plan.json" ~/.claude/workflows/dev-build.js "$D/run.js"`
+(the shared `workflow-state` skill).
 Its output must start with `run-script: wrote <path>`; anything else, report it
-and stop. Then call the Workflow tool with `scriptPath` set to that printed
+and stop. If node cannot find the script, it moved to the shared skill: tell
+the human to run `./install.sh` in their PandaStack checkout, then retry. Then call the Workflow tool with `scriptPath` set to that printed
 absolute path, and the args without `plan`.
 
 Say at launch how long it usually takes (first real runs: planning about 30

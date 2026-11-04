@@ -6,6 +6,7 @@
 > step is gated on real test results, never on an agent's word.
 >
 > ```
+> /blueprint <idea>   read the doc or idea → one up-front interview → binding decisions (design and backlog: next)
 > /dev <task>         plan it (you approve) → build it tests-first → prove every acceptance criterion → QA
 > /loop               keep a branch green: check → fix → review → QA, until it passes or needs you
 > /release-pr [PR#]   docs into the PR → you approve the exact commit → merge once → verify the deploy
@@ -31,6 +32,7 @@
 
 | Graph | Run it with | What it does | Status |
 |-------|-------------|--------------|--------|
+| [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once; design and backlog stages not built yet | tested with mocked agents |
 | [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
 | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
 | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |

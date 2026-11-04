@@ -167,6 +167,8 @@ same_test="$(grep -m1 '^\*\*Same-knowledge test:\*\*' core/skills/knowledge-map/
 if [ -z "$same_test" ]; then bad "core/skills/knowledge-map/SKILL.md lost its '**Same-knowledge test:**' line"
 elif grep -qxF -- "$same_test" core/skills/harness-review/SKILL.md; then ok "harness-review's same-knowledge test matches knowledge-map"
 else bad "core/skills/harness-review/SKILL.md: the same-knowledge test differs from knowledge-map's; copy the line exactly"; fi
+rule graphs/blueprint/skills/blueprint/SKILL.md 'Never ask for a secret value.' 'preflight records credentials by name only'
+rule graphs/blueprint/skills/blueprint/SKILL.md '`decisions` are binding.' 'interview answers bind every later stage'
 
 # ---- Required files ----
 for f in install.sh README.md CLAUDE.md settings.json loop.md .gitignore .githooks/pre-commit; do

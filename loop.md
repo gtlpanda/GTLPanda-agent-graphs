@@ -15,7 +15,7 @@ Stopping an iteration never skips steps 5 to 7.
 3. **Repair graph.** These instructions are the opt-in to the Workflow tool for
    this step. The graph checks, fixes, reviews, QA-audits, and stops on its own; you own
    its state and every commit.
-   1. Read the ledger at `"$(git rev-parse --git-path harness-loop)/ledger.json"`
+   1. Read the ledger at `"$(git rev-parse --path-format=absolute --git-path harness-loop)/ledger.json"`
       (inside `.git`, never committed). Missing or unparseable means
       `{"runs": [], "stuckSigs": [], "blockedOn": null, "idleRuns": 0}`; say so
       if it was unparseable. A missing `blockedOn` means `null`, a missing

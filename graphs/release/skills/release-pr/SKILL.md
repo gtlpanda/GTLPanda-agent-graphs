@@ -17,7 +17,7 @@ inside stage `land`, only with an approval the user gave for one exact head.
 
 1. `REPO="$(git rev-parse --show-toplevel)"`. PR number: the argument, or
    `gh pr view --json number -q .number` for the current branch. None: stop and ask.
-2. State: `D="$(git rev-parse --git-path harness-release)/<pr>"`; `mkdir -p "$D"`.
+2. State: `D="$(git rev-parse --path-format=absolute --git-path harness-release)/<pr>"`; `mkdir -p "$D"`.
    After every workflow run, write the returned ledger to `$D/ledger.json`
    (inside `.git`, never committed). If `$D/ledger.json` already exists, read it
    and resume from its status instead of starting over: `merged` resumes at

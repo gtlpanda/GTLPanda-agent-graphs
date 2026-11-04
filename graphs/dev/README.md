@@ -132,9 +132,9 @@ Unattended by default: questions come before any code exists (dirty tree,
 1. Branch: if on the default branch, create `dev/<slug>`. Detect the base.
 2. Run `dev-build` with `approval: advisor`. With `/dev --review`, it stops at
    `plan-ready`: show the acceptance criteria and components, ask for approval
-   or edits, save the plan to `$(git rev-parse --git-path harness-dev)/plan.json`,
+   or edits, save the plan to `$(git rev-parse --path-format=absolute --git-path harness-dev)/plan.json`,
    and re-run with it. An approved plan is never passed in `args`: workflow scripts
-   cannot read files and a real plan is ~50 KB, so `skills/dev/run-script.mjs`
+   cannot read files and a real plan is ~50 KB, so the shared `core/skills/workflow-state/run-script.mjs`
    writes it into a copy of `dev-build.js` (one line, `const INJECTED_PLAN = null`,
    changes) and `/dev` runs that copy with `scriptPath`.
 3. On `done`: run `/verify` itself, then commit. One commit per component when
