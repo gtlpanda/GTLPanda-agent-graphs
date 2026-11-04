@@ -70,7 +70,8 @@ planning), `completed` (component ids already built; resume skips them),
   and non-empty owner lists in a repo with no map. A plan saved before these fields existed still
   runs (missing counts as empty). The map file never counts toward the 8-file cap and is not
   overlap; two creating components still share it, so `/dev` commits such a plan as one commit.
-  A rework is told each component's owners and may not edit the map.
+  A rework is told each component's owners and may edit the map only to fix owner records the audit
+  found missing or to undo a map change the advisor said to remove.
 - `behavior_changes[]`, `out_of_scope[]`, `risks[]` (`{risk, mitigation}`).
 - Complexity gate: more than 8 files or 2+ new services → the advisor sends it
   back to be split or justified.
@@ -88,7 +89,11 @@ the checker's VERIFY line, never the implementer's own run.
 
 **acceptance:** per criterion `{id, status: MET|UNMET, evidence}`, where
 evidence is a passing test at `file:line` that asserts the criterion; plus
-`behavior_changes_missing[]` (a change the code makes that the plan never listed).
+`behavior_changes_missing[]` (a change the code makes that the plan never listed); plus
+`owners[] {id, status: RECORDED|MISSING, evidence}` for every owner the plan builds. RECORDED needs
+the map to parse, the entry `built`, and its owner file to exist. Code has the last word: an owner
+not reported RECORDED is missing, and rides the same one rework (allowed to fix only those map
+entries) and re-audit as an unmet criterion, then escalates by id.
 
 **triage** (advisor, on the first audit's unplanned changes): per change `{n, decision: keep|remove|blocking, serves, reason}`.
 Code has the last word: no decision, two decisions, or a `keep` whose `serves` is neither `goal` nor a real

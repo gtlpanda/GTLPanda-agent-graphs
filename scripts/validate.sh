@@ -160,6 +160,7 @@ rule graphs/dev/skills/dev/SKILL.md 'Test ratio:' '/dev reports the test-to-code
 rule core/agents/advisor.md 'State left stale for the next one is a defect' 'triage follows leftover state into the next run'
 rule graphs/dev/agents/implementer.md 'Change no other entry, and add none' 'only /blueprint adds knowledge-map entries'
 rule core/agents/advisor.md 'following the Advisor rules in your `knowledge-map`' 'the plan gate checks the knowledge map'
+rule graphs/dev/agents/acceptance-auditor.md '`RECORDED` only when all three hold' 'owner records are checked against the map, not taken from the implementer'
 # harness-review runs standalone without the knowledge-map skill, so it keeps a copy of the
 # same-knowledge test; the knowledge-map skill is the source and the copy must match it exactly.
 same_test="$(grep -m1 '^\*\*Same-knowledge test:\*\*' core/skills/knowledge-map/SKILL.md)"

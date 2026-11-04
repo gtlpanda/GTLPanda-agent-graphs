@@ -394,3 +394,27 @@ undone with `git checkout` dropped uncommitted frontmatter (lessons.md).
 **Stats.** 13 files, +185/-21 plus the 106-line skill. 4 new routing tests (133 passed, 0 failed),
 13 mutations all caught, 5 validate bites (misspelled, inline, unindented, quoted-misspelled skill;
 drifted test copy). TEST: PASS, VERIFY: PASS.
+
+## 11. Owner records are checked, not trusted (2026-11-04)
+
+**What changed.** Follow-up to entry 10 (its deferred QA #6). The acceptance auditor now reports
+`owners[] {id, RECORDED|MISSING, evidence}` for every owner a plan builds: RECORDED only when
+`docs/knowledge-map.json` parses (it runs a parse and quotes it), the entry is `built`, and the owner
+file exists. Code has the last word: an owner not reported RECORDED, or reported both ways, is a gap.
+Gaps ride the existing acceptance loop (one rework, verify, re-audit, then escalate by id). The
+rework may edit the map only to fix those records or to undo a map change triage said to remove;
+it is told to create or move a missing owner file and to repair an unparseable map's syntax only.
+Any other map edit is an unplanned behavior change for triage. A blocking-triage escalation also
+names missing records. Plans without owners route as before.
+
+**Why the auditor and not the implementer.** The option the user picked described the implementer
+reporting `owners_recorded`. That is the builder grading itself; this repo gates on evidence from
+another node, so the check moved to the auditor, with no new retry path.
+
+**Bugs caught.** Reviewer: 2 MEDIUM (a triage "remove" on a map change could never be undone because
+the rework was forbidden to edit the map; a blocking-triage escalation hid missing records) and 1 LOW
+(README contradicted the new rule). QA auditor: 3 LOW (duplicate report entries decided by order;
+no way to repair an unparseable map under "change nothing else"; no instruction to create a missing
+owner file). All fixed, each with a test.
+
+**Stats.** 7 new routing tests (139 passed, 0 failed), 12 mutations all caught. TEST: PASS, VERIFY: PASS.

@@ -31,3 +31,14 @@ Compare the diff (`git diff <base>...HEAD` plus uncommitted changes) with the
 plan's `behavior_changes`. List every observable change the code makes that
 the plan did not list: an API shape, status code, default, error type, file
 format, or log line. Cite `file:line`. An empty list is a valid answer.
+
+## Owner records
+
+When the prompt lists owners the plan builds, check each one in
+`docs/knowledge-map.json` yourself; the implementer's report is a claim.
+`RECORDED` only when all three hold: the file parses (run a JSON parse of it,
+for example `node -e 'JSON.parse(require("fs").readFileSync("docs/knowledge-map.json","utf8"))'`,
+and quote the result), the id's entry has `status: "built"`, and its `owner`
+file exists. Otherwise `MISSING` with which check failed. Any other change
+to the map, to another entry or as a new entry, is an unplanned behavior
+change. With no owners listed, `owners` is empty.
