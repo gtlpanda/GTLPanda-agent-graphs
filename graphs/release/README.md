@@ -120,7 +120,7 @@ with what to watch), `reason`, `pr`, `head`, `base`,
 
 ## `/release-pr` (orchestrator skill)
 
-State lives in `$(git rev-parse --git-path harness-release)/<pr>/ledger.json`
+State lives in `$(git rev-parse --path-format=absolute --git-path harness-release)/<pr>/ledger.json`
 (inside `.git`, never committed), so the approval and merge SHA carry across
 invocations and a crashed run resumes.
 

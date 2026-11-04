@@ -16,24 +16,35 @@ notes. At least one of the two.
 
 ## When to ask
 
-All questions come in section 3, once, before anything is designed. The
+The interview comes in section 3, once, before anything is designed. Its
 answers become binding decisions: later stages build on them and may not
-reverse them. Every other stop is a report.
+reverse them. The only other questions are the two preflight ones in section 1
+(which folder is the project, and whether to replace a saved interview). Every
+other stop is a report.
 
 **Never ask for a secret value.** Preflight items (API keys, credentials) are
 recorded by name only; the human supplies values through the environment when
-a build needs them. Before saving the request or any answer, look for anything
-shaped like a credential (a token prefix such as `sk_`, `ghp_`, `AKIA`, a
-private key block, a long random string after `=` or `:`) and replace it with
-`<redacted: what it is>`; tell the human to rotate it. Never repeat it.
+a build needs them. Redact before anything leaves your hands: the request
+text (once, in section 1; the redacted text is what the workflow gets), every
+answer, and the returned ledger before it is written to `run1.json`. Redacting
+means finding anything shaped like a credential (a token prefix such as `sk_`,
+`ghp_`, `AKIA`, a private key block, a long random string after `=` or `:`) and
+replacing it with `<redacted: what it is>`; tell the human to rotate it. Never
+repeat it.
 
 ## 1. Preflight
 
-1. Directory: `HERE="$(pwd -P)"`. If `HERE` is empty, or `git rev-parse
-   --show-toplevel` fails, or it names a directory other than `HERE` while
-   `HERE` is empty (an empty folder inside another repo), this is a new app:
-   offer `git init` in `HERE` (it changes nothing else), and stop if declined.
-   Then `REPO="$(git rev-parse --show-toplevel)"`.
+1. Which folder is the project:
+   `HERE="$(pwd -P)"`; `TOP="$(git rev-parse --show-toplevel 2>/dev/null)"`.
+   - `TOP` is empty (not inside a repo): a new app. Offer `git init` in `HERE`
+     (it changes nothing else); stop if declined.
+   - `TOP` equals `HERE`: this repo is the project.
+   - `TOP` is another directory (`HERE` sits inside a bigger repo): if
+     `[ -z "$(ls -A "$HERE")" ]` or the only files in `HERE` are the `--doc`
+     files, it is a new app: offer `git init` in `HERE`. Otherwise ask which
+     is meant: a feature in the repo at `TOP`, or a new app in `HERE`
+     (`git init` there).
+   Then `REPO="$(git rev-parse --show-toplevel)"` from the chosen folder.
 2. Every `--doc` path, resolved against `HERE` with `~` expanded, must exist.
    A missing one: stop and say which. Pass the absolute paths on.
 3. State: `S="$(git rev-parse --path-format=absolute --git-path harness-blueprint)"`;
@@ -42,8 +53,8 @@ private key block, a long random string after `=` or `:`) and replace it with
    interview is saved there and ask whether to start over or stop. Starting
    over deletes `request.json`, `run1.json`, and `state.json` first, so no
    answer from the old request survives next to the new one.
-4. Save `{"request": <text or null, redacted>, "docs": [<absolute paths>]}`
-   to `$S/request.json`.
+4. Redact the request text, then save `{"request": <redacted text or null>,
+   "docs": [<absolute paths>]}` to `$S/request.json`.
 
 ## 2. Run the interview graph
 
@@ -51,10 +62,10 @@ Workflow tool with `name: "blueprint-design"` (if not found, `scriptPath` set
 to the absolute path of `~/.claude/workflows/blueprint-design.js`; if that is
 missing too, tell the human to run `./install.sh` in their PandaStack checkout
 and stop). Args:
-`{"repo": REPO, "request": <text, omitted if none>, "docs": [<paths>]}`.
+`{"repo": REPO, "request": <the redacted text, omitted if none>, "docs": [<absolute paths>]}`.
 There are no timed live runs yet; say so at launch.
 
-Write the returned ledger to `$S/run1.json`, then act on `status`.
+Redact the returned ledger, write it to `$S/run1.json`, then act on `status`.
 
 ## 3. On `needs-human`: the interview
 
@@ -68,13 +79,13 @@ Write the returned ledger to `$S/run1.json`, then act on `status`.
 3. In one message, with no further AskUserQuestion call (the interview is
    capped at the questions above): show the preflight list
    (`ledger.preflight`: what, why, needed by; names only, never values) and
-   `ledger.assumptions`, including the questions past the cap with their
-   defaults. Ask the human to reply with the preflight items they already
-   have and any assumption they want to override. Skip a list that is empty.
+   `ledger.assumptions`, each shown with its `id` (`A1`, ... or the `Q<n>` of
+   a question past the cap). Ask the human to reply with the preflight items
+   they already have and any assumption they want to override, by id. Skip a
+   list that is empty.
 4. Apply the reply. A preflight item they name gets `have: true`; every other
    item `have: false` (owed). An override becomes a decision with the
-   overridden item's id (`from` for a question past the cap, otherwise
-   `A<n>` by its position in the list) and is removed from `assumptions`.
+   overridden assumption's `id` and is removed from `assumptions`.
 5. Save `$S/state.json`:
    `{"request", "docs", "brief": ledger.brief, "decisions": [{"id", "question", "answer", "resolves", "note"}],
    "assumptions": [...], "preflight": [{"what", "why", "needed_by", "have": true|false}]}`.

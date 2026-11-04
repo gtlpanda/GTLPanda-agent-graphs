@@ -74,7 +74,7 @@ const ledger = {
   brief: null,       // the extractor's brief
   questions: [],     // what the skill asks, in rank order, recommended option first
   preflight: [],     // what a human must supply before an unattended build
-  assumptions: [],   // decided without asking; questions past the cap land here with their default
+  assumptions: [],   // decided without asking, each with an id (A<n>, or Q<n> for a question past the cap)
   history: [],       // one entry per node run, in order
 }
 // shared
@@ -263,10 +263,13 @@ const capped = capQuestions(qs.questions)
 if (capped.error) {
   return finish('escalate', `${capped.error} questions resolve contradictions, more than the ${MAX_QUESTIONS}-question interview holds: fix the documents first`)
 }
-const trimmed = capped.trimmed.map(q => ({ from: q.id, assumption: q.default_if_unasked, why: `not asked (ranked below the ${MAX_QUESTIONS}-question cap): ${q.question}` }))
+// Every assumption gets a stable id the human can name to override it: A1, A2, ... for the
+// questioner's own, the question's id for one past the cap.
+const own = (Array.isArray(qs.assumptions) ? qs.assumptions : []).map((a, i) => ({ id: `A${i + 1}`, ...a }))
+const trimmed = capped.trimmed.map(q => ({ id: q.id, from: q.id, assumption: q.default_if_unasked, why: `not asked (ranked below the ${MAX_QUESTIONS}-question cap): ${q.question}` }))
 ledger.history.push({ node: 'ask', questions: qs.questions.length, asked: capped.asked.length, trimmed: trimmed.length })
 return finish('needs-human', `${capped.asked.length} question(s) for the human; ${trimmed.length} more assumed`, {
   questions: capped.asked.map(recommendedFirst),
   preflight: Array.isArray(qs.preflight) ? qs.preflight : [],
-  assumptions: [...(Array.isArray(qs.assumptions) ? qs.assumptions : []), ...trimmed],
+  assumptions: [...own, ...trimmed],
 })

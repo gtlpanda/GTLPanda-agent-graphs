@@ -387,6 +387,11 @@ against the repo instead of the current directory, `--git-path` relative to the 
 every graph's skill, unspecified overrides). All fixed; the code ones with tests. Preflight and
 overrides now come back in one free-text reply, so the 12-question cap holds.
 
+**Final PR review.** 2 MEDIUM, 2 LOW, all fixed: assumptions now get stable ids from the workflow
+(`A<n>`, or the `Q<n>` past the cap) so an override names one exactly; the new-app check is runnable
+commands and asks when a non-empty folder sits inside another repo; the request is redacted once and
+the ledger before `run1.json`; three READMEs now show the absolute `--git-path`.
+
 **Untested.** No live run: agents, prompts, and the skill's interview have only run against mocks.
 The default-stack rule lives in `questioner.md` until run 2's researcher needs it too.
 

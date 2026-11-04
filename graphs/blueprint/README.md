@@ -50,7 +50,8 @@ assumptions `{from: Q<n>, assumption: <its default>, why}`. More than 12 questio
 contradictions escalate: the documents need fixing first. A `resolves` id must be a contradiction in the brief. The recommended option is moved first.
 
 **ledger:** `status` (`needs-human` | `escalate`), `reason`, `brief`, `questions`, `preflight`,
-`assumptions`, `history`.
+`assumptions` (each with an `id`: `A<n>`, or the `Q<n>` of a question past the cap, so an override
+names it exactly), `history`.
 
 Default stack (in the questioner): the `scaffold-app` stack, or the repo's own in an existing repo. A
 question about the stack is asked only when a requirement may force a departure.

@@ -89,7 +89,7 @@ await test('doc mode: brief -> ranked questions -> needs-human with brief, quest
   assert.deepEqual(result.questions.map(x => x.id), ['Q1', 'Q2', 'Q3'])
   assert.equal(result.brief.goal, BRIEF().goal)
   assert.deepEqual(result.preflight, QS().preflight)
-  assert.deepEqual(result.assumptions, QS().assumptions)
+  assert.deepEqual(result.assumptions, QS().assumptions.map((a, i) => ({ id: `A${i + 1}`, ...a })), 'the questioner\'s assumptions get ids A1, A2, ...')
   assert.equal(types(calls), 'extractor,questioner')
 })
 await test('greenfield: no documents, the extractor is told so and the interview still runs', async () => {
@@ -104,7 +104,8 @@ await test('more than 12 questions: the 12 highest-ranked are asked, the rest be
   const { result } = await run(fn, { extractor: [BRIEF()], questioner: [QS(many)] }, ARGS)
   assert.deepEqual(result.questions.map(x => x.id), many.slice(0, 12).map(x => x.id))
   const trimmed = result.assumptions.filter(a => a.from)
-  assert.deepEqual(trimmed.map(a => [a.from, a.assumption]), [['Q13', 'default 13'], ['Q14', 'default 14'], ['Q15', 'default 15']])
+  assert.deepEqual(trimmed.map(a => [a.id, a.from, a.assumption]), [['Q13', 'Q13', 'default 13'], ['Q14', 'Q14', 'default 14'], ['Q15', 'Q15', 'default 15']])
+  assert.equal(result.assumptions[0].id, 'A1', 'the questioner\'s own assumptions come first, numbered from A1')
   assert.match(trimmed[0].why, /not asked/)
 })
 await test('a question that resolves a contradiction is always asked, even when it ranks below the cap', async () => {
