@@ -417,4 +417,5 @@ the rework was forbidden to edit the map; a blocking-triage escalation hid missi
 no way to repair an unparseable map under "change nothing else"; no instruction to create a missing
 owner file). All fixed, each with a test.
 
-**Stats.** 7 new routing tests (139 passed, 0 failed), 12 mutations all caught. TEST: PASS, VERIFY: PASS.
+**Stats.** 6 new routing tests (139 passed, 0 failed), 12 mutations all caught; a 7th test for missing
+records and a map removal together came from the final review (140 passed). TEST: PASS, VERIFY: PASS.
