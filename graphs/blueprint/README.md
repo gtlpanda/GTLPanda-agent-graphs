@@ -8,8 +8,9 @@ advisor's design gate. Entry point: the `/blueprint` skill.
 
 Status: **run 1 (intake and interview)** passed its first live run (a reading-list
 app: 8 questions in about a minute). **Run 2 (design and the advisor's design gate)**
-is built and tested with mocked agents (`tests/blueprint-design.test.mjs`); no live
-run yet. Research and spikes (run 2's evidence) and run 3 (backlog of `/dev`-sized
+passed its live run on the same app. The first attempt took 21 minutes and escalated, because the
+second gate reviewed the whole design again. With the re-gate, it was approved in round 2 with 6
+notes (retro 14). Research and spikes (run 2's evidence) and run 3 (backlog of `/dev`-sized
 slices, the knowledge map, preflight, your one approval) are planned, not built.
 
 ## Graph (run 1: `stage: interview`, the default)
@@ -28,10 +29,11 @@ extractor --malformed brief--> extractor (once, with the problems) --still--> es
 ```
 architect --structure problems--> architect (next round)
           --well formed--> advisor (Gating a design) --approve--> design-ready (reported, nothing written)
-                                                     --revise--> architect (next round)
+                                                     --revise--> architect (next round) --> re-gate: checks only the
+                                                                  blocking issues it sent back; anything else is a note
                                                      --blocked--> needs-human: each question names the id it challenges;
                                                                   /blueprint asks, the answer replaces that id, reruns (2 rounds max)
-at most 2 architect rounds, then escalate with the open issues
+at most 3 architect rounds, then escalate with the open issues
 ```
 
 ## Roles
@@ -41,7 +43,7 @@ at most 2 architect rounds, then escalate with the open issues
 | Orchestrator | the `/blueprint` session | opus  | high   | once per request; asks, saves  |
 | Extractor    | `agents/extractor.md`   | sonnet | high   | once, plus one revision        |
 | Questioner   | `agents/questioner.md`  | sonnet | high   | once, plus one revision        |
-| Architect    | `agents/architect.md`   | sonnet | high   | once, plus one revision        |
+| Architect    | `agents/architect.md`   | sonnet | high   | once, plus up to two revisions |
 | Design gate  | `core/agents/advisor.md` | fable | high   | after each well-formed design  |
 
 ## Contracts
@@ -86,7 +88,9 @@ an ADR; any decision or assumption id in neither `honors` nor `conflicts`, unkno
 `knowledge-map` skill does not define, no `changes_together_because`, a `utils`/`helpers`/`common`/`shared` owner (directory or file), an
 unknown user, or (outside `authn`, `authz`, `input-validation`, `money`) fewer than two users. Each goes back as a
 blocking issue. The advisor then screens the 8 red flags, premises, and surfaces; `GATE_SCHEMA` is shared with `dev-build.js`.
-An `approve` that carries a blocking issue, or leaves any id in `conflicts`, counts as `revise`. A `blocked` question must start with the id it challenges
+An `approve` that carries a blocking issue, or leaves any id in `conflicts`, counts as `revise`. Only the first gate reviews the
+whole design. A re-gate's blocking issue must start with `#<n>:` (an issue it sent back) or a decision or assumption id; any other
+finding becomes a `notes` entry for the human, and a re-gate `revise` with nothing in scope is `design-ready`. A `blocked` question must start with the id it challenges
 (`Q2: ...`) or `new: `, or the run escalates; the ledger returns `questions[] {about, question}`.
 
 Default stack: `core/skills/default-stack` (one owner, preloaded by the questioner, architect, and

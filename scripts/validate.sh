@@ -173,6 +173,8 @@ rule graphs/blueprint/agents/architect.md '`decisions` are binding: the human ma
 rule graphs/blueprint/agents/architect.md 'only the human overrides one' 'the architect never overrides an assumption'
 rule core/agents/advisor.md '## Gating a design' 'designs are gated before a backlog is cut from them'
 rule core/agents/advisor.md 'Hand-synced list' 'the design gate screens for the eight red flags'
+rule core/agents/advisor.md 'Re-gating a revision: check only the blocking issues you sent back' 'a re-gate narrows the work instead of reviewing a new design'
+rule graphs/blueprint/skills/blueprint/SKILL.md 'entry in `notes`' 'the design report shows the findings the advisor did not send back'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'decisions:s.decisions.map(d=>({id:d.id,answer:d.answer}))' 'design args come from one exact command, never paraphrased'
 rule graphs/blueprint/skills/blueprint/SKILL.md '"none" keeps every assumption' 'the optional last interview step says so (L0 finding)'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'Each answer replaces what it challenges' 'a gate answer never sits next to the decision it overrides'

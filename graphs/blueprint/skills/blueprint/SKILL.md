@@ -102,12 +102,13 @@ Redact the returned ledger, write it to `$S/run1.json`, then act on `status`.
    `node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify({mode:s.brief.mode,requirements:s.brief.requirements.map(r=>r.id),decisions:s.decisions.map(d=>({id:d.id,answer:d.answer})),assumptions:s.assumptions.map(a=>a.id)}))' "$S/state.json"`
 2. Run the same workflow with those args plus `"repo": REPO`,
    `"stage": "design"`, and `"statePath": "$S/state.json"` (absolute).
-   Say at launch that the design stage has no timed live run yet.
+   Say at launch that the first live design run took about 20 minutes.
    Redact the returned ledger, write it to `$S/run2.json`, then act on `status`:
    - `design-ready`: report the design compactly: `summary`; each module with
      its responsibility and requirement ids; for each boundary, the pick and
      the shape it beat; each ADR's decision; departures from the default stack;
-     knowledge items with their owners; and every `UNVERIFIED` premise. Nothing
+     knowledge items with their owners; every `UNVERIFIED` premise; and every
+     entry in `notes` (findings the advisor did not send back). Nothing
      is approved or written to the repo here: the one approval comes with the
      backlog (run 3, not built yet).
    - `needs-human`: the advisor found a decision or assumption that cannot
@@ -129,7 +130,8 @@ Redact the returned ledger, write it to `$S/run1.json`, then act on `status`.
 
 ## 5. On `escalate`
 
-Stop and report `reason`, any `issues` the last design round left open, and
+Stop and report `reason`, any `issues` the last design round left open, any
+`notes`, and
 what the human must change (usually the documents: a missing path, or more
 contradiction questions than an interview can hold). Do not ask.
 
