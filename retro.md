@@ -497,3 +497,32 @@ todo). A knowledge owner path is not checked against module names (paths and nam
 **Stats.** 51 new tests (19 plus 32 table rows; 209 passed, 0 failed), 25 mutations, all caught.
 Diff about 780 added lines, about 300 of them tests: over the ~300 guide, and already the B2a half of
 the split.
+
+## 14. L1-design live run; the design gate re-gates a revision (2026-11-05)
+
+**What changed.** The first live design run on the reading-list app (run wf_164f6cf0-7b5) took
+1265 s (4 agents, 206k subagent tokens). It escalated with "design not approved after 2 architect
+round(s)" and failed one of its four pre-registered conditions (approved within one revision). The
+other three passed: 18 of 18 ids honored, 0 departures, 0 critical gaps. The round-2 gate reviewed
+the whole design again (8 modules, 26 failure modes, 16 ADRs) and found 2 new blocking issues. One of
+them was caused by a round-1 fix. Fix: `MAX_DESIGN_ROUNDS` is now 3. Only the first gate is a full
+review. Every later gate is a re-gate (`regatePrompt`) that checks only the blocking issues it sent
+back. A re-gate blocking issue counts only when the references before its colon include `#<n>` (an
+issue it sent back) or a decision or assumption id (`inScope`). Any other finding goes to
+`ledger.notes` for the human, and a re-gate `revise` with nothing in scope is `design-ready`.
+`gatePrompt` stayed byte-identical, so the resume replayed round 1 from cache. The resumed run took
+163 s (56k tokens): the re-gate approved in round 2 with 6 notes, all marked non-blocking by the
+advisor itself. So the code's downgrade of an out-of-scope blocking issue is covered by tests, not
+yet by a live run.
+
+**Bugs caught.** A pre-merge re-review of B2a (MEDIUM, merged in #8): an `approve` with ids still in
+`conflicts` returned `design-ready`. The review of this change found 2 MEDIUM and 3 LOW, all fixed
+with tests:
+- MEDIUM: a full-review approve turned into a revision lost its non-blocking findings.
+- MEDIUM: the synthetic conflicts issue could reuse an advisor's issue number.
+- LOW: a `blocked` gate dropped its issues.
+- LOW: the scope prefix missed `**q1:**`, `Q1, Q2:` and `Issue #1:`.
+- LOW: advisor.md still said every revise sends the design back.
+
+**Stats.** 219 tests passed, 0 failed (10 new, plus the 2-round tests moved to 3), 15 mutations,
+all caught. 2 validate.sh rules (both checked to fail when their text is removed).

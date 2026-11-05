@@ -21,7 +21,9 @@ export const meta = {
 // stage design (run 2; the skill passes the saved answers):
 //   architect --structure problems--> architect (next round)
 //             --well formed--> advisor(gate) --approve--> design-ready (the skill reports it; nothing is written)
-//                                            --revise--> architect (next round)
+//                                            --revise--> architect (next round); every later gate re-gates:
+//                                                        it checks only the blocking issues it sent back, and
+//                                                        anything else it finds becomes a note for the human
 //                                            --blocked--> needs-human (each question names the id it challenges;
 //                                                         the skill asks, replaces that decision or assumption, reruns)
 //   at most MAX_DESIGN_ROUNDS architect calls, then escalate
@@ -40,8 +42,9 @@ const NODES = {
 }
 // Three AskUserQuestion calls of four. Lower-ranked questions become assumptions.
 const MAX_QUESTIONS = 12
-// The design plus one revision; a design the gate still rejects needs a human.
-const MAX_DESIGN_ROUNDS = 2
+// The design, the revision after the full review, and one more for what the
+// re-gate still blocks; a design the gate still rejects needs a human.
+const MAX_DESIGN_ROUNDS = 3
 // Innovation tokens: departures from the default stack. A fourth is a blocking problem.
 const MAX_DEPARTURES = 3
 // The knowledge-map skill defines the kinds, which ones get an owner from their
@@ -137,6 +140,7 @@ const ledger = {
   gate: null,        // stage design: the advisor's latest verdict
   designRounds: 0,   // stage design: architect calls so far
   issues: [],        // stage design: what the last round left open, when it escalates
+  notes: [],         // stage design: gate findings not sent back to the architect, for the human ({round, n, issue, fix})
   history: [],       // one entry per node run, in order
 }
 // shared
@@ -441,6 +445,47 @@ ${json(design)}
 Gate it following your "Gating a design" instructions. verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix and blocking true or false (empty when approving). questions: only when blocked, each one a question only the human can answer, starting with the decision or assumption id it challenges and a colon ("Q2: ..."), or "new: " when it challenges none.`
 }
 
+function regatePrompt(design, checked) {
+  return `${where}
+Interview state: ${STATE_PATH}. The human's decisions (binding):
+${json(DECISIONS)}
+
+You sent the design back with these blocking issues:
+${checked.length ? checked.map(i => `#${i.n}: ${i.issue}${i.fix ? ` (fix: ${i.fix})` : ''}`).join('\n') : '(none: every issue was non-blocking)'}
+
+The architect's revised design:
+${json(design)}
+
+Re-gate it: check only that each issue above is fixed and that its fix broke nothing. verdict: approve, revise, or blocked. A blocking issue must start with the issue it is about ("#2: still ...", "#2: the fix broke ...") or with the decision or assumption id the design now breaks ("Q2: ..."). Anything else you notice is blocking false: it goes to the human with the backlog, not back to the architect. questions: only when blocked, each starting with the decision or assumption id it challenges and a colon, or "new: ".`
+}
+
+// A re-gate's blocking issue counts only when it opens with references and a
+// colon, and one of them is an issue it was asked to check (#<n>) or a binding
+// decision or assumption id: "Q2:", "**q2, A1:**", "Issue #2:". A sentence
+// that mentions an id ("the fix for Q2 is incomplete: ...") is a note. So each
+// re-gate narrows the work instead of reviewing a new design.
+function inScope(issue, checked) {
+  const m = /^[\s*_`]*([#\w,\/ ]+?)[\s*_`]*:/.exec(String(issue.issue || ''))
+  if (!m) return false
+  const tokens = m[1].split(/[,\/\s]+/).filter(Boolean)
+  if (!tokens.every(t => /^(#\d+|issue|[A-Za-z]+\d+)$/i.test(t))) return false
+  const ids = [...DECISIONS.map(d => d.id), ...ASSUMPTION_IDS].map(id => id.toUpperCase())
+  return tokens.some(t => {
+    const ref = /^#(\d+)$/.exec(t)
+    if (ref) return checked.some(c => String(c.n) === ref[1])
+    return ids.includes(t.toUpperCase())
+  })
+}
+// Gate findings the architect never sees reach the human, each one once.
+const noted = new Set()
+function note(round, issues) {
+  for (const i of issues) {
+    if (noted.has(i)) continue
+    noted.add(i)
+    ledger.notes.push({ round, n: i.n, issue: i.issue, fix: i.fix || '' })
+  }
+}
+
 // ---------- run ----------
 if (!REPO) return finish('escalate', 'args.repo is required and must be an absolute path')
 if (!STAGE) return finish('escalate', 'args.stage must be interview or design')
@@ -451,6 +496,7 @@ if (STAGE === 'design') {
   log(`repo ${REPO}; design (${MODE}); ${REQ_IDS.length} requirement(s), ${DECISIONS.length} decision(s), ${ASSUMPTION_IDS.length} assumption(s)`)
   let design = null
   let issues = null
+  let checked = null   // the blocking issues the last gate sent back; null until the first gate
   for (;;) {
     if (ledger.designRounds >= MAX_DESIGN_ROUNDS) {
       return finish('escalate', `design not approved after ${MAX_DESIGN_ROUNDS} architect round(s)`, { design, issues })
@@ -466,26 +512,39 @@ if (STAGE === 'design') {
       issues = problems.map((issue, i) => ({ n: i + 1, issue, fix: 'restructure the design so this holds', blocking: true }))
       continue
     }
-    const gate = await runNode('gate', `gate: design #${round}`, gatePrompt(design), GATE_SCHEMA)
+    const regate = checked !== null
+    const prompt = regate ? regatePrompt(design, checked) : gatePrompt(design)
+    const gate = await runNode('gate', `${regate ? 're-gate' : 'gate'}: design #${round}`, prompt, GATE_SCHEMA)
     if (!gate) return finish('escalate', nodeFailure('gate', 'on the design'), { design })
     ledger.gate = gate
-    ledger.history.push({ node: 'gate', round, verdict: gate.verdict, issues: list(gate.issues).length })
-    // An approval that still carries a blocking issue, or leaves a conflict unresolved, is a revision.
-    const blocking = list(gate.issues).filter(i => i && i.blocking === true)
-    const conflicted = list(design.conflicts).map(c => c.id)
-    if (gate.verdict === 'approve' && conflicted.length) {
-      blocking.push({ n: blocking.length + 1, issue: `conflicts ${conflicted.join(', ')} are unresolved`, fix: 'design so each one holds, or the gate blocks with a question for the human', blocking: true })
-    }
-    if (gate.verdict === 'approve' && !blocking.length) return finish('design-ready', `design approved in round ${round}`, { design })
+    const found = list(gate.issues).filter(i => i && typeof i === 'object')
+    // A re-gate sends back only what is in scope, and a full-review approval
+    // sends back only its blocking issues; the rest becomes notes now.
+    const blocking = found.filter(i => i.blocking === true && (!regate || inScope(i, checked)))
+    if (regate || gate.verdict === 'approve') note(round, found.filter(i => !blocking.includes(i)))
+    ledger.history.push({ node: 'gate', round, scope: regate ? 're-gate' : 'full', verdict: gate.verdict, issues: found.length, blocking: blocking.length })
     if (gate.verdict === 'blocked') {
       if (!list(gate.questions).length) return finish('escalate', 'the advisor blocked the design without a question for the human', { design })
       const asked = gateQuestions(gate.questions)
       if (asked.error) return finish('escalate', asked.error, { design })
+      note(round, found)
       return finish('needs-human', 'the advisor needs answers before this can be designed', { design, questions: asked.questions })
     }
-    if (gate.verdict === 'approve') { issues = blocking; continue }
-    if (!list(gate.issues).length) return finish('escalate', 'the advisor asked for a revision without naming an issue', { design })
-    issues = gate.issues
+    if (gate.verdict === 'revise' && !found.length) return finish('escalate', 'the advisor asked for a revision without naming an issue', { design })
+    // An approval that still carries a blocking issue, or leaves a conflict
+    // unresolved, is a revision; so is a full-review revise. A re-gate revise
+    // with nothing in scope is an approval: its findings are notes.
+    const conflicted = list(design.conflicts).map(c => c.id)
+    const settled = gate.verdict === 'approve' || regate
+    if (settled && conflicted.length) {
+      const n = Math.max(0, ...found.map(i => Number(i.n) || 0)) + 1
+      blocking.push({ n, issue: `conflicts ${conflicted.join(', ')} are unresolved`, fix: 'design so each one holds, or the gate blocks with a question for the human', blocking: true })
+    }
+    if (settled && !blocking.length) {
+      return finish('design-ready', `design approved in round ${round}`, { design })
+    }
+    issues = settled ? blocking : found
+    checked = issues.filter(i => i.blocking === true)
   }
 }
 

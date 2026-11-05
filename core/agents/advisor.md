@@ -102,9 +102,15 @@ Read the state in full, and the code the design cites when the repo has any.
   not confirmed.
 - Apply the Advisor rules in your `knowledge-map` skill to `knowledge`.
 - Mark an issue `blocking: true` when a planner would slice the wrong thing
-  without the fix, `false` for wording. Either way `revise` sends the design
-  back. The architect gets one revision in total, and a structure problem the
-  code finds uses it too, so put every issue in this gate.
+  without the fix, `false` for wording. In your first gate, either way
+  `revise` sends the design back. It is the only full review, so put every
+  issue in it.
+- Re-gating a revision: check only the blocking issues you sent back. A
+  blocking issue starts with the one it is about (`#2: ...`: still unfixed,
+  or broken by its fix) or with the decision or assumption id the design now
+  breaks (`Q2: ...`). The code treats any other blocking issue as non-blocking
+  and sends it to the human as a note, so each round narrows the work. A
+  re-gate `revise` with nothing in scope ends the design: it is approved.
 
 The eight red flags and the two-shapes check are adapted from gstack's
 `plan-eng-review`, which derives them from pstack's architect skill (Lauren

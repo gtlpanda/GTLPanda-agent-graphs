@@ -365,11 +365,12 @@ const RULES = [
 for (const [name, over, why] of RULES) {
   await test(`rejected: ${name}`, async () => {
     const bad = DESIGN(over)
-    const { result, calls } = await run(fn, { architect: [bad, p => { assert.match(p, why); return bad }] }, DARGS)
+    const again = p => { assert.match(p, why); return bad }
+    const { result, calls } = await run(fn, { architect: [bad, again, again] }, DARGS)
     assert.equal(result.status, 'escalate')
-    assert.match(result.reason, /design not approved after 2 architect round\(s\)/)
+    assert.match(result.reason, /design not approved after 3 architect round\(s\)/)
     assert.ok(result.issues.some(i => why.test(i.issue)), `issues: ${JSON.stringify(result.issues)}`)
-    assert.equal(types(calls), 'architect,architect')
+    assert.equal(types(calls), 'architect,architect,architect')
   })
 }
 await test('allowed: three departures, a silent failure that is tested, and a first-caller kind with one user', async () => {
@@ -397,15 +398,16 @@ await test('gate revise -> the architect gets the issues -> gate approve in roun
   assert.equal(result.designRounds, 2)
   assert.equal(types(calls), 'architect,advisor,architect,advisor')
 })
-await test('gate revise in the last round -> escalate with the issues, no third architect call', async () => {
+await test('gate revise in the last round -> escalate with the open issues, no fourth architect call', async () => {
+  const still = { ...ISSUE, issue: '#1: M1 still leaks the row format' }
   const { result, calls } = await run(fn, {
-    architect: [DESIGN(), DESIGN()],
-    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [ISSUE] })],
+    architect: [DESIGN(), DESIGN(), DESIGN()],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [still] }), GATE('revise', { issues: [still] })],
   }, DARGS)
   assert.equal(result.status, 'escalate')
-  assert.match(result.reason, /design not approved after 2 architect round\(s\)/)
-  assert.deepEqual(result.issues, [ISSUE])
-  assert.equal(types(calls), 'architect,advisor,architect,advisor')
+  assert.match(result.reason, /design not approved after 3 architect round\(s\)/)
+  assert.deepEqual(result.issues, [still])
+  assert.equal(types(calls), 'architect,advisor,architect,advisor,architect,advisor')
 })
 await test('gate blocked -> needs-human; each question names the id it challenges, so the answer replaces that id', async () => {
   const { result } = await run(fn, {
@@ -451,13 +453,119 @@ await test('an approval that leaves a conflict unresolved is a revision, never d
   assert.equal(result.status, 'design-ready')
   assert.deepEqual(result.design.conflicts, [])
   assert.equal(types(calls), 'architect,advisor,architect,advisor')
-  const stuck = await run(fn, { architect: [conflicted, conflicted], advisor: [GATE('approve'), GATE('approve')] }, DARGS)
+  const stuck = await run(fn, { architect: [conflicted, conflicted, conflicted], advisor: [GATE('approve'), GATE('approve'), GATE('approve')] }, DARGS)
   assert.equal(stuck.result.status, 'escalate')
-  assert.match(stuck.result.reason, /not approved after 2 architect round/)
+  assert.match(stuck.result.reason, /not approved after 3 architect round/)
 })
-await test('an approval with only non-blocking issues is design-ready', async () => {
+console.log('== blueprint-design: re-gate')
+const WORDING = { n: 2, issue: 'M2: rename the helper', fix: 'call it bookRows', blocking: false }
+await test('only the first gate reviews the whole design; the re-gate gets the issues it sent back and checks just those', async () => {
+  const { result, calls } = await run(fn, {
+    architect: [DESIGN(), DESIGN()],
+    advisor: [
+      p => { assert.doesNotMatch(p, /Re-gate it/); return GATE('revise', { issues: [ISSUE, WORDING] }) },
+      p => { assert.match(p, /Re-gate it: check only/); assert.match(p, /#1: M1 leaks the row format \(fix: parse at the boundary\)/); assert.doesNotMatch(p, /rename the helper/); return GATE('approve') },
+    ],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.deepEqual(result.history.filter(h => h.node === 'gate').map(h => h.scope), ['full', 're-gate'])
+  assert.equal(calls[3].label, 're-gate: design #2')
+})
+await test('a re-gate blocking issue on a checked issue (#n) or a binding id (Q1) goes back to the architect', async () => {
+  for (const issue of ['#1: the fix moved the leak into M2', 'Q1: the revision drops email login']) {
+    const back = { ...ISSUE, issue }
+    const { result, calls } = await run(fn, {
+      architect: [DESIGN(), DESIGN(), p => { assert.match(p, new RegExp(issue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))); return DESIGN() }],
+      advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [back] }), GATE('approve')],
+    }, DARGS)
+    assert.equal(result.status, 'design-ready')
+    assert.equal(result.designRounds, 3)
+    assert.deepEqual(result.notes, [])
+    assert.equal(types(calls), 'architect,advisor,architect,advisor,architect,advisor')
+  }
+})
+await test('a re-gate blocking issue outside its scope is a note, so a revise with nothing in scope is design-ready', async () => {
+  const fresh = [{ ...ISSUE, n: 1, issue: 'M3: a new finding nobody asked about' }, { ...ISSUE, n: 2, issue: '#9: an issue that was never sent' }, { ...ISSUE, n: 3, issue: 'no prefix at all' }, WORDING]
+  const { result, calls } = await run(fn, {
+    architect: [DESIGN(), DESIGN()],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: fresh })],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.deepEqual(result.notes.map(n => [n.round, n.issue]), fresh.map(i => [2, i.issue]))
+  assert.equal(types(calls), 'architect,advisor,architect,advisor')
+})
+await test('a re-gate still escalates on a revise with no issue, and still blocks to the human with a question', async () => {
+  const quiet = await run(fn, { architect: [DESIGN(), DESIGN()], advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise')] }, DARGS)
+  assert.equal(quiet.result.status, 'escalate')
+  assert.match(quiet.result.reason, /revision without naming an issue/)
+  const asked = await run(fn, { architect: [DESIGN(), DESIGN()], advisor: [GATE('revise', { issues: [ISSUE] }), GATE('blocked', { questions: ['Q1: Allow username login?'] })] }, DARGS)
+  assert.equal(asked.result.status, 'needs-human')
+})
+await test('a re-gate revise with nothing in scope is still a revision while conflicts stay open', async () => {
+  const conflicted = DESIGN({ honors: DESIGN().honors.filter(h => h.id !== 'Q1'), conflicts: [{ id: 'Q1', why: 'no email provider' }] })
+  const { result, calls } = await run(fn, {
+    architect: [DESIGN(), conflicted, p => { assert.match(p, /conflicts Q1 are unresolved/); return DESIGN() }],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [WORDING] }), GATE('approve')],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.equal(types(calls), 'architect,advisor,architect,advisor,architect,advisor')
+})
+await test('re-gate scope: the words before the colon must all be references, and one must be checked or binding', async () => {
+  const cases = [
+    ['**q1:** the revision drops email login', true], ['Q1, Q2: both answers lost', true], ['Issue #1: still leaks', true],
+    ['A1: the assumption is broken', true], ['Q13: a question past the cap is an assumption id too', true], ['#1, #2: still leaks', true], ['`#1`: still leaks', true],
+    ['Q9: an id nobody decided', false], ['#2: never sent back', false], ['the fix for Q1 is incomplete: see M2', false],
+    ['M3: a module, not a reference', false], ['Q1 no colon at all', false],
+  ]
+  for (const [issue, back] of cases) {
+    const { result } = await run(fn, {
+      architect: back ? [DESIGN(), DESIGN(), DESIGN()] : [DESIGN(), DESIGN()],
+      advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [{ ...ISSUE, issue }] }), ...(back ? [GATE('approve')] : [])],
+    }, DARGS)
+    assert.equal(result.status, 'design-ready', issue)
+    assert.equal(result.designRounds, back ? 3 : 2, issue)
+    assert.equal(result.notes.length, back ? 0 : 1, issue)
+  }
+})
+await test('a full-review approval turned into a revision keeps its non-blocking findings as notes', async () => {
+  const { result } = await run(fn, {
+    architect: [DESIGN(), DESIGN()],
+    advisor: [GATE('approve', { issues: [ISSUE, WORDING] }), GATE('approve')],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.deepEqual(result.notes, [{ round: 1, n: 2, issue: 'M2: rename the helper', fix: 'call it bookRows' }])
+})
+await test('a blocked gate keeps its findings as notes, so the human sees them with the questions', async () => {
+  const { result } = await run(fn, {
+    architect: [DESIGN(), DESIGN()],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('blocked', { issues: [{ ...ISSUE, issue: '#1: still leaks' }, WORDING], questions: ['Q1: Allow username login?'] })],
+  }, DARGS)
+  assert.equal(result.status, 'needs-human')
+  assert.deepEqual(result.notes.map(n => n.issue), ['M2: rename the helper', '#1: still leaks'])
+})
+await test('the unresolved-conflicts issue never reuses a number the advisor gave', async () => {
+  const conflicted = DESIGN({ honors: DESIGN().honors.filter(h => h.id !== 'Q1'), conflicts: [{ id: 'Q1', why: 'no email provider' }] })
+  const { result } = await run(fn, {
+    architect: [DESIGN(), conflicted, conflicted],
+    advisor: [
+      GATE('revise', { issues: [ISSUE, { ...ISSUE, n: 2 }, { ...ISSUE, n: 3 }] }),
+      GATE('revise', { issues: [{ ...ISSUE, n: 2, issue: '#2: still leaks' }] }),
+      p => { assert.equal(p.match(/^#2: /gm).length, 1); assert.match(p, /^#3: conflicts Q1 are unresolved/m); return GATE('approve') },
+    ],
+  }, DARGS)
+  assert.equal(result.status, 'escalate')
+})
+await test('a re-gate after a full review with only non-blocking issues checks nothing but the binding ids', async () => {
+  const { result } = await run(fn, {
+    architect: [DESIGN(), DESIGN()],
+    advisor: [GATE('revise', { issues: [WORDING] }), p => { assert.match(p, /\(none: every issue was non-blocking\)/); return GATE('approve') }],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+})
+await test('an approval with only non-blocking issues is design-ready, and they reach the human as notes', async () => {
   const { result } = await run(fn, { architect: [DESIGN()], advisor: [GATE('approve', { issues: [{ ...ISSUE, blocking: false }] })] }, DARGS)
   assert.equal(result.status, 'design-ready')
+  assert.deepEqual(result.notes, [{ round: 1, n: 1, issue: 'M1 leaks the row format', fix: 'parse at the boundary' }])
 })
 await test('gate blocked without a question, or revise without an issue -> escalate, never a silent loop', async () => {
   for (const [gate, why] of [[GATE('blocked'), /blocked the design without a question/], [GATE('revise'), /revision without naming an issue/]]) {
