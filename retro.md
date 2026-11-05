@@ -642,3 +642,40 @@ mutants are caught. The 2 missed are equivalent: noindex pages have no title fac
 findings, so the explicit `indexable` guards cannot be told apart. 1 new validate.sh rule, shown to
 fail when its phrase is removed. Four stacked PRs: 278, 266, 132, and 263 added lines (the review fixes, this entry
 included).
+## 18. The backlog module: format, ledger, and next-step rules (2026-11-05)
+
+**What changed.** `core/skills/backlog/` holds the format of `docs/backlog.json` and the rules the
+`/build-app` driver will run on: a zero-dependency `backlog.mjs` (CLI `check <path>` ending in
+`BACKLOG: PASS|FAIL`, same shape as gtm-brief) and a `SKILL.md` whose JSON example is tested against the
+code. `validateBacklog` checks ids `S1..Sn` in build order, criteria `S<n>-AC<k>` (1 to 8, each with
+`fails_when`), earlier-only `depends_on` (so no cycle is possible), full requirement coverage, at most 40
+slices, and no "stop and ask" in a goal (`/dev` lets task text override its no-ask rule). It uses nothing
+outside its own source, so the backlog stage can copy it verbatim; a test evaluates it in isolation.
+The ledger rules are pure: `nextSlice`, `blockedClosure`, `recordOutcome` (returns a new ledger),
+`frozenFiles`, `brake`. `readLedger` throws on a corrupt ledger rather than starting over, and
+`writeLedger` writes a temp file and renames it.
+
+**Design call.** The README's "three slice escalations in a row" fired on the third try of one slice
+when the driver retries it, so its re-plan never got a chance. The brake now counts *different* slices
+escalating with none landing in between (shared breakage), a slice that escalated goes after
+independent ready slices, and one slice is bounded by its own limits: two escalations re-plan it, two
+more mark it stuck (blocked). README updated to match.
+
+**Bugs caught.** Adversarial tests, before commit: `stop-and-ask` with hyphens passed the goal check;
+`"S01"` passed as a dependency, which the ledger's exact-id compare would never mark done, so the
+build would stop with a misleading "every remaining slice is blocked".
+
+Reviewer, on the uncommitted change (2 MEDIUM, 2 LOW, all fixed with tests): `replan` stayed true after
+the re-plan attempt failed, so a driver would re-plan again uncounted, past the limits; a tripped brake
+could never clear and a blocked slice had no way back, so a resumed build would stop at once (now
+`resume` and `unblock`); one ordering assertion could not fail; a comment claimed a drift test that does
+not exist yet (the backlog stage adds it with the copy).
+
+**Stats.** 27 new tests (294 passed, 0 failed in the suite, after rebasing on entries 15-17), 17 mutations, all caught (one survived at first:
+`unblock` keeping the re-plan count; an assertion was added).
+
+**Also measured this session (outside the repo).** `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` in the user
+env made every workflow `agent()` run on that model, ignoring `model: 'haiku'`/`'fable'` pins;
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=0` alone did not fix it. Removing it restored Haiku 5.5 and Fable 5.1
+(modelUsage in headless probes). A headless `claude -p` runs a Workflow script to completion. Both
+feed the driver design.
