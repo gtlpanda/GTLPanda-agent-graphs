@@ -37,6 +37,38 @@
 | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
 | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
 
+## Where it's going: the autobuild loop
+
+The graphs above are the parts of one loop that builds an app or a feature end
+to end. You describe the idea and answer one interview. You approve the design
+and the backlog once, then leave. The work comes back as one PR to approve.
+
+```
+/blueprint  interview → design → backlog of /dev-sized slices          ← you approve the design + backlog
+/autobuild  per slice: /dev on integration/<app> → /verify → fast-forward
+            done → one harness-repair over the branch → one PR → /release-pr   ← you approve the merge
+```
+
+- A slice that gets stuck is marked blocked, and the other slices keep
+  building. Two escalations on one slice re-plan it, and your decisions stay
+  fixed. A design call or a missing environment variable name sends you one
+  ping.
+- `docs/backlog.json` holds the plan, and only `/blueprint` writes it. Progress
+  lives in a ledger inside `.git`, and each slice commit starts with `S<n>:`.
+  A tested `backlog.mjs` owns the format and the next-step rules.
+- Three brakes stop the run and ping you:
+  - a third re-plan of one app;
+  - every remaining slice blocked;
+  - three slice escalations in a row.
+- Production deploys are never autonomous.
+
+Built so far: `/blueprint` run 1 (interview) and run 2a (design behind the
+advisor gate), plus `/dev`, `/loop`, and `/release-pr`. Next, in order:
+- research and spikes before the design;
+- the backlog and your one approval;
+- `/autobuild`;
+- a live end-to-end build of a toy reading-list app.
+
 It also carries the shared user-level config the graphs run on
 (`settings.json`, `CLAUDE.md`, `loop.md`, the `verify` gate): one repo,
 symlinked into `~/.claude/` on every machine.
