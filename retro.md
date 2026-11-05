@@ -554,3 +554,40 @@ with `GTM-BRIEF: PASS|FAIL`, exit code 0 or 1 (2 for usage).
 
 **Stats.** 12 tests (231 passed, 0 failed in the suite), 27 mutations, all caught. 2 validate.sh
 rules. Diff about 350 lines, about 150 of them tests.
+
+## 16. seo-check: the page checks of the SEO gate (2026-11-05)
+
+**What changed.** `graphs/seo/` is the first marketing graph; so far it holds the check.
+`node seo-check.mjs check <built dir> --site <url> [--json]` reads a site's build output (never
+the source) and checks every page's title, meta description, canonical, Open Graph tags, and
+JSON-LD. It prints `seo-check: <file>[:line]: error|warn <check>: <message>` lines and a count,
+and its last line is `SEO-CHECK: PASS|FAIL` (exit code 0 or 1; 2 for usage). Errors fail and
+warnings never do. Every rule names its source, and checked against Google's docs on 2026-11-05:
+- Google sets no length limit for titles or descriptions, so "title <= 60, description
+  150-160" from the old skill are warnings (our guide), never failures.
+- Google only accepts a canonical inside `<head>` and recommends an absolute URL.
+- FAQ rich results are no longer shown since 2026-05-07 (Google's FAQ doc, opened; the earlier
+  note said "summary only, not opened").
+- `og:image` must be absolute: the Open Graph URL type is http(s) URLs. Facebook's docs say
+  nothing either way.
+- A missing meta description is an error by our rule, labeled as ours (user, 3A).
+Shipped as three stacked PRs (user, 5A): the scanner, the checks for one page, then the command
+and docs. It stacks on the gtm-brief PR for the README Family column.
+
+**Bugs caught.** The tests caught `og:image` flagged as "two tags disagree" (Open Graph lets it
+repeat). The first review found 1 HIGH, 4 MEDIUM, and 2 LOW, each reproduced before the fix:
+- HIGH: the head ended only at `</head>` or `<body>`, so a `<meta>` after an `<img>` in the head,
+  or after content in minified HTML without head tags, passed. Browsers put it in `<body>`.
+- MEDIUM: tags between `</head>` and `<body>` were called "in body"; the parser puts them in
+  the head. One test asserted the wrong behavior.
+- MEDIUM: only the first `og:image` was checked. A `--site` root canonical without a trailing
+  slash failed. No test failed if warnings started failing the gate.
+- LOW: `&constructor;` decoded to function source; an all-noindex site passed silently.
+The re-check of the fixes found 1 HIGH and 2 LOW: a tracking pixel's `<img>` in a head
+`<noscript>` ended the head, so every Meta Pixel or tag-manager site would falsely fail (noscript
+and template content are now never scanned); text before a comment was not counted; a
+non-breaking space counted as whitespace. The scanner now follows the HTML parser's head modes.
+
+**Stats.** 21 tests (252 passed, 0 failed in the suite), 67 mutations, all caught (the scanner
+tests alone catch its 25). 2 validate.sh rules, both checked to fail when their text is removed.
+858 added lines in three PRs: 180, 358, and 320 (the last includes this entry).

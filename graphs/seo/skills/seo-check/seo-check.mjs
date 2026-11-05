@@ -1,10 +1,16 @@
+#!/usr/bin/env node
 // seo-check.mjs - checks the HTML of a built site for the tags search engines
 // and link previews read: title, meta description, canonical, Open Graph, and
-// JSON-LD. Zero dependencies. So far: the tag scanner and the checks for one
-// page; the command that checks a build follows (G2a, 2 of 3).
+// JSON-LD. Zero dependencies. It reads files only and fetches nothing.
+//   node seo-check.mjs check <built dir> --site <https://example.com/> [--json]
+// Prints one line per finding, then SEO-CHECK: PASS|FAIL. Errors fail, warnings
+// never do. Exit 0 pass, 1 fail, 2 usage.
+import { readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-// Every check a finding can name.
-export const CHECKS = ['title', 'description', 'canonical', 'og', 'json-ld']
+// Every check a finding can name; SKILL.md documents each one.
+export const CHECKS = ['files', 'title', 'description', 'canonical', 'og', 'json-ld']
 const OG_REQUIRED = ['og:title', 'og:description', 'og:image', 'og:url']
 const OG_URLS = ['og:image', 'og:url']
 // Open Graph arrays: a page may list several images, so two values do not disagree.
@@ -260,4 +266,104 @@ function checkJsonLd(script, error, warn) {
       }
     }
   }
+}
+
+// ---- The site ----
+// Every .html file under dir, relative to it with "/" separators, sorted.
+// Skips node_modules, dot directories, and symlinks.
+export function findPages(dir) {
+  const found = []
+  const walk = rel => {
+    for (const entry of readdirSync(join(dir, rel), { withFileTypes: true })) {
+      const path = rel ? `${rel}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        if (entry.name !== 'node_modules' && !entry.name.startsWith('.')) walk(path)
+      } else if (entry.isFile() && /\.html?$/i.test(entry.name)) found.push(path)
+    }
+  }
+  walk('')
+  return found.sort()
+}
+
+// Where a static host serves a file: a/index.html at /a/, a.html at /a.html.
+export function pageUrl(file, site) {
+  return new URL(file.replace(/(^|\/)index\.html?$/i, '$1'), site).href
+}
+
+// The same function as readBrief in core/skills/gtm-brief/gtm-brief.mjs; a test keeps the bodies identical.
+export function readText(path) {
+  let bytes
+  try { bytes = readFileSync(path) } catch (e) { throw new Error(`cannot read ${path}: ${e.code || e.message}`) }
+  if (bytes.includes(0)) throw new Error(`${path} is not a text file`)
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { throw new Error(`${path} is not UTF-8 text`) }
+}
+
+// Checks every page under dir. Returns {pages: [{file, url, indexable}],
+// findings: [{file, line, level, check, message}]}; file "." is the dir itself.
+export function checkSite(dir, site) {
+  const pages = []
+  const findings = []
+  let files
+  try { files = findPages(dir) } catch (e) {
+    return { pages, findings: [{ file: '.', line: 0, level: 'error', check: 'files', message: `cannot read ${dir}: ${e.code || e.message}` }] }
+  }
+  if (!files.length) findings.push({ file: '.', line: 0, level: 'error', check: 'files', message: `no .html files under ${dir}` })
+  for (const file of files) {
+    const url = pageUrl(file, site)
+    let html
+    try { html = readText(join(dir, file)) } catch (e) {
+      findings.push({ file, line: 0, level: 'error', check: 'files', message: e.message })
+      continue
+    }
+    const page = checkPage(html, url, site)
+    pages.push({ file, url, indexable: page.indexable })
+    for (const f of page.findings) findings.push({ file, ...f })
+  }
+  if (pages.length && !pages.some(p => p.indexable)) {
+    findings.push({ file: '.', line: 0, level: 'error', check: 'files', message: 'every page has noindex, so search engines index nothing (a staging build?)' })
+  }
+  return { pages, findings }
+}
+
+const USAGE = 'usage: seo-check.mjs check <built dir> --site <https://example.com/> [--json]'
+
+function parseArgs(argv) {
+  const [cmd, ...rest] = argv
+  const args = { dir: null, site: null, json: false }
+  if (cmd !== 'check') return null
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]
+    if (a === '--json') args.json = true
+    else if (a === '--site') args.site = rest[++i] ?? ''
+    else if (a.startsWith('--site=')) args.site = a.slice('--site='.length)
+    else if (a.startsWith('--') || args.dir !== null) return null
+    else args.dir = a
+  }
+  return args.dir !== null && args.site !== null ? args : null
+}
+
+function main(argv) {
+  const args = parseArgs(argv)
+  if (!args) { console.error(USAGE); return 2 }
+  const site = parseSite(args.site)
+  if (!site) { console.error(`seo-check: --site "${args.site}" is not an absolute http(s) URL\n${USAGE}`); return 2 }
+  const { pages, findings } = checkSite(args.dir, site)
+  const errors = findings.filter(f => f.level === 'error').length
+  if (args.json) console.log(JSON.stringify({ site: site.href, pages, findings }, null, 2))
+  else {
+    for (const f of findings) {
+      const where = f.file === '.' ? args.dir : join(args.dir, f.file)
+      console.log(`seo-check: ${where}${f.line ? `:${f.line}` : ''}: ${f.level} ${f.check}: ${f.message}`)
+    }
+    const count = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`
+    const skipped = pages.filter(p => !p.indexable).length
+    console.log(`seo-check: ${count(pages.length, 'page')}${skipped ? ` (${skipped} noindex, checked for JSON-LD only)` : ''}, ${count(errors, 'error')}, ${count(findings.length - errors, 'warning')}`)
+  }
+  console.log(`SEO-CHECK: ${errors ? 'FAIL' : 'PASS'}`)
+  return errors ? 1 : 0
+}
+
+// Run as a command, also through the ~/.claude/skills symlink install.sh makes.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  process.exitCode = main(process.argv.slice(2))
 }

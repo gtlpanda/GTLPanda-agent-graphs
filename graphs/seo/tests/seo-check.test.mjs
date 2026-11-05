@@ -1,8 +1,14 @@
 // seo-check.test.mjs - the SEO checker (graphs/seo/skills/seo-check/seo-check.mjs).
+import { join } from 'node:path'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { test } from '../../../scripts/workflow-harness.mjs'
-import { checkPage, parseSite, scanTags } from '../skills/seo-check/seo-check.mjs'
+import { test, REPO } from '../../../scripts/workflow-harness.mjs'
+import { CHECKS, checkPage, checkSite, findPages, pageUrl, parseSite, scanTags } from '../skills/seo-check/seo-check.mjs'
 
+const SKILL = join(REPO, 'graphs', 'seo', 'skills', 'seo-check')
+const SCRIPT = join(SKILL, 'seo-check.mjs')
 const SITE = parseSite('https://shelf.example')
 
 const PAGE = `<!doctype html>
@@ -256,4 +262,99 @@ await test('JSON-LD must parse and have @context and @type; FAQPage warns', asyn
 await test('--site must be an absolute http(s) URL; its path gains a trailing slash', async () => {
   assert.equal(parseSite('https://shelf.example/docs?x=1#y').href, 'https://shelf.example/docs/')
   for (const bad of ['shelf.example', '/docs', '//shelf.example', 'ftp://shelf.example', '', undefined]) assert.equal(parseSite(bad), null, String(bad))
+})
+
+
+console.log('== seo-check: the site')
+const site = files => {
+  const dir = mkdtempSync(join(tmpdir(), 'seo-check-'))
+  for (const [file, content] of Object.entries(files)) {
+    mkdirSync(join(dir, file, '..'), { recursive: true })
+    writeFileSync(join(dir, file), content)
+  }
+  return dir
+}
+await test('pages are every .html file, served where a static host serves them', async () => {
+  const dir = site({ 'index.html': '', 'about.html': '', 'blog/index.html': '', 'blog/a.htm': '', 'my page.html': '', 'style.css': '', 'node_modules/x/index.html': '', '.git/x.html': '', 'B.HTML': '' })
+  try {
+    assert.deepEqual(findPages(dir), ['B.HTML', 'about.html', 'blog/a.htm', 'blog/index.html', 'index.html', 'my page.html'])
+    symlinkSync(join(dir, 'about.html'), join(dir, 'linked.html'))
+    assert.ok(!findPages(dir).includes('linked.html'), 'symlinks are skipped')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+  assert.deepEqual(['index.html', 'about.html', 'blog/index.html', 'blog/a.htm', 'my page.html', 'xindex.html'].map(f => pageUrl(f, SITE)), [
+    'https://shelf.example/', 'https://shelf.example/about.html', 'https://shelf.example/blog/', 'https://shelf.example/blog/a.htm',
+    'https://shelf.example/my%20page.html', 'https://shelf.example/xindex.html',
+  ])
+  assert.equal(pageUrl('a/index.html', parseSite('https://shelf.example/docs')), 'https://shelf.example/docs/a/')
+})
+await test('checkSite checks each page, and a missing dir, an empty dir, or an unreadable page is an error', async () => {
+  const dir = site({ 'index.html': PAGE, 'bad.html': PAGE.replace('<title>', '<title></title><title>'), 'bin.html': '\u0000', 'latin1.html': '' })
+  try {
+    writeFileSync(join(dir, 'latin1.html'), Buffer.from([0x3c, 0xe9, 0x3e]))
+    const got = checkSite(dir, SITE)
+    assert.deepEqual(got.pages.map(p => [p.file, p.url, p.indexable]), [['bad.html', 'https://shelf.example/bad.html', true], ['index.html', 'https://shelf.example/', true]])
+    assert.deepEqual(got.findings.map(f => [f.file, f.check, f.message.replace(dir, '<dir>')]), [
+      ['bad.html', 'title', `two <title> elements in <head> (first at line ${line('<title>')})`],
+      ['bad.html', 'title', '<title> is empty'],
+      ['bad.html', 'canonical', 'canonical points to https://shelf.example/, not this page (https://shelf.example/bad.html): search engines index that page instead'],
+      ['bin.html', 'files', '<dir>/bin.html is not a text file'],
+      ['latin1.html', 'files', '<dir>/latin1.html is not UTF-8 text'],
+    ])
+    assert.match(checkSite(join(dir, 'gone'), SITE).findings[0].message, /cannot read .*gone: ENOENT/)
+    assert.match(checkSite(join(dir, 'index.html'), SITE).findings[0].message, /cannot read .*index\.html: ENOTDIR/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+  const staging = site({ 'index.html': PAGE.replace('<head>', '<head><meta name="robots" content="noindex">'), 'a.html': '<meta name=robots content=noindex>' })
+  try {
+    assert.deepEqual(checkSite(staging, SITE).findings.map(f => [f.file, f.message]), [['.', 'every page has noindex, so search engines index nothing (a staging build?)']])
+  } finally { rmSync(staging, { recursive: true, force: true }) }
+  const empty = site({ 'style.css': '' })
+  try { assert.deepEqual(checkSite(empty, SITE).findings.map(f => f.message), [`no .html files under ${empty}`]) } finally { rmSync(empty, { recursive: true, force: true }) }
+})
+
+console.log('== seo-check: the docs and the command')
+await test('SKILL.md documents every check, and the file reader matches gtm-brief\'s', async () => {
+  const skill = readFileSync(join(SKILL, 'SKILL.md'), 'utf8')
+  for (const check of CHECKS) assert.match(skill, new RegExp(`\\| \`${check}\` \\|`), check)
+  const body = (file, name) => new RegExp(`export function ${name}\\(path\\) \\{\\n([\\s\\S]*?)\\n\\}`).exec(readFileSync(file, 'utf8'))[1]
+  assert.equal(body(SCRIPT, 'readText'), body(join(REPO, 'core', 'skills', 'gtm-brief', 'gtm-brief.mjs'), 'readBrief'))
+})
+const cli = (...args) => spawnSync(process.execPath, args, { encoding: 'utf8' })
+await test('check prints each finding and ends with SEO-CHECK: PASS|FAIL and exit 0|1, also through a symlink', async () => {
+  const dir = site({
+    'good/index.html': PAGE,
+    'bad/index.html': PAGE.replace('<title>Shelf - a reading list that remembers every book</title>', ''),
+    'warned/index.html': PAGE.replace('<title>Shelf - a reading list that remembers every book</title>', `<title>${'x'.repeat(61)}</title>`),
+    'warned/404.html': '<html><head><meta name="robots" content="noindex"><title>Not found</title></head></html>',
+  })
+  try {
+    symlinkSync(SCRIPT, join(dir, 'linked.mjs'))
+    const pass = cli(join(dir, 'linked.mjs'), 'check', join(dir, 'good'), '--site', 'https://shelf.example')
+    assert.equal(pass.status, 0, pass.stderr)
+    assert.equal(pass.stdout, 'seo-check: 1 page, 0 errors, 0 warnings\nSEO-CHECK: PASS\n')
+    const warned = cli(SCRIPT, 'check', join(dir, 'warned'), '--site', 'https://shelf.example')
+    assert.equal(warned.status, 0, 'warnings never fail')
+    assert.equal(warned.stdout.replace(dir, '<dir>'), `seo-check: <dir>/warned/index.html:${line('<title>')}: warn title: title is 61 characters; Google sets no limit but cuts long titles (our guide: 60)\nseo-check: 2 pages (1 noindex, checked for JSON-LD only), 0 errors, 1 warning\nSEO-CHECK: PASS\n`)
+    const fail = cli(SCRIPT, 'check', join(dir, 'bad'), '--site=https://shelf.example/')
+    assert.equal(fail.status, 1)
+    assert.equal(fail.stdout.replace(dir, '<dir>'), 'seo-check: <dir>/bad/index.html: error title: no <title> in <head>\nseo-check: 1 page, 1 error, 0 warnings\nSEO-CHECK: FAIL\n')
+    const json = cli(SCRIPT, 'check', join(dir, 'bad'), '--json', '--site', 'https://shelf.example')
+    assert.equal(json.status, 1)
+    const lines = json.stdout.trimEnd().split('\n')
+    assert.equal(lines.pop(), 'SEO-CHECK: FAIL')
+    const report = JSON.parse(lines.join('\n'))
+    assert.deepEqual(report.findings, [{ file: 'index.html', line: 0, level: 'error', check: 'title', message: 'no <title> in <head>' }])
+    assert.deepEqual(report.pages, [{ file: 'index.html', url: 'https://shelf.example/', indexable: true }])
+    assert.equal(report.site, 'https://shelf.example/')
+    const missing = cli(SCRIPT, 'check', join(dir, 'gone'), '--site', 'https://shelf.example')
+    assert.equal(missing.status, 1)
+    assert.match(missing.stdout, /error files: cannot read .*gone: ENOENT\n.*\nSEO-CHECK: FAIL\n$/)
+    for (const args of [[], ['lint', dir, '--site', 'https://x.example'], ['check', dir], ['check', '--site', 'https://x.example'], ['check', dir, dir, '--site', 'https://x.example'], ['check', dir, '--site'], ['check', dir, '--site', 'https://x.example', '--fast'], ['check', dir, '--site', 'x.example']]) {
+      const r = cli(SCRIPT, ...args)
+      assert.equal(r.status, 2, args.join(' '))
+      assert.equal(r.stdout, '', args.join(' '))
+      assert.match(r.stderr, /usage: seo-check\.mjs check/)
+    }
+    const preserved = cli('--preserve-symlinks-main', join(dir, 'linked.mjs'), 'check', join(dir, 'bad'), '--site', 'https://shelf.example')
+    assert.equal(preserved.status, 1, 'node --preserve-symlinks-main still runs the check')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
