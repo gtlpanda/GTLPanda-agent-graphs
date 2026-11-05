@@ -1,19 +1,30 @@
 export const meta = {
   name: 'blueprint-design',
-  description: 'Plan an app or feature before any code: extract a brief from the documents and repo, then build the ranked interview for the human (questions, preflight, assumptions)',
-  whenToUse: 'Run by the /blueprint skill. args: {repo (required, absolute), request?, docs? (paths; at least one of request or docs)}',
+  description: 'Plan an app or feature before any code: extract a brief and build the ranked interview (stage interview), then design it against the human\'s answers behind an advisor gate (stage design)',
+  whenToUse: 'Run by the /blueprint skill. args: {repo (required, absolute), stage? (interview, the default, or design), request?, docs? (interview: paths; at least one of request or docs), statePath, mode, requirements, decisions, assumptions (design)}',
   phases: [
     { title: 'Extract', detail: 'extractor reads the documents, the repo, and the request into a brief', model: 'sonnet' },
     { title: 'Interview', detail: 'questioner ranks the open decisions by cost to change and lists preflight and assumptions', model: 'sonnet' },
+    { title: 'Design', detail: 'architect designs against the binding decisions and assumptions', model: 'sonnet' },
+    { title: 'Gate', detail: 'advisor gates the design', model: 'fable' },
   ],
 }
 
-// Graph (run 1 of /blueprint). Code routes; agents are leaves and never call each other.
+// Graph (/blueprint). Code routes; agents are leaves and never call each other.
 //
+// stage interview (run 1):
 //   extractor --malformed brief--> extractor (once, with the problems) --still--> escalate
 //             --brief--> questioner --malformed--> questioner (once) --still--> escalate
 //                                   --questions--> cap at MAX_QUESTIONS (contradictions always kept)
 //                                                  --> needs-human (the skill asks; nothing is designed yet)
+//
+// stage design (run 2; the skill passes the saved answers):
+//   architect --structure problems--> architect (next round)
+//             --well formed--> advisor(gate) --approve--> design-ready (the skill reports it; nothing is written)
+//                                            --revise--> architect (next round)
+//                                            --blocked--> needs-human (each question names the id it challenges;
+//                                                         the skill asks, replaces that decision or assumption, reruns)
+//   at most MAX_DESIGN_ROUNDS architect calls, then escalate
 //
 // Helpers marked "shared" are copied verbatim from harness-repair.js (scripts
 // cannot import each other) and a test fails if the copies drift. Returns a
@@ -24,9 +35,20 @@ export const meta = {
 const NODES = {
   extract: { agentType: 'extractor',  model: 'sonnet', effort: 'high', phase: 'Extract' },
   ask:     { agentType: 'questioner', model: 'sonnet', effort: 'high', phase: 'Interview' },
+  design:  { agentType: 'architect',  model: 'sonnet', effort: 'high', phase: 'Design' },
+  gate:    { agentType: 'advisor',    model: 'fable',  effort: 'high', phase: 'Gate' },
 }
 // Three AskUserQuestion calls of four. Lower-ranked questions become assumptions.
 const MAX_QUESTIONS = 12
+// The design plus one revision; a design the gate still rejects needs a human.
+const MAX_DESIGN_ROUNDS = 2
+// Innovation tokens: departures from the default stack. A fourth is a blocking problem.
+const MAX_DEPARTURES = 3
+// The knowledge-map skill defines the kinds, which ones get an owner from their
+// first caller, and the id format (dev-build.js checks the same id pattern).
+const KINDS = ['authn', 'authz', 'input-validation', 'money', 'limit', 'retry', 'type', 'constant', 'error-shape', 'client', 'fixture']
+const FIRST_CALLER_KINDS = ['authn', 'authz', 'input-validation', 'money']
+const OWNER_ID = /^K\d+$/
 
 // ---------- schemas ----------
 const STR = { type: 'string' }
@@ -59,22 +81,62 @@ const QUESTIONS_SCHEMA = obj({
   preflight: { type: 'array', items: obj({ what: STR, why: STR, needed_by: STR }) },
   assumptions: { type: 'array', items: obj({ assumption: STR, why: STR }) },
 })
+const BOOL = { type: 'boolean' }
+const DESIGN_SCHEMA = obj({
+  summary: STR,
+  modules: {
+    type: 'array',
+    items: obj({ id: STR, name: STR, responsibility: STR, requirements: STRS, boundary: BOOL, shapes: { type: 'array', items: obj({ name: STR, sketch: STR }) }, pick: STR, depth_reason: STR }),
+  },
+  failure_modes: { type: 'array', items: obj({ id: STR, what: STR, module: STR, silent: BOOL, tested: BOOL, handled: BOOL, plan: STR }) },
+  adrs: { type: 'array', items: obj({ id: STR, title: STR, options: STRS, decision: STR, reason: STR }) },
+  departures: { type: 'array', items: obj({ what: STR, default: STR, reason: STR, adr: STR }) },
+  honors: { type: 'array', items: obj({ id: STR, how: STR }) },
+  conflicts: { type: 'array', items: obj({ id: STR, why: STR }) },
+  knowledge: { type: 'array', items: obj({ id: STR, knowledge: STR, kind: STR, owner: STR, used_by: STRS, changes_together_because: STR }) },
+  premises: { type: 'array', items: obj({ claim: STR, evidence: STR, status: { type: 'string', enum: ['VERIFIED', 'UNVERIFIED'] } }) },
+})
+// shared
+const GATE_SCHEMA = {
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: ['approve', 'revise', 'blocked'] },
+    issues: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, issue: STR, fix: STR, blocking: { type: 'boolean' } }, required: ['n', 'issue', 'fix', 'blocking'] } },
+    questions: STRS,
+  },
+  required: ['verdict', 'issues', 'questions'],
+}
 
 // ---------- args ----------
+const nonEmpty = s => typeof s === 'string' && s.trim() !== ''
 const A = args && typeof args === 'object' && !Array.isArray(args) ? args : {}
 const REPO = typeof A.repo === 'string' && A.repo.startsWith('/') ? A.repo : null
 const REQUEST = typeof A.request === 'string' && A.request.trim() !== '' ? A.request.trim() : null
 const DOCS_OK = A.docs === undefined || (Array.isArray(A.docs) && A.docs.every(d => typeof d === 'string' && d.trim() !== ''))
 const DOCS = Array.isArray(A.docs) && DOCS_OK ? A.docs : []
+const STAGE = A.stage === undefined ? 'interview' : (['interview', 'design'].includes(A.stage) ? A.stage : null)
+// Stage design: the saved answers, compacted by the skill. Ids are any
+// non-empty unique strings: decisions carry Q<n>, A<n> (an override), or D<n>
+// (a gate question); assumptions carry A<n> or Q<n> (past the cap).
+const STATE_PATH = typeof A.statePath === 'string' && A.statePath.startsWith('/') ? A.statePath : null
+const MODE = ['app', 'feature'].includes(A.mode) ? A.mode : null
+const uniqueStrings = x => Array.isArray(x) && x.every(nonEmpty) && new Set(x).size === x.length
+const REQ_IDS = uniqueStrings(A.requirements) && A.requirements.length && A.requirements.every(r => /^R\d+$/.test(r)) ? A.requirements : null
+const DECISIONS = Array.isArray(A.decisions) && A.decisions.every(d => d && nonEmpty(d.id) && nonEmpty(d.answer)) && uniqueStrings(A.decisions.map(d => d.id)) ? A.decisions : null
+const ASSUMPTION_IDS = uniqueStrings(A.assumptions) ? A.assumptions : null
 
 // ---------- ledger ----------
 const ledger = {
-  status: null,      // 'needs-human' | 'escalate'
+  status: null,      // 'needs-human' | 'escalate' | 'design-ready'
   reason: null,
   brief: null,       // the extractor's brief
   questions: [],     // what the skill asks, in rank order, recommended option first
   preflight: [],     // what a human must supply before an unattended build
   assumptions: [],   // decided without asking, each with an id (A<n>, or Q<n> for a question past the cap)
+  design: null,      // stage design: the architect's latest design
+  gate: null,        // stage design: the advisor's latest verdict
+  designRounds: 0,   // stage design: architect calls so far
+  issues: [],        // stage design: what the last round left open, when it escalates
   history: [],       // one entry per node run, in order
 }
 // shared
@@ -117,7 +179,6 @@ function nodeFailure(name, context) {
   return `${who} failed${where}: ${lastNodeError}${hint}`
 }
 const json = x => JSON.stringify(x, null, 2)
-const nonEmpty = s => typeof s === 'string' && s.trim() !== ''
 
 // Structural problems the code can see without judgment.
 function briefProblems(brief) {
@@ -191,6 +252,128 @@ function recommendedFirst(q) {
   return { ...q, options }
 }
 
+const list = x => (Array.isArray(x) ? x : [])
+
+// Stage design: the saved answers must be complete before an architect runs.
+function designArgsProblem() {
+  if (!STATE_PATH) return 'args.statePath is required and must be an absolute path to state.json'
+  if (!MODE) return 'args.mode must be app or feature'
+  if (!REQ_IDS) return 'args.requirements must be a non-empty list of unique requirement ids (R1, R2, ...)'
+  if (!DECISIONS) return 'args.decisions must be a list of {id, answer} with unique, non-empty ids and answers'
+  if (!ASSUMPTION_IDS) return 'args.assumptions must be a list of unique, non-empty assumption ids'
+  const both = DECISIONS.map(d => d.id).filter(id => ASSUMPTION_IDS.includes(id))
+  if (both.length) return `${both.join(', ')} is both a decision and an assumption: an override replaces its assumption`
+  return null
+}
+
+// Structural problems in a design the code can see without judgment. Each one
+// goes back to the architect as a blocking issue.
+function designProblems(d) {
+  const problems = []
+  const modules = list(d.modules)
+  if (!modules.length) problems.push('the design has no modules')
+  const moduleIds = new Set()
+  for (const m of modules) {
+    const id = m && m.id
+    if (typeof id !== 'string' || !/^M\d+$/.test(id)) { problems.push(`${JSON.stringify(id)} is not a module id (M1, M2, ...)`); continue }
+    if (moduleIds.has(id)) problems.push(`module id ${id} is used twice`)
+    moduleIds.add(id)
+    for (const r of list(m.requirements)) {
+      if (!REQ_IDS.includes(r)) problems.push(`${id} names ${JSON.stringify(r)}, which is not a requirement`)
+    }
+    if (m.boundary === true) {
+      const names = [...new Set(list(m.shapes).map(x => x && x.name).filter(nonEmpty))]
+      if (names.length < 2) problems.push(`${id} is a new boundary with ${names.length} distinct shape(s): sketch at least 2 structurally different shapes`)
+      else if (!names.includes(m.pick)) problems.push(`${id}: pick ${JSON.stringify(m.pick)} is not one of its shapes`)
+      if (!nonEmpty(m.depth_reason)) problems.push(`${id}: depth_reason is empty (why the pick hides more behind a smaller interface)`)
+    }
+  }
+  const covered = new Set(modules.flatMap(m => list(m && m.requirements)))
+  for (const r of REQ_IDS) if (!covered.has(r)) problems.push(`requirement ${r} is in no module`)
+
+  const failureIds = new Set()
+  for (const f of list(d.failure_modes)) {
+    const id = f && nonEmpty(f.id) ? f.id : JSON.stringify(f && f.id)
+    if (!/^F\d+$/.test(id)) problems.push(`${id} is not a failure id (F1, F2, ...)`)
+    else if (failureIds.has(id)) problems.push(`failure id ${id} is used twice`)
+    failureIds.add(id)
+    if (!f || !moduleIds.has(f.module)) problems.push(`failure ${id} names ${JSON.stringify(f && f.module)}, which is not a module`)
+    // A failure nobody sees, no test catches, and no code handles is a critical gap.
+    if (f && f.silent === true && f.tested !== true && f.handled !== true) problems.push(`critical gap: failure ${id} is silent, untested, and unhandled: test it or handle it`)
+  }
+
+  const adrIds = new Set()
+  for (const a of list(d.adrs)) {
+    const id = a && a.id
+    if (typeof id !== 'string' || !/^ADR\d+$/.test(id)) { problems.push(`${JSON.stringify(id)} is not an ADR id (ADR1, ADR2, ...)`); continue }
+    if (adrIds.has(id)) problems.push(`ADR id ${id} is used twice`)
+    adrIds.add(id)
+    const options = list(a.options).filter(nonEmpty)
+    if (options.length < 2) problems.push(`${id}: needs at least 2 options, has ${options.length}`)
+    else if (!options.includes(a.decision)) problems.push(`${id}: decision ${JSON.stringify(a.decision)} is not one of its options`)
+    if (!nonEmpty(a.reason)) problems.push(`${id}: the reason is empty`)
+  }
+  const departures = list(d.departures)
+  if (departures.length > MAX_DEPARTURES) problems.push(`${departures.length} departures from the default stack: at most ${MAX_DEPARTURES} innovation tokens, so drop ${departures.length - MAX_DEPARTURES}`)
+  for (const x of departures) {
+    if (!x || !adrIds.has(x.adr)) problems.push(`departure ${JSON.stringify(x && x.what)} names ${JSON.stringify(x && x.adr)}, which is not an ADR`)
+  }
+
+  // Every decision and assumption is accounted for, honored or named as a
+  // conflict for the gate: the only mechanical check that the design never
+  // silently drops one.
+  const must = [...DECISIONS.map(x => x.id), ...ASSUMPTION_IDS]
+  const conflicted = new Set()
+  for (const c of list(d.conflicts)) {
+    const id = c && c.id
+    if (!must.includes(id)) { problems.push(`conflicts names ${JSON.stringify(id)}, which is not a decision or assumption`); continue }
+    conflicted.add(id)
+    if (!nonEmpty(c.why)) problems.push(`conflict ${id}: say why it cannot hold`)
+  }
+  const honored = new Set()
+  for (const h of list(d.honors)) {
+    const id = h && h.id
+    if (!must.includes(id)) { problems.push(`honors names ${JSON.stringify(id)}, which is not a decision or assumption`); continue }
+    if (honored.has(id)) problems.push(`honors lists ${id} twice`)
+    if (conflicted.has(id)) problems.push(`${id} is in both honors and conflicts`)
+    honored.add(id)
+    if (!nonEmpty(h.how)) problems.push(`honors ${id}: say how the design honors it`)
+  }
+  for (const id of must) if (!honored.has(id) && !conflicted.has(id)) problems.push(`${id} is not in honors: say how the design honors it`)
+
+  const knowledgeIds = new Set()
+  for (const k of list(d.knowledge)) {
+    const id = k && k.id
+    if (typeof id !== 'string' || !OWNER_ID.test(id)) { problems.push(`${JSON.stringify(id)} is not a knowledge id (K1, K2, ...)`); continue }
+    if (knowledgeIds.has(id)) problems.push(`knowledge id ${id} is used twice`)
+    knowledgeIds.add(id)
+    if (!KINDS.includes(k.kind)) problems.push(`${id}: kind ${JSON.stringify(k.kind)} is not one of ${KINDS.join(', ')}`)
+    if (!nonEmpty(k.changes_together_because)) problems.push(`${id}: changes_together_because is empty, so it is not shared knowledge`)
+    if (!nonEmpty(k.owner)) problems.push(`${id}: name the owner module`)
+    else if (/(^|\/)(utils|helpers|common|shared)(\/|\.[A-Za-z0-9]+$|$)/.test(k.owner)) problems.push(`${id}: owner ${k.owner} is a grab-bag module; name it for what it knows`)
+    const users = new Set(list(k.used_by))
+    for (const u of users) if (!moduleIds.has(u)) problems.push(`${id} is used by ${JSON.stringify(u)}, which is not a module`)
+    if (!FIRST_CALLER_KINDS.includes(k.kind) && users.size < 2) problems.push(`${id}: a ${k.kind} item with one user stays local; drop it or name its second user`)
+  }
+  return problems
+}
+
+// The gate's questions name the decision or assumption each one challenges, so
+// the human's answer replaces that id instead of sitting next to it. Returns
+// { questions: [{ about: <id> | null, question }] } or { error }.
+function gateQuestions(raw) {
+  const known = [...DECISIONS.map(x => x.id), ...ASSUMPTION_IDS]
+  const out = []
+  for (const q of raw) {
+    const m = typeof q === 'string' ? q.match(/^\s*([^:\s]+)\s*:\s*(\S[\s\S]*)$/) : null
+    if (!m) return { error: `the advisor's question ${JSON.stringify(q)} does not start with the id it challenges` }
+    if (m[1] === 'new') { out.push({ about: null, question: m[2] }); continue }
+    if (!known.includes(m[1])) return { error: `the advisor's question challenges ${m[1]}, which is not a decision or assumption` }
+    out.push({ about: m[1], question: m[2] })
+  }
+  return { questions: out }
+}
+
 // ---------- prompts ----------
 const where = `Repo: ${REPO}. cd there before anything else.`
 
@@ -228,8 +411,84 @@ ${problems.map(p => `- ${p}`).join('\n')}` : ''}
 Fill the structured output. Question ids are Q1, Q2, ... in rank order.`
 }
 
+function designPrompt(prior, issues) {
+  return `${where}
+Design this ${MODE} following your instructions. Read the interview state first, in full: ${STATE_PATH}
+(the brief, the human's decisions and assumptions, and the preflight list).
+
+Decisions are binding: the human made them, so never contradict one or design around it:
+${json(DECISIONS)}
+Assumptions ${ASSUMPTION_IDS.length ? ASSUMPTION_IDS.join(', ') : '(none)'} hold too: only the human overrides one. If a decision or assumption cannot hold, put its id and why in conflicts instead of honors; the gate will ask the human.
+Every requirement (${REQ_IDS.join(', ')}) belongs to at least one module, and every decision and assumption id is in honors or conflicts.${prior ? `
+
+Your previous design:
+${json(prior)}
+
+Fix every one of these issues:
+${issues.map(i => `${i.n}. ${i.issue}${i.fix ? ` (fix: ${i.fix})` : ''}`).join('\n')}` : ''}
+
+Fill the structured output. Module ids are M1, M2, ...; failure ids F1, F2, ...; ADR ids ADR1, ADR2, ...; knowledge ids K1, K2, ...`
+}
+
+function gatePrompt(design) {
+  return `${where}
+Interview state: ${STATE_PATH}. The human's decisions (binding):
+${json(DECISIONS)}
+
+The architect's design:
+${json(design)}
+
+Gate it following your "Gating a design" instructions. verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix and blocking true or false (empty when approving). questions: only when blocked, each one a question only the human can answer, starting with the decision or assumption id it challenges and a colon ("Q2: ..."), or "new: " when it challenges none.`
+}
+
 // ---------- run ----------
 if (!REPO) return finish('escalate', 'args.repo is required and must be an absolute path')
+if (!STAGE) return finish('escalate', 'args.stage must be interview or design')
+
+if (STAGE === 'design') {
+  const bad = designArgsProblem()
+  if (bad) return finish('escalate', bad)
+  log(`repo ${REPO}; design (${MODE}); ${REQ_IDS.length} requirement(s), ${DECISIONS.length} decision(s), ${ASSUMPTION_IDS.length} assumption(s)`)
+  let design = null
+  let issues = null
+  for (;;) {
+    if (ledger.designRounds >= MAX_DESIGN_ROUNDS) {
+      return finish('escalate', `design not approved after ${MAX_DESIGN_ROUNDS} architect round(s)`, { design, issues })
+    }
+    ledger.designRounds += 1
+    const round = ledger.designRounds
+    const next = await runNode('design', `design #${round}`, designPrompt(design, issues), DESIGN_SCHEMA)
+    if (!next) return finish('escalate', nodeFailure('design', `in round ${round}`), { design })
+    design = next
+    const problems = designProblems(design)
+    ledger.history.push({ node: 'design', round, modules: list(design.modules).length, problems })
+    if (problems.length) {
+      issues = problems.map((issue, i) => ({ n: i + 1, issue, fix: 'restructure the design so this holds', blocking: true }))
+      continue
+    }
+    const gate = await runNode('gate', `gate: design #${round}`, gatePrompt(design), GATE_SCHEMA)
+    if (!gate) return finish('escalate', nodeFailure('gate', 'on the design'), { design })
+    ledger.gate = gate
+    ledger.history.push({ node: 'gate', round, verdict: gate.verdict, issues: list(gate.issues).length })
+    // An approval that still carries a blocking issue, or leaves a conflict unresolved, is a revision.
+    const blocking = list(gate.issues).filter(i => i && i.blocking === true)
+    const conflicted = list(design.conflicts).map(c => c.id)
+    if (gate.verdict === 'approve' && conflicted.length) {
+      blocking.push({ n: blocking.length + 1, issue: `conflicts ${conflicted.join(', ')} are unresolved`, fix: 'design so each one holds, or the gate blocks with a question for the human', blocking: true })
+    }
+    if (gate.verdict === 'approve' && !blocking.length) return finish('design-ready', `design approved in round ${round}`, { design })
+    if (gate.verdict === 'blocked') {
+      if (!list(gate.questions).length) return finish('escalate', 'the advisor blocked the design without a question for the human', { design })
+      const asked = gateQuestions(gate.questions)
+      if (asked.error) return finish('escalate', asked.error, { design })
+      return finish('needs-human', 'the advisor needs answers before this can be designed', { design, questions: asked.questions })
+    }
+    if (gate.verdict === 'approve') { issues = blocking; continue }
+    if (!list(gate.issues).length) return finish('escalate', 'the advisor asked for a revision without naming an issue', { design })
+    issues = gate.issues
+  }
+}
+
 if (!DOCS_OK) return finish('escalate', 'args.docs must be a list of non-empty paths')
 if (!REQUEST && !DOCS.length) return finish('escalate', 'give args.request, args.docs, or both')
 log(`repo ${REPO}; ${DOCS.length} document(s); ${REQUEST ? 'with' : 'no'} request text`)

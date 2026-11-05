@@ -99,6 +99,7 @@ const PLAN_SCHEMA = {
   },
   required: ['goal', 'acceptance', 'components', 'behavior_changes', 'out_of_scope', 'risks', 'questions'],
 }
+// shared
 const GATE_SCHEMA = {
   type: 'object',
   properties: {

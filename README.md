@@ -6,7 +6,7 @@
 > step is gated on real test results, never on an agent's word.
 >
 > ```
-> /blueprint <idea>   read the doc or idea → one up-front interview → binding decisions (design and backlog: next)
+> /blueprint <idea>   read the doc or idea → one up-front interview → binding decisions → gated design (backlog: next)
 > /dev <task>         plan it (you approve) → build it tests-first → prove every acceptance criterion → QA
 > /loop               keep a branch green: check → fix → review → QA, until it passes or needs you
 > /release-pr [PR#]   docs into the PR → you approve the exact commit → merge once → verify the deploy
@@ -32,7 +32,7 @@
 
 | Graph | Run it with | What it does | Status |
 |-------|-------------|--------------|--------|
-| [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once; design and backlog stages not built yet | tested with mocked agents |
+| [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once → architect designs, advisor gates it; research and backlog not built yet | interview live-run once; design tested with mocked agents |
 | [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
 | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
 | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
@@ -45,7 +45,7 @@ symlinked into `~/.claude/` on every machine.
 
 ```
 install.sh  settings.json  CLAUDE.md  loop.md   shared config, linked into ~/.claude/
-core/skills/                                    skills every graph uses (verify, harness-review, knowledge-map)
+core/skills/                                    skills every graph uses (verify, harness-review, knowledge-map, default-stack)
 core/agents/                                    agents more than one graph uses (advisor, checker)
 graphs/<graph>/agents/                          that graph's agents
 graphs/<graph>/workflows/                       that graph's workflow script

@@ -169,6 +169,14 @@ elif grep -qxF -- "$same_test" core/skills/harness-review/SKILL.md; then ok "har
 else bad "core/skills/harness-review/SKILL.md: the same-knowledge test differs from knowledge-map's; copy the line exactly"; fi
 rule graphs/blueprint/skills/blueprint/SKILL.md 'Never ask for a secret value.' 'preflight records credentials by name only'
 rule graphs/blueprint/skills/blueprint/SKILL.md '`decisions` are binding.' 'interview answers bind every later stage'
+rule graphs/blueprint/agents/architect.md '`decisions` are binding: the human made them.' 'the architect never designs around an answer'
+rule graphs/blueprint/agents/architect.md 'only the human overrides one' 'the architect never overrides an assumption'
+rule core/agents/advisor.md '## Gating a design' 'designs are gated before a backlog is cut from them'
+rule core/agents/advisor.md 'Hand-synced list' 'the design gate screens for the eight red flags'
+rule graphs/blueprint/skills/blueprint/SKILL.md 'decisions:s.decisions.map(d=>({id:d.id,answer:d.answer}))' 'design args come from one exact command, never paraphrased'
+rule graphs/blueprint/skills/blueprint/SKILL.md '"none" keeps every assumption' 'the optional last interview step says so (L0 finding)'
+rule graphs/blueprint/skills/blueprint/SKILL.md 'Each answer replaces what it challenges' 'a gate answer never sits next to the decision it overrides'
+rule graphs/blueprint/skills/blueprint/SKILL.md '`gateRounds`' 'the design gate cannot ask forever'
 
 # ---- Required files ----
 for f in install.sh README.md CLAUDE.md settings.json loop.md .gitignore .githooks/pre-commit; do

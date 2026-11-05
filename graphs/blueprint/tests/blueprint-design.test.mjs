@@ -228,3 +228,270 @@ await test('a node that returns nothing or throws -> escalate naming it, never a
     assert.match(result.reason, who)
   }
 })
+
+// ---------- stage design (run 2) ----------
+const DARGS = {
+  repo: '/tmp/fixture',
+  stage: 'design',
+  statePath: '/tmp/fixture/.git/harness-blueprint/state.json',
+  mode: 'app',
+  requirements: ['R1', 'R2'],
+  decisions: [{ id: 'Q1', answer: 'Email and password' }],
+  assumptions: ['A1', 'Q13'],
+}
+const mod = (id, over = {}) => ({ id, name: `module ${id}`, responsibility: 'one job', requirements: [], boundary: false, shapes: [], pick: '', depth_reason: '', ...over })
+const DESIGN = (over = {}) => ({
+  summary: 'a reading list',
+  modules: [
+    mod('M1', { requirements: ['R1'], boundary: true, shapes: [{ name: 'Policy module', sketch: 'canRead(user, book)' }, { name: 'Query filter', sketch: 'scoped(knex, user)' }], pick: 'Policy module', depth_reason: 'one call hides every rule' }),
+    mod('M2', { requirements: ['R2'] }),
+  ],
+  failure_modes: [{ id: 'F1', what: 'database down', module: 'M2', silent: false, tested: true, handled: true, plan: '503 and a log line' }],
+  adrs: [{ id: 'ADR1', title: 'query builder', options: ['Knex', 'Prisma'], decision: 'Knex', reason: 'the default stack' }],
+  departures: [],
+  honors: [{ id: 'Q1', how: 'Passport local' }, { id: 'A1', how: 'default stack' }, { id: 'Q13', how: 'newest first' }],
+  knowledge: [{ id: 'K1', knowledge: 'who may read a book', kind: 'authz', owner: 'server/policies/book.js', used_by: ['M1'], changes_together_because: 'one ownership rule' }],
+  premises: [],
+  conflicts: [],
+  ...over,
+})
+const GATE = (verdict, over = {}) => ({ verdict, issues: [], questions: [], ...over })
+const ISSUE = { n: 1, issue: 'M1 leaks the row format', fix: 'parse at the boundary', blocking: true }
+
+console.log('== blueprint-design: stage design')
+await test('design path pins architect and advisor with schemas, matching the agent files', async () => {
+  const { result, calls } = await run(fn, { architect: [DESIGN()], advisor: [GATE('approve')] }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.equal(types(calls), 'architect,advisor')
+  for (const c of calls) {
+    assert.ok(c.schema && c.schema.type === 'object', `call without schema: ${c.label}`)
+    assert.equal(c.model, agentField(c.agentType, 'model'), `${c.agentType}: model drift`)
+    assert.equal(c.effort, agentField(c.agentType, 'effort'), `${c.agentType}: effort drift`)
+  }
+})
+await test('a design that passes the checks and the gate is design-ready in round 1; the prompts carry the state and the binding decisions', async () => {
+  const { result } = await run(fn, {
+    architect: [p => {
+      assert.ok(p.includes(DARGS.statePath), 'the architect reads state.json itself')
+      assert.match(p, /Decisions are binding/)
+      assert.match(p, /"Email and password"/)
+      assert.match(p, /R1, R2/)
+      assert.match(p, /A1, Q13/)
+      return DESIGN()
+    }],
+    advisor: [p => {
+      assert.match(p, /"Gating a design"/)
+      assert.ok(p.includes(DARGS.statePath))
+      assert.match(p, /"Policy module"/)
+      return GATE('approve')
+    }],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.equal(result.designRounds, 1)
+  assert.deepEqual(result.design, DESIGN())
+})
+await test('a bad stage, or bad design args -> escalate before any agent runs', async () => {
+  const cases = [
+    [{ ...DARGS, stage: 'build' }, /args\.stage must be interview or design/],
+    [{ ...DARGS, statePath: 'state.json' }, /args\.statePath is required/],
+    [{ ...DARGS, mode: 'service' }, /args\.mode must be app or feature/],
+    [{ ...DARGS, requirements: [] }, /args\.requirements must be a non-empty list/],
+    [{ ...DARGS, requirements: ['R1', 'R1'] }, /args\.requirements/],
+    [{ ...DARGS, requirements: ['Q1'] }, /args\.requirements/],
+    [{ ...DARGS, decisions: [{ id: 'Q1', answer: '' }] }, /args\.decisions must be a list/],
+    [{ ...DARGS, decisions: [{ id: 'Q1', answer: 'a' }, { id: 'Q1', answer: 'b' }] }, /args\.decisions/],
+    [{ ...DARGS, decisions: 'Q1' }, /args\.decisions/],
+    [{ ...DARGS, assumptions: ['A1', ''] }, /args\.assumptions must be a list/],
+    [{ ...DARGS, assumptions: undefined }, /args\.assumptions/],
+    [{ ...DARGS, decisions: [{ id: 'A1', answer: 'override' }] }, /A1 is both a decision and an assumption/],
+  ]
+  for (const [a, why] of cases) {
+    const { result, calls } = await run(fn, {}, a)
+    assert.equal(result.status, 'escalate', JSON.stringify(a))
+    assert.match(result.reason, why, JSON.stringify(a))
+    assert.equal(calls.length, 0)
+  }
+})
+await test('decision ids are not shape-checked: an override (A<n>) and a gate answer (D<n>) are honored like Q<n>', async () => {
+  const a = { ...DARGS, decisions: [{ id: 'Q1', answer: 'x' }, { id: 'A2', answer: 'y' }, { id: 'D1', answer: 'z' }] }
+  const honors = [...DESIGN().honors, { id: 'A2', how: 'h' }, { id: 'D1', how: 'h' }]
+  const { result } = await run(fn, { architect: [DESIGN({ honors })], advisor: [GATE('approve')] }, a)
+  assert.equal(result.status, 'design-ready')
+})
+await test('the interview stays the default stage', async () => {
+  const { result, calls } = await run(fn, { extractor: [BRIEF()], questioner: [QS()] }, { ...ARGS, stage: 'interview' })
+  assert.equal(result.status, 'needs-human')
+  assert.equal(types(calls), 'extractor,questioner')
+})
+
+console.log('== blueprint-design: design structure checks')
+// Each rule: a design that breaks only it goes back to the architect once with
+// the problem, then escalates with the problem in issues. The advisor never runs.
+const twoShapes = mod('M1', { requirements: ['R1'], boundary: true, shapes: [{ name: 'a', sketch: 'x' }, { name: 'b', sketch: 'y' }], pick: 'a', depth_reason: 'r' })
+const RULES = [
+  ['no modules', { modules: [] }, /the design has no modules/],
+  ['a bad module id', { modules: [mod('X1', { requirements: ['R1', 'R2'] })] }, /"X1" is not a module id/],
+  ['a requirement in no module', { modules: [twoShapes] }, /requirement R2 is in no module/],
+  ['an unknown requirement', { modules: [twoShapes, mod('M2', { requirements: ['R2', 'R9'] })] }, /M2 names "R9", which is not a requirement/],
+  ['a boundary with one shape', { modules: [mod('M1', { requirements: ['R1'], boundary: true, shapes: [{ name: 'a', sketch: 'x' }], pick: 'a', depth_reason: 'r' }), mod('M2', { requirements: ['R2'] })] }, /M1 is a new boundary with 1 distinct shape\(s\)/],
+  ['two shapes with one name', { modules: [{ ...twoShapes, shapes: [{ name: 'a', sketch: 'x' }, { name: 'a', sketch: 'y' }] }, mod('M2', { requirements: ['R2'] })] }, /M1 is a new boundary with 1 distinct shape\(s\)/],
+  ['a bad failure id', { failure_modes: [{ id: 'E1', what: 'x', module: 'M2', silent: false, tested: true, handled: true, plan: '' }] }, /E1 is not a failure id/],
+  ['a failure id used twice', { failure_modes: [1, 2].map(() => ({ id: 'F1', what: 'x', module: 'M2', silent: false, tested: true, handled: true, plan: '' })) }, /failure id F1 is used twice/],
+  ['a conflict on an unknown id', { conflicts: [{ id: 'Q9', why: 'w' }] }, /conflicts names "Q9", which is not a decision or assumption/],
+  ['a conflict without why', { honors: DESIGN().honors.filter(h => h.id !== 'A1'), conflicts: [{ id: 'A1', why: '' }] }, /conflict A1: say why it cannot hold/],
+  ['an id both honored and in conflict', { conflicts: [{ id: 'A1', why: 'w' }] }, /A1 is in both honors and conflicts/],
+  ['a grab-bag owner file', { knowledge: [{ ...DESIGN().knowledge[0], owner: 'server/helpers.js' }] }, /K1: owner server\/helpers\.js is a grab-bag module/],
+  ['a pick that is not a shape', { modules: [{ ...twoShapes, pick: 'c' }, mod('M2', { requirements: ['R2'] })] }, /M1: pick "c" is not one of its shapes/],
+  ['no depth reason', { modules: [{ ...twoShapes, depth_reason: ' ' }, mod('M2', { requirements: ['R2'] })] }, /M1: depth_reason is empty/],
+  ['a critical gap', { failure_modes: [{ id: 'F1', what: 'lost write', module: 'M2', silent: true, tested: false, handled: false, plan: '' }] }, /critical gap: failure F1 is silent, untested, and unhandled/],
+  ['a failure in no module', { failure_modes: [{ id: 'F1', what: 'x', module: 'M9', silent: false, tested: true, handled: true, plan: '' }] }, /failure F1 names "M9", which is not a module/],
+  ['an ADR with one option', { adrs: [{ id: 'ADR1', title: 't', options: ['Knex'], decision: 'Knex', reason: 'r' }] }, /ADR1: needs at least 2 options, has 1/],
+  ['an ADR decision outside its options', { adrs: [{ id: 'ADR1', title: 't', options: ['Knex', 'Prisma'], decision: 'Drizzle', reason: 'r' }] }, /ADR1: decision "Drizzle" is not one of its options/],
+  ['an ADR without a reason', { adrs: [{ id: 'ADR1', title: 't', options: ['Knex', 'Prisma'], decision: 'Knex', reason: '' }] }, /ADR1: the reason is empty/],
+  ['a fourth departure', { departures: ['a', 'b', 'c', 'd'].map(w => ({ what: w, default: 'x', reason: 'r', adr: 'ADR1' })) }, /4 departures from the default stack: at most 3 innovation tokens/],
+  ['a departure without an ADR', { departures: [{ what: 'Bun', default: 'Node', reason: 'speed', adr: 'ADR7' }] }, /departure "Bun" names "ADR7", which is not an ADR/],
+  ['a decision missing from honors', { honors: [{ id: 'A1', how: 'h' }, { id: 'Q13', how: 'h' }] }, /Q1 is not in honors/],
+  ['an assumption missing from honors', { honors: [{ id: 'Q1', how: 'h' }, { id: 'A1', how: 'h' }] }, /Q13 is not in honors/],
+  ['an unknown id in honors', { honors: [...DESIGN().honors, { id: 'Q99', how: 'h' }] }, /honors names "Q99", which is not a decision or assumption/],
+  ['an id honored twice', { honors: [...DESIGN().honors, { id: 'Q1', how: 'again' }] }, /honors lists Q1 twice/],
+  ['honors without how', { honors: [{ id: 'Q1', how: '' }, { id: 'A1', how: 'h' }, { id: 'Q13', how: 'h' }] }, /honors Q1: say how/],
+  ['a knowledge kind the map does not have', { knowledge: [{ ...DESIGN().knowledge[0], kind: 'policy' }] }, /K1: kind "policy" is not one of/],
+  ['a non-first-caller item with one user', { knowledge: [{ ...DESIGN().knowledge[0], kind: 'limit' }] }, /K1: a limit item with one user stays local/],
+  ['a grab-bag owner', { knowledge: [{ ...DESIGN().knowledge[0], owner: 'server/utils/book.js' }] }, /K1: owner server\/utils\/book\.js is a grab-bag module/],
+  ['no changes_together_because', { knowledge: [{ ...DESIGN().knowledge[0], changes_together_because: '' }] }, /K1: changes_together_because is empty/],
+  ['a user that is not a module', { knowledge: [{ ...DESIGN().knowledge[0], used_by: ['M1', 'S3'] }] }, /K1 is used by "S3", which is not a module/],
+  ['a bad knowledge id', { knowledge: [{ ...DESIGN().knowledge[0], id: 'KX' }] }, /"KX" is not a knowledge id/],
+]
+for (const [name, over, why] of RULES) {
+  await test(`rejected: ${name}`, async () => {
+    const bad = DESIGN(over)
+    const { result, calls } = await run(fn, { architect: [bad, p => { assert.match(p, why); return bad }] }, DARGS)
+    assert.equal(result.status, 'escalate')
+    assert.match(result.reason, /design not approved after 2 architect round\(s\)/)
+    assert.ok(result.issues.some(i => why.test(i.issue)), `issues: ${JSON.stringify(result.issues)}`)
+    assert.equal(types(calls), 'architect,architect')
+  })
+}
+await test('allowed: three departures, a silent failure that is tested, and a first-caller kind with one user', async () => {
+  const design = DESIGN({
+    departures: ['a', 'b', 'c'].map(w => ({ what: w, default: 'x', reason: 'r', adr: 'ADR1' })),
+    failure_modes: [{ id: 'F1', what: 'lost write', module: 'M2', silent: true, tested: true, handled: false, plan: 'a test' }],
+  })
+  const { result } = await run(fn, { architect: [design], advisor: [GATE('approve')] }, DARGS)
+  assert.equal(result.status, 'design-ready')
+})
+await test('a design fixed in the revision goes to the gate', async () => {
+  const { result, calls } = await run(fn, { architect: [DESIGN({ modules: [] }), DESIGN()], advisor: [GATE('approve')] }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.equal(result.designRounds, 2)
+  assert.equal(types(calls), 'architect,architect,advisor')
+})
+
+console.log('== blueprint-design: design gate')
+await test('gate revise -> the architect gets the issues -> gate approve in round 2', async () => {
+  const { result, calls } = await run(fn, {
+    architect: [DESIGN(), p => { assert.match(p, /1\. M1 leaks the row format \(fix: parse at the boundary\)/); assert.match(p, /Your previous design/); return DESIGN() }],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('approve')],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.equal(result.designRounds, 2)
+  assert.equal(types(calls), 'architect,advisor,architect,advisor')
+})
+await test('gate revise in the last round -> escalate with the issues, no third architect call', async () => {
+  const { result, calls } = await run(fn, {
+    architect: [DESIGN(), DESIGN()],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [ISSUE] })],
+  }, DARGS)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /design not approved after 2 architect round\(s\)/)
+  assert.deepEqual(result.issues, [ISSUE])
+  assert.equal(types(calls), 'architect,advisor,architect,advisor')
+})
+await test('gate blocked -> needs-human; each question names the id it challenges, so the answer replaces that id', async () => {
+  const { result } = await run(fn, {
+    architect: [p => { assert.match(p, /put its id and why in conflicts/); return DESIGN() }],
+    advisor: [p => { assert.match(p, /starting with the decision or assumption id it challenges/); return GATE('blocked', { questions: ['Q1: Is a magic link acceptable?', 'A1 : Keep the default stack?', 'new: Is a shared family list allowed?'] }) }],
+  }, DARGS)
+  assert.equal(result.status, 'needs-human')
+  assert.deepEqual(result.questions, [
+    { about: 'Q1', question: 'Is a magic link acceptable?' },
+    { about: 'A1', question: 'Keep the default stack?' },
+    { about: null, question: 'Is a shared family list allowed?' },
+  ])
+  assert.deepEqual(result.design, DESIGN())
+})
+await test('a gate question without an id, or naming an unknown id -> escalate, never an answer with nowhere to go', async () => {
+  for (const [q, why] of [['Is a shared list allowed?', /does not start with the id it challenges/], ['Q9: why?', /challenges Q9, which is not a decision or assumption/]]) {
+    const { result } = await run(fn, { architect: [DESIGN()], advisor: [GATE('blocked', { questions: [q] })] }, DARGS)
+    assert.equal(result.status, 'escalate')
+    assert.match(result.reason, why)
+  }
+})
+await test('a decision the architect says cannot hold goes to the gate in conflicts instead of honors', async () => {
+  const design = DESIGN({ honors: DESIGN().honors.filter(h => h.id !== 'Q1'), conflicts: [{ id: 'Q1', why: 'no email provider' }] })
+  const { result } = await run(fn, { architect: [design], advisor: [p => { assert.match(p, /"conflicts"/); return GATE('blocked', { questions: ['Q1: Allow username login?'] }) }] }, DARGS)
+  assert.equal(result.status, 'needs-human')
+  assert.deepEqual(result.questions, [{ about: 'Q1', question: 'Allow username login?' }])
+})
+await test('an approval that still carries a blocking issue is a revision', async () => {
+  const { result, calls } = await run(fn, {
+    architect: [DESIGN(), p => { assert.match(p, /M1 leaks the row format/); return DESIGN() }],
+    advisor: [GATE('approve', { issues: [ISSUE, { ...ISSUE, n: 2, issue: 'wording', blocking: false }] }), GATE('approve')],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.equal(result.designRounds, 2)
+  assert.equal(types(calls), 'architect,advisor,architect,advisor')
+})
+await test('an approval that leaves a conflict unresolved is a revision, never design-ready', async () => {
+  const conflicted = DESIGN({ honors: DESIGN().honors.filter(h => h.id !== 'Q1'), conflicts: [{ id: 'Q1', why: 'no email provider' }] })
+  const { result, calls } = await run(fn, {
+    architect: [conflicted, p => { assert.match(p, /conflicts Q1 are unresolved/); return DESIGN() }],
+    advisor: [GATE('approve'), GATE('approve')],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.deepEqual(result.design.conflicts, [])
+  assert.equal(types(calls), 'architect,advisor,architect,advisor')
+  const stuck = await run(fn, { architect: [conflicted, conflicted], advisor: [GATE('approve'), GATE('approve')] }, DARGS)
+  assert.equal(stuck.result.status, 'escalate')
+  assert.match(stuck.result.reason, /not approved after 2 architect round/)
+})
+await test('an approval with only non-blocking issues is design-ready', async () => {
+  const { result } = await run(fn, { architect: [DESIGN()], advisor: [GATE('approve', { issues: [{ ...ISSUE, blocking: false }] })] }, DARGS)
+  assert.equal(result.status, 'design-ready')
+})
+await test('gate blocked without a question, or revise without an issue -> escalate, never a silent loop', async () => {
+  for (const [gate, why] of [[GATE('blocked'), /blocked the design without a question/], [GATE('revise'), /revision without naming an issue/]]) {
+    const { result, calls } = await run(fn, { architect: [DESIGN()], advisor: [gate] }, DARGS)
+    assert.equal(result.status, 'escalate')
+    assert.match(result.reason, why)
+    assert.equal(types(calls), 'architect,advisor')
+  }
+})
+await test('an architect or advisor that returns nothing or throws -> escalate naming it', async () => {
+  for (const [script, who] of [
+    [{ architect: [null] }, /architect returned no result in round 1/],
+    [{ architect: [DESIGN()], advisor: [{ throws: "agent type 'advisor' not found" }] }, /advisor failed on the design: agent type 'advisor' not found/],
+  ]) {
+    const { result } = await run(fn, script, DARGS)
+    assert.equal(result.status, 'escalate')
+    assert.match(result.reason, who)
+  }
+})
+
+console.log('== blueprint-design: drift')
+await test('GATE_SCHEMA is identical to dev-build.js: one advisor verdict contract', () => {
+  const dev = readFileSync(join(here, '..', '..', 'dev', 'workflows', 'dev-build.js'), 'utf8')
+  const block = text => {
+    const m = text.match(/^\/\/ shared\nconst GATE_SCHEMA = /m)
+    assert.ok(m, 'GATE_SCHEMA not marked shared')
+    return text.slice(m.index, text.indexOf('\n}\n', m.index) + 3)
+  }
+  assert.equal(block(src), block(dev))
+})
+await test('KINDS and FIRST_CALLER_KINDS match the knowledge-map skill', () => {
+  const skill = readFileSync(join(here, '..', '..', '..', 'core', 'skills', 'knowledge-map', 'SKILL.md'), 'utf8')
+  const ticks = s => [...s.matchAll(/`([a-z-]+)`/g)].map(m => m[1])
+  const arr = name => JSON.parse(src.match(new RegExp(`^const ${name} = (\\[.*\\])$`, 'm'))[1].replace(/'/g, '"'))
+  assert.deepEqual(arr('KINDS'), ticks(skill.match(/^Kinds: ([^.]+)\./m)[1]))
+  assert.deepEqual(arr('FIRST_CALLER_KINDS'), ticks(skill.match(/^\| (`authn`.*) \| its first caller \|$/m)[1]))
+})
