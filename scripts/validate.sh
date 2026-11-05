@@ -177,6 +177,8 @@ rule core/agents/advisor.md 'Re-gating a revision: check only the blocking issue
 rule graphs/blueprint/skills/blueprint/SKILL.md 'entry in `notes`' 'the design report shows the findings the advisor did not send back'
 rule core/skills/gtm-brief/SKILL.md 'Read the brief and never edit it.' 'agents never rewrite a product brief'
 rule core/skills/gtm-brief/SKILL.md 'Never invent the' 'without a passing brief, marketing and sales agents stop'
+rule graphs/seo/skills/seo-check/SKILL.md 'Errors fail; warnings never do.' 'a length guide or a Google-ignored tag never fails the SEO gate'
+rule graphs/seo/skills/seo-check/SKILL.md '"our rule" means PandaStack' 'every SEO rule names its source; house rules say so'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'decisions:s.decisions.map(d=>({id:d.id,answer:d.answer}))' 'design args come from one exact command, never paraphrased'
 rule graphs/blueprint/skills/blueprint/SKILL.md '"none" keeps every assumption' 'the optional last interview step says so (L0 finding)'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'Each answer replaces what it challenges' 'a gate answer never sits next to the decision it overrides'
