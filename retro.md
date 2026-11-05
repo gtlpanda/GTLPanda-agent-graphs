@@ -526,3 +526,31 @@ with tests:
 
 **Stats.** 219 tests passed, 0 failed (10 new, plus the 2-round tests moved to 3), 15 mutations,
 all caught. 2 validate.sh rules (both checked to fail when their text is removed).
+
+## 15. GTM families and the product brief (2026-11-05)
+
+**What changed.** The graphs now come in families. **Build** graphs change your code. **Marketing**
+graphs (SEO first) change your own site and content, and their fixes ship as code PRs. **Sales**
+graphs (research, scout, and sdr, planned) reach other people, so you approve every send. The
+README graph table has a Family column. Marketing and sales share one brief per product,
+`docs/gtm.md` in that product's repo, never in PandaStack. `core/skills/gtm-brief` owns the format:
+Product, Customer, Positioning, Voice, Proof (each claim with a source), Never claim, Compliance.
+It also owns the rules: agents read the brief and never edit it, and without a passing brief they
+stop instead of inventing a customer. `gtm-brief.mjs check <path>` has zero dependencies and ends
+with `GTM-BRIEF: PASS|FAIL`, exit code 0 or 1 (2 for usage).
+
+**Bugs caught.** Review found 2 MEDIUM and 4 LOW, each reproduced before the fix:
+- MEDIUM: fences toggled on any ``` or ~~~ line, so a ```` block around a ``` example, or a ```
+  block "closed" by ~~~, turned an example `## Compliance` into a real section, and a brief missing
+  that section passed. Fences now follow CommonMark: same character, at least as long, at most 3
+  spaces of indent.
+- MEDIUM: an unclosed fence was reported one line past the end of the file; it now names the line
+  that opened the fence.
+- LOW: the placeholder rule failed `<2s, >99.9%` and inline code, and passed `<your name@here>`
+  and a `TBD` in a heading.
+- LOW: a Proof item with an empty claim, or `source: n/a`, passed.
+- LOW: the CLI did nothing and exited 0 under `node --preserve-symlinks-main`.
+- LOW: the docs said "proves" a brief is complete; the check covers the format only.
+
+**Stats.** 12 tests (231 passed, 0 failed in the suite), 27 mutations, all caught. 2 validate.sh
+rules. Diff about 350 lines, about 150 of them tests.
