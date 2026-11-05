@@ -30,12 +30,12 @@
 - **You stay in charge of the irreversible.** You approve every plan and every
   merge (for one exact commit); a rollback is only ever recommended, with evidence.
 
-| Graph | Run it with | What it does | Status |
-|-------|-------------|--------------|--------|
-| [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once → architect designs, advisor gates it; research and backlog not built yet | interview and design live-run once each |
-| [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
-| [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
-| [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
+| Family | Graph | Run it with | What it does | Status |
+|--------|-------|-------------|--------------|--------|
+| build | [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once → architect designs, advisor gates it; research and backlog not built yet | interview and design live-run once each |
+| build | [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
+| build | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
+| build | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
 
 ## Where it's going: the autobuild loop
 
@@ -69,6 +69,13 @@ advisor gate), plus `/dev`, `/loop`, and `/release-pr`. Next, in order:
 - `/autobuild`;
 - a live end-to-end build of a toy reading-list app.
 
+Families: **build** graphs change your code. **Marketing** graphs (SEO first) change what you
+own, like your site and content, and their fixes ship as code PRs. **Sales** graphs (research,
+scout, and sdr are planned) reach other people, so you approve every send. Marketing and sales
+work from one brief per product, `docs/gtm.md` in that product's repo; the format is
+[`core/skills/gtm-brief`](core/skills/gtm-brief/SKILL.md), and `gtm-brief.mjs check` checks a
+brief's format.
+
 It also carries the shared user-level config the graphs run on
 (`settings.json`, `CLAUDE.md`, `loop.md`, the `verify` gate): one repo,
 symlinked into `~/.claude/` on every machine.
@@ -77,7 +84,7 @@ symlinked into `~/.claude/` on every machine.
 
 ```
 install.sh  settings.json  CLAUDE.md  loop.md   shared config, linked into ~/.claude/
-core/skills/                                    skills every graph uses (verify, harness-review, knowledge-map, default-stack)
+core/skills/                                    skills more than one graph uses (verify, harness-review, knowledge-map, default-stack, gtm-brief)
 core/agents/                                    agents more than one graph uses (advisor, checker)
 graphs/<graph>/agents/                          that graph's agents
 graphs/<graph>/workflows/                       that graph's workflow script
