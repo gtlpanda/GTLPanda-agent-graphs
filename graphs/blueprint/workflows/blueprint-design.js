@@ -470,8 +470,12 @@ if (STAGE === 'design') {
     if (!gate) return finish('escalate', nodeFailure('gate', 'on the design'), { design })
     ledger.gate = gate
     ledger.history.push({ node: 'gate', round, verdict: gate.verdict, issues: list(gate.issues).length })
-    // An approval that still carries a blocking issue is a revision.
+    // An approval that still carries a blocking issue, or leaves a conflict unresolved, is a revision.
     const blocking = list(gate.issues).filter(i => i && i.blocking === true)
+    const conflicted = list(design.conflicts).map(c => c.id)
+    if (gate.verdict === 'approve' && conflicted.length) {
+      blocking.push({ n: blocking.length + 1, issue: `conflicts ${conflicted.join(', ')} are unresolved`, fix: 'design so each one holds, or the gate blocks with a question for the human', blocking: true })
+    }
     if (gate.verdict === 'approve' && !blocking.length) return finish('design-ready', `design approved in round ${round}`, { design })
     if (gate.verdict === 'blocked') {
       if (!list(gate.questions).length) return finish('escalate', 'the advisor blocked the design without a question for the human', { design })

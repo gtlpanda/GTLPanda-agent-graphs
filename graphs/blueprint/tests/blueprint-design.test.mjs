@@ -442,6 +442,19 @@ await test('an approval that still carries a blocking issue is a revision', asyn
   assert.equal(result.designRounds, 2)
   assert.equal(types(calls), 'architect,advisor,architect,advisor')
 })
+await test('an approval that leaves a conflict unresolved is a revision, never design-ready', async () => {
+  const conflicted = DESIGN({ honors: DESIGN().honors.filter(h => h.id !== 'Q1'), conflicts: [{ id: 'Q1', why: 'no email provider' }] })
+  const { result, calls } = await run(fn, {
+    architect: [conflicted, p => { assert.match(p, /conflicts Q1 are unresolved/); return DESIGN() }],
+    advisor: [GATE('approve'), GATE('approve')],
+  }, DARGS)
+  assert.equal(result.status, 'design-ready')
+  assert.deepEqual(result.design.conflicts, [])
+  assert.equal(types(calls), 'architect,advisor,architect,advisor')
+  const stuck = await run(fn, { architect: [conflicted, conflicted], advisor: [GATE('approve'), GATE('approve')] }, DARGS)
+  assert.equal(stuck.result.status, 'escalate')
+  assert.match(stuck.result.reason, /not approved after 2 architect round/)
+})
 await test('an approval with only non-blocking issues is design-ready', async () => {
   const { result } = await run(fn, { architect: [DESIGN()], advisor: [GATE('approve', { issues: [{ ...ISSUE, blocking: false }] })] }, DARGS)
   assert.equal(result.status, 'design-ready')

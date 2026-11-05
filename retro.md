@@ -487,11 +487,13 @@ id it challenges and the answer replaces it, with a 2-round cap. Also fixed: the
 things (MEDIUM, now `conflicts` for a decision that cannot hold, premises only for evidence); an
 `approve` carrying a blocking issue was accepted; duplicate shape names passed the two-shapes check;
 failure ids were unchecked; `server/helpers.js` passed the grab-bag check; the advisor's revision
-wording overpromised; new knowledge ids could reuse an existing map's. All code fixes have tests.
+wording overpromised; new knowledge ids could reuse an existing map's. A pre-merge re-review found one
+more (MEDIUM): an `approve` with ids still in `conflicts` returned `design-ready`, so a binding decision
+the architect could not honor never reached the human; it now counts as a revision. All code fixes have tests.
 
 **Untested.** No live design run yet (L1 is next, on the reading list, with pass conditions in the
 todo). A knowledge owner path is not checked against module names (paths and names differ).
 
-**Stats.** 50 new tests (18 plus 32 table rows; 208 passed, 0 failed), 24 mutations, all caught.
+**Stats.** 51 new tests (19 plus 32 table rows; 209 passed, 0 failed), 25 mutations, all caught.
 Diff about 780 added lines, about 300 of them tests: over the ~300 guide, and already the B2a half of
 the split.

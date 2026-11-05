@@ -86,7 +86,7 @@ an ADR; any decision or assumption id in neither `honors` nor `conflicts`, unkno
 `knowledge-map` skill does not define, no `changes_together_because`, a `utils`/`helpers`/`common`/`shared` owner (directory or file), an
 unknown user, or (outside `authn`, `authz`, `input-validation`, `money`) fewer than two users. Each goes back as a
 blocking issue. The advisor then screens the 8 red flags, premises, and surfaces; `GATE_SCHEMA` is shared with `dev-build.js`.
-An `approve` that carries a blocking issue counts as `revise`. A `blocked` question must start with the id it challenges
+An `approve` that carries a blocking issue, or leaves any id in `conflicts`, counts as `revise`. A `blocked` question must start with the id it challenges
 (`Q2: ...`) or `new: `, or the run escalates; the ledger returns `questions[] {about, question}`.
 
 Default stack: `core/skills/default-stack` (one owner, preloaded by the questioner, architect, and
