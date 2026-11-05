@@ -454,3 +454,44 @@ the ledger before `run1.json`; three READMEs now show the absolute `--git-path`.
 The default-stack rule lives in `questioner.md` until run 2's researcher needs it too.
 
 **Stats.** 17 routing tests (147 passed, 0 failed), 20 mutations caught, 1 after a test fix.
+
+## 13. L0 live interview; /blueprint run 2a: design and the design gate (2026-11-04)
+
+**L0 (first live run of run 1).** A reading-list app in a scratch repo: 8 questions, 10 assumptions, 6
+preflight items in 63.5 s (2 agents). The pre-registered pass conditions held: no decided item was asked
+again, every question had its recommendation first, and no credential-shaped string reached `run1.json`
+or `state.json`. Two findings mocks could not show: preflight items kept after answers ruled them out
+(a hosting account after "local only", an email key after "no reset"; B3 adds conditions), and the
+optional last step read as a new task to the human (the skill now says "none" keeps every default).
+
+**What changed.** First half of B2 (19A split; the autobuild plan is in `tasks/todo.md`).
+`blueprint-design.js` gains `stage: design`: the `architect` (sonnet, new) designs against the saved
+answers; code checks the structure (`designProblems`: requirement coverage, two distinct shapes per
+new boundary with a pick and depth reason, no silent+untested+unhandled failure, ADRs with two options,
+at most 3 departures from the default stack, every decision and assumption id in `honors` or
+`conflicts`, knowledge items per the knowledge-map rules); then the advisor's new "Gating a design"
+(8 red flags from gstack's `plan-eng-review`, premises, surfaces). Two architect rounds, then escalate.
+A `blocked` gate returns questions that name the id they challenge; the skill replaces that decision
+or assumption with the answer and reruns, at most twice. Args are ids (529 bytes on the real state)
+plus `statePath`; agents read `state.json` themselves, so no injected seam. The default stack moved
+from `questioner.md` into `core/skills/default-stack`, preloaded by the questioner, architect, and
+advisor. `GATE_SCHEMA` is marked shared with `dev-build.js` and drift-tested; the knowledge-map kinds
+are drift-tested against the skill.
+
+**Bugs caught.** Advisor before code: a `blocked` gate was a dead end (now `needs-human`); decision
+ids must not be shape-checked (`A<n>` overrides, `D<n>` gate answers). Reviewer and QA auditor, both on
+the uncommitted diff, agreed on the worst one (HIGH): a gate answer was appended as `D<n>` next to the
+decision it contradicted, so the gate would ask the same question forever; now each question names the
+id it challenges and the answer replaces it, with a 2-round cap. Also fixed: the architect pointed at a
+`scaffold-app` skill it cannot load (MEDIUM, now `default-stack`); "UNVERIFIED premise" meant three
+things (MEDIUM, now `conflicts` for a decision that cannot hold, premises only for evidence); an
+`approve` carrying a blocking issue was accepted; duplicate shape names passed the two-shapes check;
+failure ids were unchecked; `server/helpers.js` passed the grab-bag check; the advisor's revision
+wording overpromised; new knowledge ids could reuse an existing map's. All code fixes have tests.
+
+**Untested.** No live design run yet (L1 is next, on the reading list, with pass conditions in the
+todo). A knowledge owner path is not checked against module names (paths and names differ).
+
+**Stats.** 50 new tests (18 plus 32 table rows; 208 passed, 0 failed), 24 mutations, all caught.
+Diff about 780 added lines, about 300 of them tests: over the ~300 guide, and already the B2a half of
+the split.

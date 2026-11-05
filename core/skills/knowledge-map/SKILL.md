@@ -75,8 +75,8 @@ records the owner's path.
 }
 ```
 
-- `id`: `K` then digits (`/^K\d+$/`; dev-build.js `planProblems` checks the same
-  pattern). Never reused.
+- `id`: `K` then digits (`/^K\d+$/`; dev-build.js `planProblems` and
+  blueprint-design.js `designProblems` check the same pattern). Never reused.
 - `status`: `planned` (`owner` is the intended path, or null) or `built`
   (`owner` is the real path).
 - `used_by`: the slices or modules that use it.
