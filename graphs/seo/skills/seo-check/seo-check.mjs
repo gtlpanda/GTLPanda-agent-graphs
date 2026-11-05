@@ -1,6 +1,17 @@
 // seo-check.mjs - checks the HTML of a built site for the tags search engines
-// and link previews read. Zero dependencies. So far it is the tag scanner; the
-// checks for one page and the command that checks a build follow (G2a, 1 of 3).
+// and link previews read: title, meta description, canonical, Open Graph, and
+// JSON-LD. Zero dependencies. So far: the tag scanner and the checks for one
+// page; the command that checks a build follows (G2a, 2 of 3).
+
+// Every check a finding can name.
+export const CHECKS = ['title', 'description', 'canonical', 'og', 'json-ld']
+const OG_REQUIRED = ['og:title', 'og:description', 'og:image', 'og:url']
+const OG_URLS = ['og:image', 'og:url']
+// Open Graph arrays: a page may list several images, so two values do not disagree.
+const OG_ARRAYS = ['og:image']
+// Our guide, not Google's: Google sets no length limit and cuts to the screen width.
+const TITLE_MAX = 60
+const DESCRIPTION_RANGE = [70, 160]
 
 // ---- The tag scanner ----
 // Elements whose content is text, not markup: a "<meta" inside them is not a tag.
@@ -101,4 +112,152 @@ export function scanTags(source) {
     tags.push(tag)
   }
   return tags
+}
+
+// ---- One page ----
+const attr = (tag, name) => (tag.attrs.get(name) ?? '').trim()
+const words = value => value.toLowerCase().split(/[\s,]+/).filter(Boolean)
+const collapse = text => text.replace(/\s+/g, ' ').trim()
+const chars = text => [...text].length
+const isAbsolute = value => {
+  try { return ['http:', 'https:'].includes(new URL(value).protocol) } catch { return false }
+}
+// /a, /a/, /a.html, and /a/index.html serve one page on most static hosts.
+const pageKey = url => {
+  const u = new URL(url)
+  return u.origin + u.pathname.replace(/(\/index)?\.html?$/i, '').replace(/\/+$/, '') + u.search
+}
+const onSite = (url, site) => {
+  const u = new URL(url)
+  return u.origin === site.origin && `${u.pathname}/`.startsWith(site.pathname)
+}
+
+// --site as a URL object whose pathname ends in "/", or null when it is not an absolute http(s) URL.
+export function parseSite(value) {
+  if (!isAbsolute(value)) return null
+  const site = new URL(value)
+  site.search = ''
+  site.hash = ''
+  if (!site.pathname.endsWith('/')) site.pathname += '/'
+  return site
+}
+
+// Checks one page's HTML. `url` is where the page is served; `site` is the
+// --site URL (a URL object whose pathname ends in "/"). Returns
+// {indexable, title, description, canonical, findings: [{line, level, check, message}]}.
+export function checkPage(html, url, site) {
+  const findings = []
+  const add = (level, line, check, message) => {
+    if (!CHECKS.includes(check)) throw new Error(`unknown check "${check}"`)
+    findings.push({ line, level, check, message })
+  }
+  const error = (...a) => add('error', ...a)
+  const warn = (...a) => add('warn', ...a)
+  const tags = scanTags(html)
+  const metas = key => value => tags.filter(t => t.name === 'meta' && attr(t, key).toLowerCase() === value)
+
+  // The tags of one kind that count (inside <head>). Reports the first one in
+  // <body> when <head> has none, and two in <head> that disagree, unless the
+  // tag may repeat (valueOf is null).
+  const fromHead = (found, check, what, valueOf) => {
+    const head = found.filter(t => t.inHead)
+    if (!head.length && found.length) error(found[0].line, check, `${what} is in <body>; it only counts in <head>`)
+    if (!valueOf) return head
+    const values = head.map(valueOf)
+    const other = values.findIndex(v => v !== values[0])
+    if (other > 0) error(head[other].line, check, `two ${what} tags disagree (first at line ${head[0].line})`)
+    return head
+  }
+
+  const noindex = ['robots', 'googlebot'].some(name =>
+    metas('name')(name).some(t => t.inHead && words(attr(t, 'content')).some(w => w === 'noindex' || w === 'none')))
+  const facts = { indexable: !noindex, title: null, description: null, canonical: null }
+
+  if (!noindex) {
+    const titles = tags.filter(t => t.name === 'title' && t.inHead)
+    if (!titles.length) error(0, 'title', 'no <title> in <head>')
+    else {
+      if (titles.length > 1) error(titles[1].line, 'title', `two <title> elements in <head> (first at line ${titles[0].line})`)
+      facts.title = collapse(titles[0].text)
+      if (!facts.title) error(titles[0].line, 'title', '<title> is empty')
+      else if (chars(facts.title) > TITLE_MAX) {
+        warn(titles[0].line, 'title', `title is ${chars(facts.title)} characters; Google sets no limit but cuts long titles (our guide: ${TITLE_MAX})`)
+      }
+    }
+
+    const allDescriptions = metas('name')('description')
+    const descriptions = fromHead(allDescriptions, 'description', 'meta description', t => attr(t, 'content'))
+    if (!allDescriptions.length) error(0, 'description', 'no meta description (our rule: without one, Google writes its own snippet)')
+    else if (descriptions.length) {
+      facts.description = collapse(attr(descriptions[0], 'content'))
+      const n = chars(facts.description)
+      const [min, max] = DESCRIPTION_RANGE
+      if (!n) error(descriptions[0].line, 'description', 'meta description is empty')
+      else if (n < min || n > max) {
+        warn(descriptions[0].line, 'description', `description is ${n} characters; Google sets no limit but cuts long ones (our guide: ${min}-${max})`)
+      }
+    }
+
+    const isCanonical = t => t.name === 'link' && words(attr(t, 'rel')).includes('canonical')
+    const allCanonicals = tags.filter(isCanonical)
+    const canonicals = fromHead(allCanonicals, 'canonical', 'canonical link', t => attr(t, 'href'))
+    if (!allCanonicals.length) error(0, 'canonical', 'no <link rel="canonical">')
+    else if (canonicals.length) {
+      const href = attr(canonicals[0], 'href')
+      const line = canonicals[0].line
+      if (!href) error(line, 'canonical', 'canonical link has no href')
+      else if (!isAbsolute(href)) error(line, 'canonical', `canonical "${href}" is relative; Google recommends an absolute URL`)
+      else if (!onSite(href, site)) error(line, 'canonical', `canonical ${href} is not on --site ${site.href}`)
+      else {
+        facts.canonical = href
+        if (pageKey(href) !== pageKey(url)) warn(line, 'canonical', `canonical points to ${href}, not this page (${url}): search engines index that page instead`)
+      }
+    }
+
+    for (const property of OG_REQUIRED) {
+      const all = metas('property')(property)
+      const found = fromHead(all, 'og', property, OG_ARRAYS.includes(property) ? null : t => attr(t, 'content'))
+      if (!all.length) {
+        const named = metas('name')(property).length ? '; it is set with name=, and Open Graph reads property=' : ''
+        error(0, 'og', `no ${property}${named}`)
+      }
+      for (const tag of OG_ARRAYS.includes(property) ? found : found.slice(0, 1)) {
+        const value = attr(tag, 'content')
+        if (!value) error(tag.line, 'og', `${property} is empty`)
+        else if (OG_URLS.includes(property) && !isAbsolute(value)) {
+          error(tag.line, 'og', `${property} "${value}" is not an absolute http(s) URL (Open Graph's URL type)`)
+        }
+      }
+    }
+  }
+
+  const jsonLd = tags.filter(t => t.name === 'script' && attr(t, 'type').toLowerCase() === 'application/ld+json')
+  for (const script of jsonLd) checkJsonLd(script, error, warn)
+  return { ...facts, findings: findings.sort((a, b) => a.line - b.line) }
+}
+
+const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
+const typesOf = node => [].concat(node['@type'] ?? [])
+
+function checkJsonLd(script, error, warn) {
+  let data
+  try { data = JSON.parse(script.text) } catch (e) {
+    error(script.line, 'json-ld', `JSON-LD does not parse: ${e.message}`)
+    return
+  }
+  const roots = Array.isArray(data) ? data : [data]
+  if (!roots.length) error(script.line, 'json-ld', 'JSON-LD is an empty list')
+  for (const root of roots) {
+    if (!isObject(root)) { error(script.line, 'json-ld', 'JSON-LD must be an object or a list of objects'); continue }
+    if (!Object.hasOwn(root, '@context')) error(script.line, 'json-ld', 'JSON-LD has no @context')
+    const nodes = Object.hasOwn(root, '@graph') ? [].concat(root['@graph']) : [root]
+    for (const node of nodes) {
+      const types = isObject(node) ? typesOf(node) : []
+      if (!types.length || !types.every(t => typeof t === 'string' && t.trim())) {
+        error(script.line, 'json-ld', 'a JSON-LD node has no @type')
+      } else if (types.includes('FAQPage')) {
+        warn(script.line, 'json-ld', 'FAQPage: Google stopped showing FAQ rich results on 2026-05-07')
+      }
+    }
+  }
 }
