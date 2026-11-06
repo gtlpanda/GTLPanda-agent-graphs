@@ -618,8 +618,9 @@ nested indexes are followed and nothing is claimed. The user asked for one pass 
 non-strict); the build follows 2A as answered.
 
 **Bugs caught.**
-- Mutation runs found 11 test gaps and one piece of dead code (isAppShell's `</head>` fallback,
-  which no input can reach), deleted.
+- Mutation runs found 21 test gaps (11 in the three build PRs, 10 after the review fixes) and two
+  pieces of dead code, both deleted: isAppShell's `</head>` fallback, which no input can reach, and an
+  empty-path guard that the regular-file check made redundant.
 - The reviewer could not run commands, so I reproduced each of its findings before fixing. The
   reviewer and the QA auditor together reported 7 distinct defects, and all 7 reproduced:
   - HIGH: an index whose children were all gzipped or off-site counted as a sitemap, so every page
