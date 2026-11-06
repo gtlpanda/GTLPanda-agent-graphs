@@ -3,8 +3,9 @@
 // slice per fresh headless `claude -p "/dev --slice ..."` session, landing each on
 // integration/<app> only after its own checks pass.
 //
-//   node driver.mjs run    --repo <path> --app <slug> [--no-pr]   build until done, a brake, or a stop;
-//                          when every slice has landed: a final QA pass, then a push and one PR
+//   node driver.mjs run    --repo <path> --app <slug> [--no-pr|--pr]   build until done, a brake, or a stop;
+//                          when every slice has landed: a final QA pass, then a push and one PR.
+//                          --no-pr holds for every later run of the app until one passes --pr.
 //   node driver.mjs status --repo <path> --app <slug>   print status.json
 //   node driver.mjs stop   --repo <path> --app <slug>   stop a running driver (and its session)
 //   node driver.mjs resume --repo <path> --app <slug>   after a brake: the brake counters start over
@@ -105,25 +106,33 @@ function reconcile(repo, integration, backlog, ledger, log) {
   return ledger
 }
 
-export async function runDriver({ repo: given, app, noPr = false }, cfg = settingsFromEnv()) {
+export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg = settingsFromEnv()) {
   // One real path: the guard compares file paths against it.
   const repo = realpathSync(resolve(given))
   const integration = `integration/${app}`
   const state = stateDirOf(repo, app)
   const logs = join(state, 'logs')
   mkdirSync(logs, { recursive: true })
+  // --no-pr is remembered: a resumed build never pushes what its start opted out of.
+  let before = {}
+  try { before = JSON.parse(readFileSync(join(state, 'status.json'), 'utf8')) } catch { before = {} }
+  const noPr = noPrFlag === null ? before.noPr === true : noPrFlag
   const files = {
     ledger: join(state, 'ledger.json'), status: join(state, 'status.json'), pid: join(state, 'driver.pid'),
     settings: join(state, 'session-settings.json'), guard: join(state, 'guard.json'), stopFailure: join(state, 'stop-failure.json'), session: join(state, 'session.pid'),
     driverLog: join(logs, 'driver.log'), probe: join(logs, 'probe.jsonl'), finalQa: join(state, 'final-qa.json'),
     devLedger: join(git(repo, ['rev-parse', '--path-format=absolute', '--git-path', 'harness-dev']).stdout.trim(), 'ledger.json'),
   }
+  // Bookkeeping never crashes the driver: if the state directory vanishes, the
+  // line still reaches stdout and the run ends on its own terms.
   const log = message => {
     const line = `[${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}] ${message}`
     console.log(line)
-    appendFileSync(files.driverLog, `${line}\n`)
+    try { appendFileSync(files.driverLog, `${line}\n`) } catch (e) { console.error(`driver: cannot write ${files.driverLog}: ${e.code || e.message}`) }
   }
-  const status = (fields) => writeJson(files.status, { app, integration, pid: process.pid, updatedAt: new Date().toISOString(), ...fields })
+  const status = (fields) => {
+    try { writeJson(files.status, { app, integration, pid: process.pid, noPr, updatedAt: new Date().toISOString(), ...fields }) } catch (e) { console.error(`driver: cannot write ${files.status}: ${e.code || e.message}`) }
+  }
   const notify = message => {
     if (!cfg.notify) return
     const r = run('bash', ['-c', `${cfg.notify} "$1"`, 'notify', `build-app ${app}: ${message}`], { timeoutMs: 60_000 })
@@ -183,7 +192,8 @@ export async function runDriver({ repo: given, app, noPr = false }, cfg = settin
     if (!stamp) return end(EXIT.gitState, 'failed', `could not create ${branch} from ${integration}`)
     rmSync(files.finalQa, { force: true })
     rmSync(files.stopFailure, { force: true })
-    writeJson(files.guard, { repo, frozen: frozenFiles(ledger) })
+    // The one file in .git the QA session writes: its report.
+    writeJson(files.guard, { repo, frozen: frozenFiles(ledger), writable: [files.finalQa] })
     const attempt = `final-${stamp}`
     const logFile = join(logs, `${attempt}.jsonl`)
     status({ state: 'running', slice: 'final', message: 'final QA over the whole branch', log: logFile })
@@ -351,17 +361,21 @@ function setAside(repo, branch, integration, attempt, log) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv
-  const opts = { answers: [], noPr: false }
+  const opts = { answers: [], noPr: null }
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i]
-    if (flag === '--no-pr') { opts.noPr = true; continue }
+    if (flag === '--no-pr' || flag === '--pr') {
+      if (opts.noPr !== null) return null
+      opts.noPr = flag === '--no-pr'
+      continue
+    }
     if (!['--repo', '--app', '--slice', '--answer'].includes(flag) || rest[i + 1] === undefined) return null
     if (flag === '--answer') opts.answers.push(rest[i + 1])
     else opts[flag.slice(2)] = rest[i + 1]
     i += 1
   }
   if (!['run', 'status', 'stop', 'resume', 'unblock'].includes(cmd) || !opts.repo || !opts.app || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(opts.app)) return null
-  if (opts.noPr && cmd !== 'run') return null
+  if (opts.noPr !== null && cmd !== 'run') return null
   if ((cmd === 'unblock') !== (opts.slice !== undefined || opts.answers.length > 0)) return null
   if (cmd === 'unblock' && (!/^S[1-9]\d*$/.test(opts.slice || '') || !opts.answers.length)) return null
   return { cmd, repo: opts.repo, app: opts.app, noPr: opts.noPr, slice: opts.slice, answers: opts.answers }
@@ -371,6 +385,7 @@ function parseArgs(argv) {
 function changeLedger(state, change) {
   if (isOurs(readPid(join(state, 'driver.pid')), 'driver.mjs')) { console.error('driver: the driver is running; stop it first'); return EXIT.locked }
   const file = join(state, 'ledger.json')
+  if (!existsSync(file)) { console.error(`driver: no build ledger at ${file}; is the app slug right?`); return 1 }
   try {
     const next = change(readLedger(file))
     writeLedger(file, next)
@@ -384,7 +399,7 @@ function changeLedger(state, change) {
 export async function main(argv) {
   const a = parseArgs(argv)
   if (!a) {
-    console.error('usage: driver.mjs run|status|stop|resume --repo <path> --app <slug> [--no-pr: run only] | unblock --repo <path> --app <slug> --slice S<n> --answer <text>...')
+    console.error('usage: driver.mjs run|status|stop|resume --repo <path> --app <slug> [--no-pr|--pr: run only] | unblock --repo <path> --app <slug> --slice S<n> --answer <text>...')
     return 2
   }
   let state
@@ -402,7 +417,14 @@ export async function main(argv) {
   }
   if (a.cmd === 'status') {
     const file = join(state, 'status.json')
-    console.log(existsSync(file) ? readFileSync(file, 'utf8').trim() : JSON.stringify({ app: a.app, state: 'never run' }))
+    if (!existsSync(file)) { console.log(JSON.stringify({ app: a.app, state: 'never run' })); return 0 }
+    let s
+    try { s = JSON.parse(readFileSync(file, 'utf8')) } catch (e) { console.error(`driver: ${file} is not valid JSON: ${e.message}`); return 1 }
+    // A killed driver (SIGKILL, reboot) never wrote its last status.
+    if (['running', 'waiting'].includes(s.state) && !isOurs(Number(s.pid), 'driver.mjs')) {
+      s = { ...s, state: 'stale', message: `the driver (pid ${s.pid}) is gone; it was: ${s.message}. /build-app resume continues` }
+    }
+    console.log(JSON.stringify(s, null, 2))
     return 0
   }
   const pid = readPid(join(state, 'driver.pid'))

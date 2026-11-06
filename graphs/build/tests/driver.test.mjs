@@ -341,6 +341,24 @@ await test('a rejected push: nothing is opened, exit 13 with git\'s reason', () 
   assert.equal(existsSync(ghLog), false, 'no PR call after a failed push')
 })
 
+await test('--no-pr is remembered: a resumed build never pushes; --pr opts back in', () => {
+  const root = one()
+  const remote = mkdtempSync(join(tmpdir(), 'build-app-remote-'))
+  execFileSync('git', ['init', '-q', '--bare', remote])
+  execFileSync('git', ['-C', root, 'remote', 'add', 'origin', remote])
+  const ghLog = join(dirname(root), `${root.split('/').pop()}-gh.log`)
+  const gh = { HARNESS_BUILD_GH: FAKE_GH, FAKE_GH_LOG: ghLog }
+  assert.equal(drive(root, [{ dev: 'needs-human', questions: ['S1: which?'] }], gh, ['--no-pr']).code, 3)
+  assert.equal(status(root).noPr, true)
+  execFileSync(process.execPath, [DRIVER, 'unblock', '--repo', root, '--app', APP, '--slice', 'S1', '--answer', 'this one'])
+  assert.equal(drive(root, [good('S1'), good('S2'), QA], gh, []).code, 0)
+  assert.match(status(root).message, /--no-pr, so nothing was pushed/)
+  assert.equal(existsSync(ghLog), false)
+  assert.equal(drive(root, [QA], gh, ['--pr']).code, 0)
+  assert.equal(status(root).pr, 'https://github.com/example/toy/pull/7')
+  assert.equal(status(root).noPr, false)
+})
+
 console.log('== build-app driver: resume and unblock')
 const cli = (root, ...args) => spawnSync(process.execPath, [DRIVER, ...args, '--repo', root, '--app', APP], { encoding: 'utf8' })
 await test('unblock gives a blocked slice the answers and a fresh start; the next run builds it with them', () => {
@@ -361,6 +379,22 @@ await test('resume starts the brake counters over; blocked slices stay blocked',
   assert.deepEqual(ledger(root).escalatedSinceLanding, [])
   assert.equal(drive(root, [good('S1'), good('S2'), good('S3'), QA]).code, 0)
 })
+await test('status says stale when the driver that wrote "running" is gone; resume on an app never built fails', () => {
+  const root = one()
+  mkdirSync(stateDir(root), { recursive: true })
+  const sleeper = spawn('sleep', ['30'])
+  writeFileSync(join(stateDir(root), 'status.json'), JSON.stringify({ app: APP, state: 'running', pid: 999999, message: 'building S1' }))
+  const st = JSON.parse(cli(root, 'status').stdout)
+  assert.equal(st.state, 'stale')
+  assert.match(st.message, /the driver \(pid 999999\) is gone; it was: building S1/)
+  writeFileSync(join(stateDir(root), 'status.json'), JSON.stringify({ app: APP, state: 'running', pid: sleeper.pid, message: 'x' }))
+  assert.equal(JSON.parse(cli(root, 'status').stdout).state, 'stale', 'a live pid that is not a driver')
+  sleeper.kill()
+  const typo = cli(root, 'resume')
+  assert.equal(typo.status, 1)
+  assert.match(typo.stderr, /no build ledger at .*; is the app slug right\?/)
+  assert.equal(existsSync(join(stateDir(root), 'ledger.json')), false)
+})
 await test('resume and unblock refuse while a driver runs; bad unblock usage exits 2', () => {
   const root = one()
   mkdirSync(stateDir(root), { recursive: true })
@@ -368,7 +402,7 @@ await test('resume and unblock refuse while a driver runs; bad unblock usage exi
   writeFileSync(join(stateDir(root), 'driver.pid'), String(driver.pid))
   assert.equal(cli(root, 'resume').status, 11)
   driver.kill()
-  for (const args of [['unblock'], ['unblock', '--slice', 'S1'], ['unblock', '--answer', 'x'], ['unblock', '--slice', 'S01', '--answer', 'x'], ['resume', '--slice', 'S1'], ['status', '--no-pr']]) {
+  for (const args of [['unblock'], ['unblock', '--slice', 'S1'], ['unblock', '--answer', 'x'], ['unblock', '--slice', 'S01', '--answer', 'x'], ['resume', '--slice', 'S1'], ['status', '--no-pr'], ['resume', '--pr'], ['run', '--pr', '--no-pr']]) {
     assert.equal(cli(root, ...args).status, 2, JSON.stringify(args))
   }
 })

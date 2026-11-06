@@ -21,7 +21,7 @@ export function finalQaPrompt({ repo, base, reportFile, configDir }) {
   return [
     'Final QA pass of an unattended /build-app build. These instructions are your opt-in to the Workflow tool for this one run.',
     `1. Run the QA graph once: the Workflow tool with name "harness-repair" (if that name is not found, scriptPath ${join(configDir, 'workflows', 'harness-repair.js')}), args {"repo": ${JSON.stringify(repo)}, "base": ${JSON.stringify(base)}, "maxFixRounds": 3, "knownStuckSigs": []}.`,
-    `2. Write the ledger it returns, as JSON, to ${reportFile}.`,
+    `2. Write the ledger it returns, as JSON, to ${reportFile}.\n   (That one file inside .git is open to the Write tool; nothing else in .git is.)`,
     `3. On status done with a non-empty touched list: run bash ${join(configDir, 'skills', 'verify', 'verify.sh')}; only when its last line is VERIFY: PASS, commit exactly the touched files with the subject "final: QA fixes" and the fixed list in the body.`,
     '4. On any other status, commit nothing. Never push, never switch branches, never ask a question. Then stop.',
   ].join('\n')

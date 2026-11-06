@@ -50,6 +50,10 @@ await test('an edit to a frozen test or inside .git is denied; any other edit is
   assert.match(decide('MultiEdit', { file_path: '/r/./tests/../tests/S1.test.js' }, rules), /frozen test/)
   assert.match(decide('Write', { file_path: '/r/.git/harness-build/toy/ledger.json' }, rules), /editing inside \.git/)
   assert.match(decide('NotebookEdit', { notebook_path: '/r/.git/config' }, rules), /inside \.git/)
+  // The final QA session's report is the one file in .git it may write.
+  const qa = { ...rules, writable: ['/r/.git/harness-build/toy/final-qa.json'] }
+  assert.equal(decide('Write', { file_path: '/r/.git/harness-build/toy/final-qa.json' }, qa), null)
+  assert.match(decide('Write', { file_path: '/r/.git/harness-build/toy/ledger.json' }, qa), /inside \.git/)
   for (const [tool, params] of [['Edit', { file_path: '/r/tests/S2.test.js' }], ['Write', { file_path: '/r/src/a.js' }], ['Read', { file_path: '/r/.git/config' }],
     ['Edit', {}], ['Write', { file_path: '/r/.github/workflows/ci.yml' }], ['Grep', { pattern: 'x' }]]) {
     assert.equal(decide(tool, params, rules), null, `${tool} ${JSON.stringify(params)}`)

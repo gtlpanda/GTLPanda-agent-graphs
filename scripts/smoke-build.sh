@@ -15,7 +15,7 @@ KEEP=0
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1 ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -78,7 +78,8 @@ set -e
 
 STATE="$(git -C "$ROOT" rev-parse --path-format=absolute --git-path harness-build)/smoke"
 echo "smoke-build: driver exit $CODE"
-node - "$STATE" <<'NODE'
+REPORT_OK=1
+node - "$STATE" <<'NODE' || REPORT_OK=0
 const fs = require('fs'), path = require('path')
 const state = process.argv[2]
 const status = JSON.parse(fs.readFileSync(path.join(state, 'status.json'), 'utf8'))
@@ -99,7 +100,7 @@ for (const f of logs) {
 console.log(`smoke-build: ${logs.length} session(s), $${cost.toFixed(2)}`)
 for (const [m, c] of Object.entries(models)) console.log(`smoke-build:   ${m}: $${c.toFixed(2)}`)
 NODE
-if [ "$CODE" -eq 0 ] && git -C "$ROOT" show integration/smoke:src/add.js >/dev/null 2>&1; then
+if [ "$CODE" -eq 0 ] && [ "$REPORT_OK" -eq 1 ] && git -C "$ROOT" show integration/smoke:src/add.js >/dev/null 2>&1; then
   echo "SMOKE-BUILD: PASS"
 else
   KEEP=1
