@@ -48,10 +48,11 @@ slicer --structure problems (backlog format, knowledge owners)--> slicer (next r
 at most 3 slicer rounds, then escalate with the open issues
 ```
 
-On **Approve**, `/blueprint` requires a clean tree and a new branch name, creates
-`integration/<app>`, and commits what `write-docs.mjs` writes from the two runs:
-`docs/blueprint/design.md`, `docs/backlog.json`, and `docs/knowledge-map.json` (when the
-design has knowledge items). **Edit** turns your words into a binding decision `D<n>` and
+On **Approve**, `/blueprint` requires nothing staged and a new branch name, creates
+`integration/<app>`, and commits only what `write-docs.mjs` writes from the two runs:
+`docs/blueprint/<app>.md` (never overwritten), `docs/backlog.json` (an earlier backlog is
+replaced; git keeps it), and `docs/knowledge-map.json` when the design has knowledge items
+(appended to an existing map; an id already there is refused). **Edit** turns your words into a binding decision `D<n>` and
 designs again; **Stop** writes nothing.
 
 ## Roles
@@ -137,7 +138,8 @@ asked only when a requirement may force a departure.
   `$(git rev-parse --path-format=absolute --git-path harness-blueprint)` (`request.json`, `run1.json`,
   `state.json`, `run2.json`, `run3.json`), never committed. The interview is the only AskUserQuestion use: preflight
   and assumption overrides come back in one reply.
-- `skills/blueprint/write-docs.mjs`: writes the approved runs into the repo; never overwrites a file.
+- `skills/blueprint/write-docs.mjs`: writes the approved runs into the repo; never overwrites a design doc
+  or a file that is not its own, and appends to a knowledge map.
 - `tests/blueprint-design.test.mjs`: routing tests, run by `scripts/test-workflow.sh`;
   `tests/write-docs.test.mjs`: what is written, and that nothing is overwritten.
 - Run 2 gets ids in args and reads `state.json` itself: the ids are about 0.5 KB, so it needs no injected seam.

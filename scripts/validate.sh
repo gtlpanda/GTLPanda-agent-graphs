@@ -185,7 +185,7 @@ rule core/skills/backlog/SKILL.md 'A goal never says "stop and ask"' 'an unatten
 rule core/agents/advisor.md '## Gating a backlog' 'a backlog is gated before the human approves it'
 rule core/agents/advisor.md 'approve` only if `/dev` could build every slice' 'the backlog gate asks the one question that matters: can /dev build it unattended'
 rule graphs/blueprint/agents/slicer.md 'Never "stop and ask", in any field' 'the slicer never writes a slice that waits for a human'
-rule graphs/blueprint/skills/blueprint/SKILL.md '`git status --porcelain` must print nothing' 'the approval commit holds only the files it wrote'
+rule graphs/blueprint/skills/blueprint/SKILL.md 'diff --cached --quiet` must succeed (nothing staged)' 'the approval commit holds only the files it wrote'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'One AskUserQuestion, header `Approval`' 'the design and the backlog get exactly one approval'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'decisions:s.decisions.map(d=>({id:d.id,answer:d.answer}))' 'design args come from one exact command, never paraphrased'
 rule graphs/blueprint/skills/blueprint/SKILL.md '"none" keeps every assumption' 'the optional last interview step says so (L0 finding)'

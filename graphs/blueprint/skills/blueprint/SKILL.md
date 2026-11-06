@@ -159,20 +159,25 @@ Redact the returned ledger, write it to `$S/run1.json`, then act on `status`.
    `integration/<app>` and commit the design and the backlog to it), `Edit`
    (say what to change; it is designed again), and `Stop` (nothing is
    written).
-3. `Approve`:
-   1. `git status --porcelain` must print nothing, and
-      `git rev-parse --verify -q "refs/heads/integration/<app>"` must fail.
-      Otherwise stop and report why: nothing of anyone else's goes into the
-      commit, and an existing branch is never reused.
-   2. A repo with no commit yet (`git rev-parse -q --verify HEAD` fails) gets
-      one first: `git commit --allow-empty -m "blueprint: start <app>"`.
-   3. `git switch -c "integration/<app>"`, then
+3. `Approve`. Every git command runs as `git -C "$REPO"`, since the shell
+   may sit in a subfolder of the repo:
+   1. `git -C "$REPO" diff --cached --quiet` must succeed (nothing staged),
+      and `git -C "$REPO" rev-parse --verify -q "refs/heads/integration/<app>"`
+      must fail. Otherwise stop and report why: the commit holds only the
+      files written below, and an existing branch is never reused. Untracked
+      and modified files (the `--doc` files of a new app, for one) stay as
+      they are.
+   2. A repo with no commit yet (`git -C "$REPO" rev-parse -q --verify HEAD`
+      fails) gets one first:
+      `git -C "$REPO" commit --allow-empty -m "blueprint: start <app>"`.
+   3. `git -C "$REPO" switch -c "integration/<app>"`, then
       `node ~/.claude/skills/blueprint/write-docs.mjs "$S/run2.json" "$S/run3.json" "$REPO"`.
       Its output must start with `write-docs: wrote `. Otherwise report it,
-      `git switch -` back, `git branch -D "integration/<app>"`, and stop.
-   4. `git add --` the paths it printed, and
-      `git commit -m "blueprint: design and backlog for <app>"`. Nothing else
-      is staged.
+      `git -C "$REPO" switch -` back,
+      `git -C "$REPO" branch -D "integration/<app>"`, and stop.
+   4. `git -C "$REPO" add --` the paths it printed (they are relative to
+      `REPO`), then `git -C "$REPO" commit -m "blueprint: design and backlog for <app>"`.
+      Nothing else is staged.
 4. `Edit`: the human's words (redacted) become a decision with the next
    unused `D<n>` id, `question: "approval edit"`, `resolves` empty, and
    `note: "approval edit"`, saved in `state.json`. Then go to section 4.

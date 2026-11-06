@@ -1,13 +1,14 @@
 // write-docs.test.mjs — the approved design and backlog become exactly these
 // files, the same every time, and nothing is ever overwritten.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import { test } from '../../../scripts/workflow-harness.mjs'
-import { planDocs, renderDesign, knowledgeMap, DESIGN_DOC, BACKLOG, KNOWLEDGE_MAP } from '../skills/blueprint/write-docs.mjs'
+import { planDocs, renderDesign, knowledgeMap, designDoc, BACKLOG, KNOWLEDGE_MAP } from '../skills/blueprint/write-docs.mjs'
+const DESIGN_DOC = designDoc('reading-list')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(here, '..', 'skills', 'blueprint', 'write-docs.mjs')
@@ -44,7 +45,7 @@ console.log('== write-docs: what is written')
 await test('an approved run gives the design, the backlog verbatim, and the knowledge map', () => {
   const files = planDocs(RUN2(), RUN3())
   assert.deepEqual(files.map(f => f.path), [DESIGN_DOC, BACKLOG, KNOWLEDGE_MAP])
-  assert.deepEqual(files.map(f => f.path), ['docs/blueprint/design.md', 'docs/backlog.json', 'docs/knowledge-map.json'])
+  assert.deepEqual(files.map(f => f.path), ['docs/blueprint/reading-list.md', 'docs/backlog.json', 'docs/knowledge-map.json'])
   assert.deepEqual(JSON.parse(files[1].text), RUN3().backlog)
   assert.ok(files.every(f => f.text.endsWith('\n')))
   assert.deepEqual(planDocs(RUN2(), RUN3()), files, 'the same runs always give the same files')
@@ -100,19 +101,45 @@ await test('the command writes the files and names them, exit 0', () => {
   const repo = mkdtempSync(join(tmp, 'repo-'))
   const r = cli([...runs(), repo])
   assert.equal(r.status, 0, r.stdout + r.stderr)
-  assert.equal(r.stdout, 'write-docs: wrote docs/blueprint/design.md docs/backlog.json docs/knowledge-map.json\n')
+  assert.equal(r.stdout, 'write-docs: wrote docs/blueprint/reading-list.md docs/backlog.json docs/knowledge-map.json\n')
   assert.deepEqual(JSON.parse(readFileSync(join(repo, 'docs', 'backlog.json'), 'utf8')), RUN3().backlog)
   assert.equal(readFileSync(join(repo, DESIGN_DOC), 'utf8'), planDocs(RUN2(), RUN3())[0].text)
 })
-await test('an existing file is never overwritten, and nothing at all is written then', () => {
+await test('what a repo already has: a design doc or a foreign file is refused and nothing is written', () => {
+  const cases = [
+    [DESIGN_DOC, '# mine', /docs\/blueprint\/reading-list\.md already exists: an app named reading-list was blueprinted here before/],
+    [BACKLOG, '{"mine": true}', /docs\/backlog\.json exists and is not a backlog; nothing was overwritten/],
+    [BACKLOG, 'not json', /docs\/backlog\.json exists and is not a backlog/],
+    [KNOWLEDGE_MAP, 'mine', /docs\/knowledge-map\.json is not valid JSON/],
+    [KNOWLEDGE_MAP, '{"version": 2, "items": []}', /docs\/knowledge-map\.json is not a version 1 knowledge map; nothing was overwritten/],
+    [KNOWLEDGE_MAP, JSON.stringify({ version: 1, items: [{ id: 'K2' }] }), /knowledge K2 is already in docs\/knowledge-map\.json: ids are never reused/],
+  ]
+  for (const [path, text, why] of cases) {
+    const repo = mkdtempSync(join(tmp, 'repo-'))
+    mkdirSync(dirname(join(repo, path)), { recursive: true })
+    writeFileSync(join(repo, path), text)
+    const r = cli([...runs(), repo])
+    assert.equal(r.status, 1, path)
+    assert.match(r.stdout, why, path)
+    assert.equal(readFileSync(join(repo, path), 'utf8'), text, 'never overwritten')
+    for (const other of [DESIGN_DOC, BACKLOG, KNOWLEDGE_MAP].filter(p => p !== path)) assert.equal(existsSync(join(repo, other)), false, `${other} written after a FAIL`)
+  }
+})
+await test('a second /blueprint in the repo: the old backlog is replaced and the map gains the new items', () => {
   const repo = mkdtempSync(join(tmp, 'repo-'))
-  mkdirSync(join(repo, 'docs'))
-  writeFileSync(join(repo, 'docs', 'knowledge-map.json'), 'mine')
-  const r = cli([...runs(), repo])
-  assert.equal(r.status, 1)
-  assert.match(r.stdout, /^write-docs: FAIL .* already has docs\/knowledge-map\.json; nothing was overwritten\n$/)
-  assert.equal(readFileSync(join(repo, 'docs', 'knowledge-map.json'), 'utf8'), 'mine')
-  assert.deepEqual(readdirSync(join(repo, 'docs')), ['knowledge-map.json'])
+  mkdirSync(join(repo, 'docs', 'blueprint'), { recursive: true })
+  const oldBacklog = { ...RUN3().backlog, app: 'first-app', integrationBranch: 'integration/first-app' }
+  writeFileSync(join(repo, BACKLOG), JSON.stringify(oldBacklog))
+  writeFileSync(join(repo, designDoc('first-app')), '# first')
+  const oldItem = { id: 'K1', knowledge: 'k', kind: 'type', owner: 'src/k.ts', status: 'built', used_by: ['S1', 'S2'], changes_together_because: 'c' }
+  writeFileSync(join(repo, KNOWLEDGE_MAP), JSON.stringify({ version: 1, items: [oldItem] }))
+  const design = DESIGN({ knowledge: DESIGN().knowledge.map((k, i) => ({ ...k, id: `K${i + 2}` })) })
+  const owners = [{ id: 'K2', built_in: 'S2', used_by: ['S2', 'S3'] }, { id: 'K3', built_in: 'S3', used_by: ['S3'] }]
+  const r = cli([...runs(RUN2({ design }), RUN3({ owners })), repo])
+  assert.equal(r.status, 0, r.stdout)
+  assert.deepEqual(JSON.parse(readFileSync(join(repo, BACKLOG), 'utf8')), RUN3().backlog)
+  assert.deepEqual(JSON.parse(readFileSync(join(repo, KNOWLEDGE_MAP), 'utf8')).items.map(i => [i.id, i.status]), [['K1', 'built'], ['K2', 'planned'], ['K3', 'planned']])
+  assert.equal(readFileSync(join(repo, designDoc('first-app')), 'utf8'), '# first', 'another app\'s design doc is left alone')
 })
 await test('a failed check, a missing or broken run file is a FAIL with the reason; bad usage exits 2', () => {
   const repo = mkdtempSync(join(tmp, 'repo-'))

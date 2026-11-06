@@ -3,19 +3,24 @@
 //
 //   node write-docs.mjs <run2.json> <run3.json> <repo>
 //
-// Writes docs/blueprint/design.md, docs/backlog.json, and, when the design has
-// knowledge items, docs/knowledge-map.json. The same runs always give the same
-// files, so what is committed is exactly what the gates approved. Prints
-// "write-docs: wrote <paths>" and exits 0, or "write-docs: FAIL <why>" and
-// exits 1. Every check runs before the first write, so a failed check writes
-// nothing. It never overwrites a file.
+// Writes docs/blueprint/<app>.md, docs/backlog.json, and, when the design has
+// knowledge items, docs/knowledge-map.json. The same runs and the same repo
+// always give the same files, so what is committed is exactly what the gates
+// approved. Prints "write-docs: wrote <paths>" and exits 0, or
+// "write-docs: FAIL <why>" and exits 1. Every check runs before the first
+// write, so a failed check writes nothing. What is already there:
+// - a design doc for the same app: refused (never overwritten);
+// - docs/backlog.json: replaced only when it is a backlog (an earlier
+//   /blueprint wrote it; git keeps it), refused otherwise;
+// - docs/knowledge-map.json: the new items are appended (the architect
+//   numbers them after the map's highest id); an id already there is refused.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // Resolved from this file's real path (install.sh links the skill directory).
 import { validateBacklog } from '../../../../core/skills/backlog/backlog.mjs'
 
-export const DESIGN_DOC = 'docs/blueprint/design.md'
+export const designDoc = app => `docs/blueprint/${app}.md`
 export const BACKLOG = 'docs/backlog.json'
 export const KNOWLEDGE_MAP = 'docs/knowledge-map.json'
 
@@ -80,8 +85,23 @@ export function knowledgeMap(design, owners, slices) {
   }
 }
 
-// Returns [{path, text}] or throws with the reason. Pure: reads nothing.
-export function planDocs(run2, run3) {
+// The map already in the repo, plus the new items; ids are never reused.
+function mergeMap(existingText, map) {
+  if (existingText === null) return map
+  let old
+  try { old = JSON.parse(existingText) } catch (e) { throw new Error(`${KNOWLEDGE_MAP} is not valid JSON: ${e.message}`) }
+  if (!old || old.version !== 1 || !Array.isArray(old.items) || !old.items.every(i => i && typeof i.id === 'string')) {
+    throw new Error(`${KNOWLEDGE_MAP} is not a version 1 knowledge map; nothing was overwritten`)
+  }
+  const taken = new Set(old.items.map(i => i.id))
+  const reused = map.items.map(i => i.id).filter(id => taken.has(id))
+  if (reused.length) throw new Error(`knowledge ${reused.join(', ')} is already in ${KNOWLEDGE_MAP}: ids are never reused, so design again (Edit)`)
+  return { ...old, items: [...old.items, ...map.items] }
+}
+
+// Returns [{path, text}] or throws with the reason. Pure: `existing` holds what
+// the repo already has at each path (text, or null when absent).
+export function planDocs(run2, run3, existing = {}) {
   if (!run2 || run2.status !== 'design-ready' || !run2.design || typeof run2.design !== 'object') throw new Error('run2 is not a design-ready design run')
   if (!run3 || run3.status !== 'backlog-ready' || !run3.backlog || typeof run3.backlog !== 'object') throw new Error('run3 is not a backlog-ready backlog run')
   const { design } = run2
@@ -95,12 +115,21 @@ export function planDocs(run2, run3) {
   for (const o of list(run3.owners)) {
     if (!list(o.used_by).length || !o.used_by.every(u => slices.has(u))) throw new Error(`knowledge ${o.id} names a slice the backlog lacks`)
   }
+  const has = path => (typeof existing[path] === 'string' ? existing[path] : null)
+  const doc = designDoc(backlog.app)
+  if (has(doc) !== null) throw new Error(`${doc} already exists: an app named ${backlog.app} was blueprinted here before, so name this one differently (Edit); nothing was overwritten`)
+  if (has(BACKLOG) !== null) {
+    let old = null
+    try { old = JSON.parse(has(BACKLOG)) } catch { /* reported below */ }
+    if (validateBacklog(old).length) throw new Error(`${BACKLOG} exists and is not a backlog; nothing was overwritten`)
+  }
   const files = [
-    { path: DESIGN_DOC, text: renderDesign(backlog.app, design) },
+    { path: doc, text: renderDesign(backlog.app, design) },
     { path: BACKLOG, text: `${JSON.stringify(backlog, null, 2)}\n` },
   ]
   if (list(design.knowledge).length) {
-    files.push({ path: KNOWLEDGE_MAP, text: `${JSON.stringify(knowledgeMap(design, run3.owners, backlog.slices), null, 2)}\n` })
+    const map = mergeMap(has(KNOWLEDGE_MAP), knowledgeMap(design, run3.owners, backlog.slices))
+    files.push({ path: KNOWLEDGE_MAP, text: `${JSON.stringify(map, null, 2)}\n` })
   }
   return files
 }
@@ -115,9 +144,13 @@ export function main(argv) {
   const [run2Path, run3Path, repo] = argv
   if (!run2Path || !run3Path || !repo) return { code: 2, out: 'usage: write-docs.mjs <run2.json> <run3.json> <repo>' }
   try {
-    const files = planDocs(readJson(run2Path), readJson(run3Path))
-    const taken = files.map(f => f.path).filter(p => existsSync(join(repo, p)))
-    if (taken.length) throw new Error(`${repo} already has ${taken.join(', ')}; nothing was overwritten`)
+    const run3 = readJson(run3Path)
+    const app = run3 && run3.backlog && typeof run3.backlog.app === 'string' ? run3.backlog.app : ''
+    const existing = {}
+    for (const p of [designDoc(app), BACKLOG, KNOWLEDGE_MAP]) {
+      if (existsSync(join(repo, p))) existing[p] = readFileSync(join(repo, p), 'utf8')
+    }
+    const files = planDocs(readJson(run2Path), run3, existing)
     for (const f of files) {
       mkdirSync(dirname(join(repo, f.path)), { recursive: true })
       writeFileSync(join(repo, f.path), f.text)
