@@ -678,8 +678,10 @@ accumulate); `readLedger` checked only the top level, so `{S1: "done"}` read as 
 error whose message held "ENOENT" (a directory named so) turned a corrupt ledger into a fresh build
 (now the error code); "stop and ask" was checked in the goal only, though the whole slice is task text
 (now title, criteria, and `fails_when` too).
+Found while fixing it: `recordOutcome` stored non-text test files or questions, which the stricter
+`readLedger` would then refuse on resume; `writeLedger` now refuses any ledger `readLedger` would.
 
-**Stats.** 28 new tests (295 passed, 0 failed in the suite, after rebasing on entries 15-17), 27 mutations, all caught (one survived at first:
+**Stats.** 28 new tests (295 passed, 0 failed in the suite, after rebasing on entries 15-17), 30 mutations, all caught (one survived at first:
 `unblock` keeping the re-plan count; an assertion was added).
 
 **Also measured this session (outside the repo).** `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` in the user

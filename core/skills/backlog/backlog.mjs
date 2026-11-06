@@ -152,7 +152,10 @@ function ledgerProblem(ledger) {
 }
 
 // Write to a temp file, then rename: a crash mid-write never leaves half a ledger.
+// Refuses a ledger readLedger would refuse, so a bad write fails now, not on resume.
 export function writeLedger(path, ledger) {
+  const bad = ledgerProblem(ledger)
+  if (bad) throw new Error(`refusing to write a build ledger readLedger cannot read: ${bad}`)
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.tmp`
   writeFileSync(tmp, `${JSON.stringify(ledger, null, 2)}\n`)
@@ -213,7 +216,7 @@ export function recordOutcome(ledger, id, outcome) {
   if (s.status !== 'pending') throw new Error(`${id} is ${s.status}; only a pending slice takes an outcome`)
   const kind = outcome && outcome.kind
   if (kind === 'landed') {
-    if (!Array.isArray(outcome.frozen)) throw new Error('a landed outcome needs frozen: [test files]')
+    if (!Array.isArray(outcome.frozen) || !outcome.frozen.every(f => typeof f === 'string' && f.trim())) throw new Error('a landed outcome needs frozen: [test files]')
     next.slices[id] = { ...s, status: 'done', replan: false, frozen: [...outcome.frozen].sort() }
     next.escalatedSinceLanding = []
   } else if (kind === 'escalated') {
@@ -232,7 +235,7 @@ export function recordOutcome(ledger, id, outcome) {
     }
     if (!next.escalatedSinceLanding.includes(id)) next.escalatedSinceLanding.push(id)
   } else if (kind === 'needs-human') {
-    if (!Array.isArray(outcome.questions) || !outcome.questions.length) throw new Error('a needs-human outcome needs questions')
+    if (!Array.isArray(outcome.questions) || !outcome.questions.length || !outcome.questions.every(q => typeof q === 'string' && q.trim())) throw new Error('a needs-human outcome needs questions')
     next.slices[id] = { ...s, status: 'blocked', replan: false, questions: outcome.questions }
   } else {
     throw new Error(`unknown outcome kind ${JSON.stringify(kind)}`)

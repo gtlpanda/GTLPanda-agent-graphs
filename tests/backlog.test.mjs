@@ -205,6 +205,11 @@ await test('writeLedger round-trips, creates the directory, and leaves no temp f
   writeLedger(path, ledger)
   assert.deepEqual(readLedger(path), ledger)
   assert.equal(existsSync(`${path}.tmp`), false)
+  // What readLedger would refuse is never written: the failure shows now, not on resume.
+  for (const bad of [{ ...emptyLedger(), slices: { S01: {} } }, { ...emptyLedger(), slices: { S1: { frozen: [3] } } }]) {
+    assert.throws(() => writeLedger(join(dir, 'never.json'), bad), /refusing to write a build ledger/, JSON.stringify(bad))
+  }
+  assert.equal(existsSync(join(dir, 'never.json')), false)
 })
 
 console.log('== backlog: next step')
@@ -272,7 +277,8 @@ await test('outcomes are validated, apply only to pending slices, and never chan
   escalate(l, 'S1')
   assert.equal(JSON.stringify(l), before)
   for (const bad of [undefined, {}, { kind: 'merged' }, { kind: 'landed' }, { kind: 'landed', frozen: 'a' }, { kind: 'escalated' },
-    { kind: 'escalated', reason: ' ' }, { kind: 'needs-human' }, { kind: 'needs-human', questions: [] }]) {
+    { kind: 'escalated', reason: ' ' }, { kind: 'needs-human' }, { kind: 'needs-human', questions: [] },
+    { kind: 'landed', frozen: [3] }, { kind: 'landed', frozen: [''] }, { kind: 'needs-human', questions: [{ q: 'x' }] }]) {
     assert.throws(() => recordOutcome(l, 'S1', bad), Error, JSON.stringify(bad))
   }
   assert.throws(() => land(land(l, 'S1'), 'S1'), /S1 is done; only a pending slice takes an outcome/)
