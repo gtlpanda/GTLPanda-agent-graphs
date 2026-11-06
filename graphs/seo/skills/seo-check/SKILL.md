@@ -1,6 +1,6 @@
 ---
 name: seo-check
-description: Check a built site's HTML for the tags search engines and link previews read - title, meta description, canonical, Open Graph, JSON-LD - and the sitemaps that list its pages, and print each problem with its file and line, ending in SEO-CHECK PASS or FAIL. Reads the build output only and fetches nothing. Use after building a site, before and after an SEO fix, or as the pass gate of the SEO graph.
+description: Check a built site's HTML for the tags search engines and link previews read - title, meta description, canonical, Open Graph, JSON-LD - plus titles and descriptions shared across pages, the sitemaps, and robots.txt, and print each problem with its file and line, ending in SEO-CHECK PASS or FAIL. Reads the build output only and fetches nothing. Use after building a site, before and after an SEO fix, or as the pass gate of the SEO graph.
 ---
 
 # seo-check
@@ -31,11 +31,16 @@ in `<head>` skips every check but `json-ld`. Each rule names its source;
 
 The sitemap decides which pages are strict. It is each on-site `Sitemap:` line
 in robots.txt, plus `sitemap.xml`, `sitemap-index.xml`, or `sitemap_index.xml`
-at the top of the dir (under `--site`'s path), with every index followed. A page it lists is strict; a page
-it leaves out gets its errors as warnings, marked `(not in the sitemap)`,
-except `json-ld`'s. With no sitemap, every page is strict. A sitemap URL finds
-its page the way the canonical check does: `/a`, `/a/`, `/a.html`, and
-`/a/index.html` are one page.
+at the top of the dir (under `--site`'s path), with every index followed. A
+page it lists is strict; a page it leaves out gets its errors as warnings,
+marked `(not in the sitemap)`, except `json-ld`'s. With no sitemap, every page
+is strict. A sitemap URL finds its page the way the canonical check does: `/a`,
+`/a/`, `/a.html`, and `/a/index.html` are one page.
+
+robots.txt is read as Google reads it, for Googlebot: every group that names
+`googlebot` (by product token), combined, else every `*` group; the longest
+matching path wins, and `Allow` wins a tie; `*` and a final `$`; paths are
+case-sensitive and compared percent-encoded.
 
 | Check | Error (fails) | Warning (never fails) |
 |-------|---------------|-----------------------|
@@ -46,7 +51,13 @@ its page the way the canonical check does: `/a`, `/a/`, `/a.html`, and
 | `og` | no `og:title`, `og:description`, `og:image`, or `og:url`, an empty one, or an `og:image` or `og:url` that is not an absolute http(s) URL (the Open Graph URL type) | |
 | `sitemap` | a root that is not `<urlset>` or `<sitemapindex>`; no entries, or over 50,000 (Google); an entry without `<loc>`; a loc not absolute (Google), 2,048 characters or more (sitemaps.org), not on `--site`, served by no page, a `noindex` page, or a page whose canonical is another URL (Google: list the URLs you want in search results); a listed sitemap with no file | no sitemap; `<priority>` or `<changefreq>` (Google ignores both); a URL listed twice; a URL outside the sitemap's directory (Google: a sitemap affects only descendants of its parent directory); an off-site or gzipped sitemap, which it does not read |
 | `robots` | robots.txt blocks a URL a sitemap lists, or every indexable page (a staging build); a `Sitemap:` line that is not absolute (Google) | no robots.txt; a `noindex` page it blocks (Google: the crawler never sees the noindex); no `Sitemap:` line; over 500 KiB (Google ignores the rest); a line Google ignores: a rule before any `User-agent`, an unknown field, a line that is not `field: value`; an off-site `Sitemap:`; robots.txt under a `--site` path (crawlers read only the host's) |
+| `duplicates` | a title or description another strict page has (Google: avoid repeated text in titles; identical descriptions are not helpful) | the same, when either page is not strict |
+| `spa` | | a page whose tags are missing and whose `<body>` has no text outside scripts, but has a script: a single-page app that sets its tags in JavaScript |
 | `json-ld` | a `application/ld+json` script that does not parse, has no `@context`, or has a node (top level or in `@graph`) without `@type` | `FAQPage`: Google stopped showing FAQ rich results on 2026-05-07 |
+
+`duplicates` compares only indexable pages that are their own canonical (or
+have none), after collapsing whitespace; the first strict page in file order
+keeps the value, and each later page with it is reported.
 
 For `description`, `canonical`, and `og`: a tag only in `<body>` is an error
 (only `<head>` counts), and two tags in `<head>` that disagree are an error,
@@ -59,11 +70,8 @@ JSON-LD counts anywhere.
   scripts (most link previews) see the same thing.
 - HTTP headers (`X-Robots-Tag`, a `Link: rel=canonical` header) and redirects.
 - Whether a URL resolves: it fetches nothing.
-- robots.txt is read as Google reads it, for Googlebot only: every group that
-  names `googlebot` (by product token), combined, else every `*` group; the
-  longest matching path wins, and `Allow` wins a tie; `*` and a final `$`.
-- Not built yet (G2b): titles and descriptions shared across pages, and the
-  warning for a single-page app whose tags only JavaScript sets.
+- robots.txt rules for crawlers other than Googlebot, and gzipped or off-site
+  sitemaps.
 
 It is a tag scanner, not an HTML parser. It skips comments and the content of
 `<script>`, `<style>`, and `<textarea>`; reads attributes in any order, quoting,
