@@ -840,5 +840,19 @@ with `--no-pr` and prints its cost and the models it used; it is opt-in and neve
 push was rejected (a test mistake, which then became the test for a rejected push). Mutation run:
 1 of 10 survived (a failed push was untested), closed with that test.
 
-**Stats.** 15 new tests (386 workflow tests passed, 0 failed), 10 mutations, all caught. 2 validate.sh
+PR review (#24; 1 HIGH, 4 MEDIUM, 3 LOW, all fixed): the launch line redirected into `STATE/logs`
+before anything created it, so every first start failed (the skill now creates it); a build started
+with `--no-pr` would push once resumed, since the flag was not remembered (it now is, until `--pr`);
+`$REPO` and `$STATE` were shell variables no command defined (now placeholders written out); a
+killed driver left `status.json` at "running" forever, which blocked the next start (status now
+says "stale"); `setsid` does not exist on macOS (used only where it does); the guard denied the final
+QA's own report inside `.git` (now the one writable file); `resume` on a mistyped app looked like
+success; `smoke-build.sh -h` printed a code line, and a crash before `status.json` skipped its FAIL line.
+
+Live smoke run, first attempt: three minutes in, the throwaway repo disappeared. The reviewer agent,
+cleaning its own scratch, had run `rm -rf /tmp/smoke-build-*`. The driver then crashed writing its
+log; its bookkeeping now never crashes it, and live runs use the session scratchpad, not a shared
+/tmp glob (tasks/lessons.md).
+
+**Stats.** 10 new tests (388 workflow tests passed, 0 failed), 14 mutations, all caught. 2 validate.sh
 rules.
