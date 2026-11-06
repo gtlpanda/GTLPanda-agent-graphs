@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // seo-check.mjs - checks the HTML of a built site for the tags search engines
 // and link previews read: title, meta description, canonical, Open Graph, and
-// JSON-LD, and the sitemaps and robots.txt that steer crawlers to its pages.
-// Zero dependencies. It reads files only and fetches nothing.
+// JSON-LD, titles and descriptions shared across pages, and the sitemaps and
+// robots.txt that steer crawlers to its pages. Zero dependencies. It reads
+// files only and fetches nothing.
 //   node seo-check.mjs check <built dir> --site <https://example.com/> [--json]
 // Prints one line per finding, then SEO-CHECK: PASS|FAIL. Errors fail, warnings
 // never do. Exit 0 pass, 1 fail, 2 usage.
@@ -11,7 +12,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Every check a finding can name; SKILL.md documents each one.
-export const CHECKS = ['files', 'title', 'description', 'canonical', 'og', 'json-ld', 'sitemap', 'robots']
+export const CHECKS = ['files', 'title', 'description', 'canonical', 'og', 'json-ld', 'sitemap', 'robots', 'duplicates', 'spa']
 const OG_REQUIRED = ['og:title', 'og:description', 'og:image', 'og:url']
 const OG_URLS = ['og:image', 'og:url']
 // Open Graph arrays: a page may list several images, so two values do not disagree.
@@ -28,6 +29,11 @@ const LOC_MAX = 2048
 // (no warning for these, which other crawlers read).
 const ROBOTS_MAX = 500 * 1024
 const OTHER_ROBOTS_FIELDS = ['crawl-delay', 'host', 'clean-param']
+// The checks whose errors, on an app shell, suggest JavaScript sets the tags.
+const SPA_CHECKS = ['title', 'description', 'og']
+// Google: "Avoid repeated or boilerplate text in <title> elements"; "Identical or
+// similar descriptions on every page of a site aren't helpful".
+const DUPLICATE_FIELDS = { title: 'avoid repeated text in titles', description: 'identical descriptions are not helpful' }
 
 // ---- The tag scanner ----
 // Elements whose content is text, not markup: a "<meta" inside them is not a tag.
@@ -161,7 +167,8 @@ export function parseSite(value) {
 
 // Checks one page's HTML. `url` is where the page is served; `site` is the
 // --site URL (a URL object whose pathname ends in "/"). Returns
-// {indexable, title, description, canonical, findings: [{line, level, check, message}]}.
+// {indexable, title, description, canonical, lines: {title, description},
+// findings: [{line, level, check, message}]}.
 export function checkPage(html, url, site) {
   const findings = []
   const add = (level, line, check, message) => {
@@ -188,7 +195,7 @@ export function checkPage(html, url, site) {
 
   const noindex = ['robots', 'googlebot'].some(name =>
     metas('name')(name).some(t => t.inHead && words(attr(t, 'content')).some(w => w === 'noindex' || w === 'none')))
-  const facts = { indexable: !noindex, title: null, description: null, canonical: null }
+  const facts = { indexable: !noindex, title: null, description: null, canonical: null, lines: { title: 0, description: 0 } }
 
   if (!noindex) {
     const titles = tags.filter(t => t.name === 'title' && t.inHead)
@@ -196,6 +203,7 @@ export function checkPage(html, url, site) {
     else {
       if (titles.length > 1) error(titles[1].line, 'title', `two <title> elements in <head> (first at line ${titles[0].line})`)
       facts.title = collapse(titles[0].text)
+      facts.lines.title = titles[0].line
       if (!facts.title) error(titles[0].line, 'title', '<title> is empty')
       else if (chars(facts.title) > TITLE_MAX) {
         warn(titles[0].line, 'title', `title is ${chars(facts.title)} characters; Google sets no limit but cuts long titles (our guide: ${TITLE_MAX})`)
@@ -207,6 +215,7 @@ export function checkPage(html, url, site) {
     if (!allDescriptions.length) error(0, 'description', 'no meta description (our rule: without one, Google writes its own snippet)')
     else if (descriptions.length) {
       facts.description = collapse(attr(descriptions[0], 'content'))
+      facts.lines.description = descriptions[0].line
       const n = chars(facts.description)
       const [min, max] = DESCRIPTION_RANGE
       if (!n) error(descriptions[0].line, 'description', 'meta description is empty')
@@ -248,9 +257,24 @@ export function checkPage(html, url, site) {
     }
   }
 
+  if (findings.some(f => f.level === 'error' && SPA_CHECKS.includes(f.check)) && isAppShell(html)) {
+    warn(0, 'spa', 'the <body> is empty until a script runs and tags are missing: a single-page app that sets them in JavaScript? Crawlers that run no scripts (most link previews) see none; render them into the HTML')
+  }
   const jsonLd = tags.filter(t => t.name === 'script' && attr(t, 'type').toLowerCase() === 'application/ld+json')
   for (const script of jsonLd) checkJsonLd(script, error, warn)
   return { ...facts, findings: findings.sort((a, b) => a.line - b.line) }
+}
+
+// A single-page app's shell: a script, and no text in <body> outside scripts,
+// styles, noscript, and templates. Without a <body> tag, any text counts: the
+// parser puts text before <body> in the body.
+function isAppShell(html) {
+  const source = html.replace(/<!--[\s\S]*?-->/g, '')
+  if (!/<script\b/i.test(source)) return false
+  const visible = source.replace(/<(script|style|noscript|template|title|textarea)\b[\s\S]*?<\/\1\s*>/gi, '')
+  const body = /<body\b[^>]*>/i.exec(visible)
+  const text = decode(visible.slice(body ? body.index + body[0].length : 0).replace(/<[^>]*>/g, ''))
+  return !/[^\t\n\f\r ]/.test(text)
 }
 
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -503,10 +527,25 @@ export function readText(path) {
   try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { throw new Error(`${path} is not UTF-8 text`) }
 }
 
+// A title or description another page has. Only indexable pages that are their
+// own canonical count. An error when both pages are strict, else a warning.
+function checkDuplicates(pages, strict, add) {
+  for (const [field, google] of Object.entries(DUPLICATE_FIELDS)) {
+    const own = pages.filter(p => p.indexable && p[field] && (!p.canonical || pageKey(p.canonical) === pageKey(p.url)))
+    const first = new Map()
+    for (const page of [...own.filter(strict), ...own.filter(p => !strict(p))]) {
+      const other = first.get(page[field])
+      if (!other) { first.set(page[field], page); continue }
+      add(page.file, page.lines[field], strict(page) ? 'error' : 'warn', 'duplicates', `the same ${field} as ${other.file} (Google: ${google})`)
+    }
+  }
+}
+
 // Findings by file (the dir itself, ".", last), then by line.
 const byPlace = (a, b) => (a.file === '.') - (b.file === '.') || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line
 
-// Checks every page under dir, the sitemaps that list them, and robots.txt. Returns
+// Checks every page under dir, titles and descriptions across pages, the
+// sitemaps that list them, and robots.txt. Returns
 // {pages: [{file, url, indexable, listed}], findings: [{file, line, level,
 // check, message}]}; file "." is the dir itself. listed is null when no
 // sitemap was read. A page a sitemap leaves out is not strict: its errors,
@@ -542,10 +581,11 @@ export function checkSite(dir, site) {
   else if (robots && !robots.sitemaps.length) add('robots.txt', 0, 'warn', 'robots', 'robots.txt has no Sitemap: line; Google finds a sitemap through one or through Search Console')
   if (robots) checkBlocked(robots, pages, add)
 
+  const strict = page => page.indexable && (!sitemaps || page.listed)
+  checkDuplicates(pages, strict, add)
   for (const page of pages) {
-    const strict = !sitemaps || page.listed
     for (const f of page.findings) {
-      if (strict || f.level !== 'error' || f.check === 'json-ld') add(page.file, f.line, f.level, f.check, f.message)
+      if (strict(page) || f.level !== 'error' || f.check === 'json-ld') add(page.file, f.line, f.level, f.check, f.message)
       else add(page.file, f.line, 'warn', f.check, `${f.message} (not in the sitemap)`)
     }
   }

@@ -345,7 +345,8 @@ await test('parseSitemap reads <url> or <sitemap> entries with their lines, CDAT
 })
 const page = (title, extra = '') => PAGE.replace('Shelf - a reading list that remembers every book', title).replace('<head>', `<head>${extra}`)
 const urlset = (...locs) => `<urlset>\n${locs.map(l => `<url><loc>${l}</loc></url>`).join('\n')}\n</urlset>\n`
-const report = (dir, s = SITE) => checkSite(dir, s).findings.filter(f => f.check !== 'robots').map(f => [f.file, f.line, f.level, f.check, f.message])
+// The findings of the sitemap tests: not robots' or duplicates', which those tests check.
+const report = (dir, s = SITE) => checkSite(dir, s).findings.filter(f => !['robots', 'duplicates'].includes(f.check)).map(f => [f.file, f.line, f.level, f.check, f.message])
 await test('a sitemap lists pages; each URL must be absolute, on --site, served, indexable, and canonical', async () => {
   const dir = site({
     'index.html': PAGE,
@@ -401,7 +402,7 @@ await test('with a sitemap, a page it leaves out is not strict: its errors becom
     ])
     assert.deepEqual(checkSite(dir, SITE).pages.map(p => [p.file, p.listed]), [['drafts/x.html', false], ['index.html', true], ['listed.html', true]])
     const cli = spawnSync(process.execPath, [SCRIPT, 'check', dir, '--site', 'https://shelf.example'], { encoding: 'utf8' })
-    assert.match(cli.stdout, /\nseo-check: 3 pages \(1 not in the sitemap, errors shown as warnings\), 2 errors, 3 warnings\nSEO-CHECK: FAIL\n$/)
+    assert.match(cli.stdout, /\nseo-check: 3 pages \(1 not in the sitemap, errors shown as warnings\), 3 errors, 3 warnings\nSEO-CHECK: FAIL\n$/)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 await test('sitemap indexes are followed, once each; a bad or missing sitemap is an error', async () => {
@@ -554,6 +555,62 @@ await test('robots.txt must not block a listed URL or every page; its Sitemap: l
     rmSync(join(docs, 'robots.txt'))
     assert.deepEqual(checkSite(docs, parseSite('https://shelf.example/docs')).findings.filter(f => f.check === 'robots'), [], 'nor is a missing one: the root is out of sight')
   } finally { rmSync(docs, { recursive: true, force: true }) }
+})
+
+console.log('== seo-check: across pages')
+// A page that is its own canonical, with its own title and description unless given.
+const own = (path, title = `Page ${path}`, description = `The page at ${path}, described in more than seventy characters so it never warns.`) =>
+  PAGE.replace('Shelf - a reading list that remembers every book', title)
+    .replace(/content="Shelf keeps[^"]*"/, `content="${description}"`)
+    .replaceAll('href="https://shelf.example/"', `href="https://shelf.example${path}"`)
+    .replace('<meta property="og:url" content="https://shelf.example/">', `<meta property="og:url" content="https://shelf.example${path}">`)
+await test('a title or description another page has is an error between strict pages, else a warning', async () => {
+  const shared = 'Shelf - a reading list that remembers every book'
+  const sharedDescription = PAGE.match(/content="(Shelf keeps[^"]*)"/)[1]
+  const dir = site({
+    'index.html': PAGE,
+    'a.html': own('/a.html', shared),
+    'b.html': own('/b.html', undefined, sharedDescription),
+    'aaa-unlisted.html': own('/aaa-unlisted.html', 'Only these two'),
+    'zzz.html': own('/zzz.html', 'Only these two'),
+    'copy.html': page(shared),
+    'hidden.html': `<meta name="robots" content="noindex"><title>${shared}</title>`,
+    'sitemap.xml': urlset(...['/', '/a.html', '/b.html', '/zzz.html', '/copy.html'].map(p => `https://shelf.example${p}`)),
+    'robots.txt': ROBOTS,
+  })
+  try {
+    assert.deepEqual(checkSite(dir, SITE).findings.filter(f => f.check === 'duplicates').map(f => [f.file, f.line, f.level, f.message]), [
+      ['aaa-unlisted.html', line('<title>'), 'warn', 'the same title as zzz.html (Google: avoid repeated text in titles)'],
+      ['index.html', line('<title>'), 'error', 'the same title as a.html (Google: avoid repeated text in titles)'],
+      ['index.html', line('name="description"'), 'error', 'the same description as b.html (Google: identical descriptions are not helpful)'],
+    ], 'the first strict page in file order keeps its value; a page canonical to another page, or noindex, is no duplicate')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+  const plain = site({ 'index.html': PAGE, 'a/index.html': own('/a/', ' Shelf -  a reading list that remembers every book ') })
+  try {
+    assert.deepEqual(checkSite(plain, SITE).findings.filter(f => f.check === 'duplicates').map(f => [f.file, f.level]), [['index.html', 'error']], 'with no sitemap every page is strict; whitespace is collapsed first')
+  } finally { rmSync(plain, { recursive: true, force: true }) }
+})
+await test('a page whose tags are missing and whose <body> is empty until a script runs gets the SPA warning', async () => {
+  const SPA = 'warn spa: the <body> is empty until a script runs and tags are missing: a single-page app that sets them in JavaScript? Crawlers that run no scripts (most link previews) see none; render them into the HTML'
+  const head = '<!doctype html><html><head><meta charset="utf-8"><title>App</title><script type="module" src="/main.js"></script></head>'
+  for (const shell of [
+    `${head}<body><div id="root"></div></body></html>`,
+    `${head}<body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div></body></html>`,
+    `${head}<body>\n  <!-- the app mounts here --><div id="app">&#32;</div>\n</body></html>`,
+    `${head.replace('</head>', '')}<div id="app"></div>`,
+    `${head}<div id="app"></div><style>p { color: red }</style><template><p>Later</p></template>`,
+    `${head}<body><!-- a > b --><div id="root"></div></body></html>`,
+    ...['<title>Shelf - a reading list that remembers every book</title>', /<meta name="description"[^>]*>/].map(tag =>
+      PAGE.replace(tag, '').replace('<body><h1>Shelf</h1></body>', '<body><div id="root"></div><script src="/main.js"></script></body>')),
+  ]) assert.ok(said(shell).includes(SPA), shell)
+  for (const page of [
+    `${head}<body><div id="root"><h1>Server-rendered</h1></div></body></html>`,
+    `${head}<body><div id="root">&nbsp;</div></body></html>`,
+    head.replace('<script type="module" src="/main.js"></script>', '') + '<body><div id="root"></div></body></html>',
+    `<head><meta name="robots" content="noindex"><script src="/main.js"></script></head><body><div id="root"></div></body>`,
+    '<html><head><title>T</title></head><body><!-- <script src="/main.js"></script> --><div id="root"></div></body></html>',
+    PAGE.replace('<body><h1>Shelf</h1></body>', '<body><div id="root"></div><script src="/main.js"></script></body>'),
+  ]) assert.ok(!said(page).some(f => f.startsWith('warn spa')), page)
 })
 
 console.log('== seo-check: the docs and the command')
