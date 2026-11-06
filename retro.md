@@ -906,7 +906,7 @@ remote, so `--no-pr`.
 | Backlog | 10 min 40 s | $5.25 | approved in round 2 (the first gate sent back 3 blocking issues; the re-gate checked only those): 7 slices, 4 knowledge owners |
 | Build: 7 slices | 1 h 35 min | $41.74 | every slice landed on its first attempt: 8, 16, 11, 17, 16, 13, and 13 min |
 | Final QA | 4 min | $2.16 | `harness-repair` over the whole branch: VERIFY: PASS, no findings, nothing to fix |
-| **Total** | **about 2 h 15 min** | **about $57** | |
+| **Total** | **2 h 11 min of stage time** (2 h 14 min elapsed, with the hand-offs between stages) | **$57.00** | |
 
 The build's model spend was opus $6.95 (the orchestrators), sonnet $9.46, fable $27.48, and haiku
 $0.03. Fable is the advisor, which gates every plan and confirms every finding; it was 63% of the
@@ -937,3 +937,12 @@ wait, and the push and PR.
   counts each session once. The driver now logs each session's cost and keeps a running `costUsd` in
   `status.json`, carried across runs. The fake `claude` repeats its result line the same way, so the
   tests count once.
+
+PR review (#26; 2 MEDIUM, 2 LOW, all fixed):
+- A session stopped mid-run was never charged, and one killed before its result line logged a
+  misleading `$0.00`. It is now charged before the stop check, and logs "no result line, cost
+  unknown"; the README now defines `costUsd` as what the sessions reported.
+- The `/blueprint` skill still announced at launch that the backlog had never run live.
+- The total time did not add up from the rows: 2 h 11 min of stage time against 2 h 14 min
+  elapsed.
+- A failed final QA did not name its cost.

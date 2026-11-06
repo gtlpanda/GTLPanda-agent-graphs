@@ -68,9 +68,12 @@ only), and `unblock --repo <path> --app <slug> --slice S<n> --answer <text>...`.
 answers and a fresh start; both refuse while a driver runs. State lives in
 `$(git rev-parse --git-path harness-build)/<app>/`: `ledger.json`, `status.json`,
 `driver.pid`, and `logs/` (`driver.log` and one `S<n>-<time>.jsonl` per session).
-None of it is committed. `status.json` carries `costUsd`, the total of every
-session of the app so far, and each landing or escalation line in `driver.log`
-names that session's cost. `PANDASTACK_NOTIFY`, when set, is a command that gets
+None of it is committed. `status.json` carries `costUsd`, the sum of the costs
+the app's sessions reported in their result lines, across runs; each landing,
+escalation, stop, and final QA line in `driver.log` names that session's cost. A
+session killed before it reports (a timeout, a SIGKILL) adds nothing, and its
+line says "no result line, cost unknown". The usage-limit probes are one-turn
+Haiku sessions and are not counted. `PANDASTACK_NOTIFY`, when set, is a command that gets
 one line per landing, a slice that needs a human or gets stuck, a brake, and the
 end of a run. The pid files count only while their process's command line is
 still the driver's (or the session's), so a reused pid is never stopped or

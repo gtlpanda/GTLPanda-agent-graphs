@@ -71,7 +71,7 @@ approval), plus `/dev` (with a slice mode: one backlog slice, unattended, on
 `integration/<app>`), `/loop`, `/release-pr`, and the backlog format and its
 next-step rules (`backlog.mjs`), and `/build-app` (the driver, the final QA pass, the PR).
 The whole loop has run live once: a one-sentence request became a 7-slice CLI with 143
-passing tests in about 2 h 15 min and $57, with no human between the approval and the end
+passing tests in 2 h 14 min and $57, with no human between the approval and the end
 (retro 24). Next: research and spikes before the design, and a look at the advisor's share
 of the cost (63% of that build).
 

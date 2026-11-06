@@ -117,14 +117,16 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
   let before = {}
   try { before = JSON.parse(readFileSync(join(state, 'status.json'), 'utf8')) } catch { before = {} }
   const noPr = noPrFlag === null ? before.noPr === true : noPrFlag
-  // What every session of this app has cost so far, from each session's own
-  // result line (read once per session: a stream log repeats its result line).
+  // The sum of the cost each session of this app reported in its result line
+  // (read once per session: a stream log repeats its result line). A session
+  // killed before it wrote one (a timeout, a SIGKILL) reports nothing, and its
+  // log line says "no result line" instead of a misleading $0.00.
   let spent = Number.isFinite(Number(before.costUsd)) ? Number(before.costUsd) : 0
   const charge = logFile => {
     const r = readResult(logFile)
-    const c = r && Number.isFinite(Number(r.total_cost_usd)) ? Number(r.total_cost_usd) : 0
-    spent += c
-    return `$${c.toFixed(2)}`
+    if (!r || !Number.isFinite(Number(r.total_cost_usd))) return 'no result line, cost unknown'
+    spent += Number(r.total_cost_usd)
+    return `$${Number(r.total_cost_usd).toFixed(2)}`
   }
   const files = {
     ledger: join(state, 'ledger.json'), status: join(state, 'status.json'), pid: join(state, 'driver.pid'),
@@ -211,19 +213,19 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
       args: sliceArgs({ prompt: finalQaPrompt({ repo, base, reportFile: files.finalQa, configDir: CONFIG_DIR }), model: cfg.model, settingsFile: files.settings }),
       env: buildEnv({ ...NO_BG_CEILING, HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
     })
-    if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during the final QA; every slice stays landed`) }
     const qaCost = charge(logFile)
+    if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during the final QA (${qaCost}); every slice stays landed`) }
     const report = qaReport(files.finalQa)
     if (!report) {
       setAside(repo, branch, integration, attempt, log)
       const verdict = sessionVerdict(logFile, files.stopFailure)
       const byKind = { billing: EXIT.billing, auth: EXIT.auth, usage_limit: EXIT.limitTooFar, transient: EXIT.apiDown }
-      return end(byKind[verdict.kind] || EXIT.brake, verdict.kind === 'normal' ? 'braked' : 'paused', `the final QA session wrote no report (exit ${code}${verdict.message ? `, ${verdict.message}` : ''}); every slice stays landed: run /build-app resume to retry it`)
+      return end(byKind[verdict.kind] || EXIT.brake, verdict.kind === 'normal' ? 'braked' : 'paused', `the final QA session wrote no report (exit ${code}, ${qaCost}${verdict.message ? `, ${verdict.message}` : ''}); every slice stays landed: run /build-app resume to retry it`)
     }
     const checks = sliceChecks({ repo, integration, branch, sliceId: 'final', frozen: frozenFiles(ledger), verifyCommand: cfg.verifyCommand, allowEmpty: true })
     if (report.status !== 'done' || checks.problems.length) {
       setAside(repo, branch, integration, attempt, log)
-      return end(EXIT.brake, 'braked', `the final QA did not pass (${report.status}${report.reason ? `: ${report.reason}` : ''}${checks.problems.length ? `; the driver's checks: ${checks.problems.join('; ')}` : ''}); every slice stays landed`)
+      return end(EXIT.brake, 'braked', `the final QA did not pass (${qaCost}; ${report.status}${report.reason ? `: ${report.reason}` : ''}${checks.problems.length ? `; the driver's checks: ${checks.problems.join('; ')}` : ''}); every slice stays landed`)
     }
     if (!(git(repo, ['checkout', '-q', integration]).ok && git(repo, ['merge', '-q', '--ff-only', branch]).ok)) return end(EXIT.gitState, 'failed', `the final QA fixes could not be fast-forwarded onto ${integration}`)
     git(repo, ['branch', '-q', '-D', branch])
@@ -283,9 +285,9 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
         args: sliceArgs({ prompt, model: cfg.model, settingsFile: files.settings }),
         env: buildEnv({ ...NO_BG_CEILING, HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
       })
-      if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during ${slice.id}; its work is kept on attempt/${attempt}`) }
-
       const cost = charge(logFile)
+      if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during ${slice.id} (${cost}); its work is kept on attempt/${attempt}`) }
+
       const report = devReport(files.devLedger)
       const verdict = sessionVerdict(logFile, files.stopFailure)
       // A session that ended on the API, not on its own work, is not counted.
