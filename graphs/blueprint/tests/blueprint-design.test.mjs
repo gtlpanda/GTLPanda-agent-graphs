@@ -292,7 +292,7 @@ await test('a design that passes the checks and the gate is design-ready in roun
 })
 await test('a bad stage, or bad design args -> escalate before any agent runs', async () => {
   const cases = [
-    [{ ...DARGS, stage: 'build' }, /args\.stage must be interview or design/],
+    [{ ...DARGS, stage: 'build' }, /args\.stage must be interview, design, or backlog/],
     [{ ...DARGS, statePath: 'state.json' }, /args\.statePath is required/],
     [{ ...DARGS, mode: 'service' }, /args\.mode must be app or feature/],
     [{ ...DARGS, requirements: [] }, /args\.requirements must be a non-empty list/],
@@ -602,4 +602,175 @@ await test('KINDS and FIRST_CALLER_KINDS match the knowledge-map skill', () => {
   const arr = name => JSON.parse(src.match(new RegExp(`^const ${name} = (\\[.*\\])$`, 'm'))[1].replace(/'/g, '"'))
   assert.deepEqual(arr('KINDS'), ticks(skill.match(/^Kinds: ([^.]+)\./m)[1]))
   assert.deepEqual(arr('FIRST_CALLER_KINDS'), ticks(skill.match(/^\| (`authn`.*) \| its first caller \|$/m)[1]))
+})
+
+// ---------- stage backlog (run 3) ----------
+const BARGS = { ...DARGS, stage: 'backlog', designPath: '/tmp/fixture/.git/harness-blueprint/run2.json', knowledge: ['K1'] }
+const ac = (sid, k = 1) => ({ id: `${sid}-AC${k}`, criterion: `${sid} criterion ${k}`, fails_when: `${sid} fails ${k}` })
+const slice = (n, over = {}) => ({ id: `S${n}`, title: `slice ${n}`, goal: `build slice ${n}`, requirements: [`R${n}`], acceptance: [ac(`S${n}`)], depends_on: n > 1 ? [`S${n - 1}`] : [], ...over })
+const SLICED = (over = {}) => ({ app: 'reading-list', slices: [slice(1), slice(2)], knowledge: [{ id: 'K1', built_in: 'S1', used_by: ['S1', 'S2'] }], ...over })
+
+console.log('== blueprint-design: stage backlog')
+await test('backlog path pins slicer and advisor with schemas, matching the agent files; the code fills in the format', async () => {
+  const { result, calls } = await run(fn, {
+    slicer: [p => {
+      assert.ok(p.includes(BARGS.statePath) && p.includes(BARGS.designPath), 'the slicer reads the state and the design run itself')
+      assert.match(p, /Decisions are binding/)
+      assert.match(p, /"Email and password"/)
+      assert.match(p, /\(R1, R2\)/)
+      assert.match(p, /\(K1\) is in knowledge once/)
+      return SLICED()
+    }],
+    advisor: [p => {
+      assert.match(p, /"Gating a backlog"/)
+      assert.ok(p.includes(BARGS.statePath) && p.includes(BARGS.designPath))
+      assert.match(p, /"integrationBranch": "integration\/reading-list"/)
+      assert.match(p, /"built_in": "S1"/)
+      return GATE('approve')
+    }],
+  }, BARGS)
+  assert.equal(result.status, 'backlog-ready')
+  assert.equal(result.reason, 'backlog approved in round 1')
+  assert.equal(types(calls), 'slicer,advisor')
+  for (const c of calls) {
+    assert.ok(c.schema && c.schema.type === 'object', `call without schema: ${c.label}`)
+    assert.equal(c.model, agentField(c.agentType, 'model'), `${c.agentType}: model drift`)
+    assert.equal(c.effort, agentField(c.agentType, 'effort'), `${c.agentType}: effort drift`)
+  }
+  assert.equal(calls[0].phase, 'Backlog')
+  assert.deepEqual(result.backlog, { version: 1, app: 'reading-list', integrationBranch: 'integration/reading-list', requirements: ['R1', 'R2'], slices: SLICED().slices })
+  assert.deepEqual(result.owners, SLICED().knowledge)
+  assert.equal(result.backlogRounds, 1)
+  assert.equal(result.designRounds, 0)
+})
+await test('bad backlog args -> escalate before any agent runs', async () => {
+  const cases = [
+    [{ ...BARGS, designPath: 'run2.json' }, /args\.designPath is required/],
+    [{ ...BARGS, designPath: undefined }, /args\.designPath is required/],
+    [{ ...BARGS, knowledge: undefined }, /args\.knowledge must be a list/],
+    [{ ...BARGS, knowledge: ['K1', 'K1'] }, /args\.knowledge/],
+    [{ ...BARGS, knowledge: ['X1'] }, /args\.knowledge/],
+    [{ ...BARGS, knowledge: 'K1' }, /args\.knowledge/],
+    [{ ...BARGS, statePath: undefined }, /args\.statePath is required/],
+    [{ ...BARGS, requirements: [] }, /args\.requirements/],
+  ]
+  for (const [a, why] of cases) {
+    const { result, calls } = await run(fn, {}, a)
+    assert.equal(result.status, 'escalate', JSON.stringify(a))
+    assert.match(result.reason, why, JSON.stringify(a))
+    assert.equal(calls.length, 0)
+  }
+  const none = await run(fn, { slicer: [SLICED({ knowledge: [] })], advisor: [GATE('approve')] }, { ...BARGS, knowledge: [] })
+  assert.equal(none.result.status, 'backlog-ready', 'a design with no knowledge items slices too')
+})
+
+console.log('== blueprint-design: backlog structure checks')
+// Each rule: a backlog that breaks only it goes back to the slicer with the
+// problem; the fixed one then goes to the gate. The advisor never sees a bad one.
+const twoUsers = { id: 'K1', built_in: 'S1', used_by: ['S1', 'S2'] }
+const BACKLOG_RULES = [
+  ['a bad app slug', { app: 'Reading List' }, /app must be a lowercase slug/],
+  ['a requirement missing', { slices: [slice(1), slice(2, { requirements: [] })] }, /requirement R2 is in no slice/],
+  ['a later dependency', { slices: [slice(1, { depends_on: ['S2'] }), slice(2)] }, /S1 depends on "S2": a slice may depend only on earlier slices/],
+  ['stop and ask in a criterion', { slices: [slice(1, { acceptance: [{ ...ac('S1'), criterion: 'stop and ask the user' }] }), slice(2)] }, /S1: AC1 criterion says "stop and ask"/],
+  ['an unknown knowledge id', { knowledge: [twoUsers, { id: 'K9', built_in: 'S1', used_by: ['S1'] }] }, /knowledge names "K9", which is not a knowledge id of the design/],
+  ['a knowledge id twice', { knowledge: [twoUsers, twoUsers] }, /knowledge K1 is listed twice/],
+  ['a design knowledge id missing', { knowledge: [] }, /knowledge K1 of the design is in no slice/],
+  ['no users', { knowledge: [{ id: 'K1', built_in: 'S1', used_by: [] }] }, /K1: used_by is empty/],
+  ['an unknown user', { knowledge: [{ id: 'K1', built_in: 'S1', used_by: ['S1', 'S7'] }] }, /K1 is used by "S7", which is not a slice/],
+  ['a user twice', { knowledge: [{ id: 'K1', built_in: 'S1', used_by: ['S1', 'S1'] }] }, /K1 names a slice twice in used_by/],
+  ['an owner built after its first user', { knowledge: [{ id: 'K1', built_in: 'S2', used_by: ['S2', 'S1'] }] }, /K1: built_in "S2" must be S1, the first slice that uses it/],
+  ['an owner built ahead of its users', { slices: [slice(1), slice(2), slice(3, { requirements: [] })], knowledge: [{ id: 'K1', built_in: 'S1', used_by: ['S2', 'S3'] }] }, /K1: built_in "S1" must be S2/],
+]
+for (const [name, over, why] of BACKLOG_RULES) {
+  await test(`backlog rule: ${name} goes back to the slicer, never to the gate`, async () => {
+    const { result, calls } = await run(fn, {
+      slicer: [SLICED(over), p => { assert.match(p, why); assert.match(p, /Your previous backlog/); return SLICED() }],
+      advisor: [GATE('approve')],
+    }, BARGS)
+    assert.equal(result.status, 'backlog-ready')
+    assert.equal(types(calls), 'slicer,slicer,advisor')
+    assert.match(result.history[0].problems.join('\n'), why)
+  })
+}
+await test('a backlog still malformed after 3 slicer rounds escalates with the problems and the last backlog', async () => {
+  const bad = SLICED({ knowledge: [] })
+  const { result, calls } = await run(fn, { slicer: [bad, bad, bad] }, BARGS)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /backlog not approved after 3 slicer round\(s\)/)
+  assert.match(result.issues[0].issue, /knowledge K1 of the design is in no slice/)
+  assert.equal(result.backlog.app, 'reading-list')
+  assert.equal(types(calls), 'slicer,slicer,slicer')
+})
+
+console.log('== blueprint-design: backlog gate')
+await test('only the first backlog gate reviews it all; the re-gate checks what it sent back, and the rest are notes', async () => {
+  const fresh = { ...ISSUE, n: 1, issue: 'S2: a new finding nobody asked about' }
+  const { result, calls } = await run(fn, {
+    slicer: [SLICED(), p => { assert.match(p, /1\. M1 leaks the row format/); return SLICED() }],
+    advisor: [
+      p => { assert.doesNotMatch(p, /Re-gate it/); return GATE('revise', { issues: [ISSUE, WORDING] }) },
+      p => {
+        assert.match(p, /You sent the backlog back/)
+        assert.match(p, /The slicer's revised backlog/)
+        assert.match(p, /#1: M1 leaks the row format/)
+        assert.doesNotMatch(p, /rename the helper/)
+        return GATE('revise', { issues: [fresh] })
+      },
+    ],
+  }, BARGS)
+  assert.equal(result.status, 'backlog-ready')
+  assert.deepEqual(result.history.filter(h => h.node === 'gate').map(h => h.scope), ['full', 're-gate'])
+  assert.deepEqual(result.notes.map(n => n.issue), [fresh.issue])
+  assert.equal(calls[3].label, 're-gate: backlog #2')
+})
+await test('a backlog re-gate issue on a checked #n goes back to the slicer', async () => {
+  const { result, calls } = await run(fn, {
+    slicer: [SLICED(), SLICED(), p => { assert.match(p, /#1: still too big/); return SLICED() }],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [{ ...ISSUE, issue: '#1: still too big' }] }), GATE('approve')],
+  }, BARGS)
+  assert.equal(result.status, 'backlog-ready')
+  assert.equal(result.backlogRounds, 3)
+  assert.equal(types(calls), 'slicer,advisor,slicer,advisor,slicer,advisor')
+})
+await test('a backlog gate that never approves escalates after 3 rounds', async () => {
+  const { result } = await run(fn, {
+    slicer: [SLICED(), SLICED(), SLICED()],
+    advisor: [GATE('revise', { issues: [ISSUE] }), GATE('revise', { issues: [{ ...ISSUE, issue: '#1: still' }] }), GATE('revise', { issues: [{ ...ISSUE, issue: '#1: still' }] })],
+  }, BARGS)
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /backlog not approved after 3 slicer round/)
+})
+await test('a blocked backlog gate asks the human, naming the id; without a question, or a revise without an issue, it escalates', async () => {
+  const asked = await run(fn, { slicer: [SLICED()], advisor: [GATE('blocked', { questions: ['Q1: Is username login in scope for S1?'] })] }, BARGS)
+  assert.equal(asked.result.status, 'needs-human')
+  assert.match(asked.result.reason, /before this can be sliced/)
+  assert.deepEqual(asked.result.questions, [{ about: 'Q1', question: 'Is username login in scope for S1?' }])
+  assert.equal(asked.result.backlog.app, 'reading-list')
+  for (const [gate, why] of [[GATE('blocked'), /blocked the backlog without a question/], [GATE('revise'), /revision without naming an issue/], [GATE('blocked', { questions: ['no id here'] }), /does not start with the id/]]) {
+    const { result } = await run(fn, { slicer: [SLICED()], advisor: [gate] }, BARGS)
+    assert.equal(result.status, 'escalate')
+    assert.match(result.reason, why)
+  }
+})
+await test('a slicer or advisor that returns nothing or throws -> escalate naming it', async () => {
+  for (const [script, who] of [
+    [{ slicer: [null] }, /slicer returned no result in round 1/],
+    [{ slicer: [{ throws: "agent type 'slicer' not found" }] }, /slicer failed in round 1: agent type 'slicer' not found \(run install\.sh/],
+    [{ slicer: [SLICED()], advisor: [null] }, /advisor returned no result on the backlog/],
+  ]) {
+    const { result } = await run(fn, script, BARGS)
+    assert.equal(result.status, 'escalate')
+    assert.match(result.reason, who)
+  }
+})
+await test('validateBacklog is identical to core/skills/backlog/backlog.mjs, its owner', () => {
+  const owner = readFileSync(join(here, '..', '..', '..', 'core', 'skills', 'backlog', 'backlog.mjs'), 'utf8')
+  const block = text => {
+    const m = text.match(/^function validateBacklog\(/m)
+    assert.ok(m, 'validateBacklog not found')
+    return text.slice(m.index, text.indexOf('\n}\n', m.index) + 3)
+  }
+  assert.equal(block(src), block(owner))
+  assert.match(src, /^\/\/ shared \(the owner is core\/skills\/backlog\/backlog\.mjs[^\n]*\nfunction validateBacklog\(/m)
 })

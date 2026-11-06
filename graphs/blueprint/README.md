@@ -3,15 +3,17 @@
 Plans an app or a feature before any code exists. It reads what you give it (a
 design doc, an architecture, a feature request, or a bare idea, plus the repo),
 asks you once, up front, about only the decisions that are expensive to change,
-records the answers as binding decisions, then designs against them behind the
-advisor's design gate. Entry point: the `/blueprint` skill.
+records the answers as binding decisions, designs against them behind the
+advisor's design gate, cuts the design into a backlog of `/dev`-sized slices behind
+the same gate, and asks for your one approval of both. Entry point: the `/blueprint` skill.
 
 Status: **run 1 (intake and interview)** passed its first live run (a reading-list
 app: 8 questions in about a minute). **Run 2 (design and the advisor's design gate)**
 passed its live run on the same app. The first attempt took 21 minutes and escalated, because the
 second gate reviewed the whole design again. With the re-gate, it was approved in round 2 with 6
-notes (retro 14). Research and spikes (run 2's evidence) and run 3 (backlog of `/dev`-sized
-slices, the knowledge map, preflight, your one approval) are planned, not built.
+notes (retro 14). **Run 3 (the backlog, the knowledge map, and your one approval)** is
+tested with mocked agents and has not had a live run yet. Research and spikes (run 2's
+evidence) are planned, not built.
 
 ## Graph (run 1: `stage: interview`, the default)
 
@@ -36,6 +38,22 @@ architect --structure problems--> architect (next round)
 at most 3 architect rounds, then escalate with the open issues
 ```
 
+## Graph (run 3: `stage: backlog`)
+
+```
+slicer --structure problems (backlog format, knowledge owners)--> slicer (next round)
+       --well formed--> advisor (Gating a backlog) --approve--> backlog-ready: /blueprint asks your one approval
+                                                   --revise--> slicer (next round) --> re-gate, as in run 2
+                                                   --blocked--> needs-human: /blueprint asks, then designs again
+at most 3 slicer rounds, then escalate with the open issues
+```
+
+On **Approve**, `/blueprint` requires a clean tree and a new branch name, creates
+`integration/<app>`, and commits what `write-docs.mjs` writes from the two runs:
+`docs/blueprint/design.md`, `docs/backlog.json`, and `docs/knowledge-map.json` (when the
+design has knowledge items). **Edit** turns your words into a binding decision `D<n>` and
+designs again; **Stop** writes nothing.
+
 ## Roles
 
 | Role         | Who                     | Model  | Effort | Called                         |
@@ -44,7 +62,8 @@ at most 3 architect rounds, then escalate with the open issues
 | Extractor    | `agents/extractor.md`   | sonnet | high   | once, plus one revision        |
 | Questioner   | `agents/questioner.md`  | sonnet | high   | once, plus one revision        |
 | Architect    | `agents/architect.md`   | sonnet | high   | once, plus up to two revisions |
-| Design gate  | `core/agents/advisor.md` | fable | high   | after each well-formed design  |
+| Slicer       | `agents/slicer.md`      | sonnet | high   | once, plus up to two revisions |
+| Design and backlog gate | `core/agents/advisor.md` | fable | high | after each well-formed design or backlog |
 
 ## Contracts
 
@@ -66,7 +85,7 @@ resolves a contradiction is always asked; the lowest-ranked others make room. Th
 assumptions `{from: Q<n>, assumption: <its default>, why}`. More than 12 questions that resolve
 contradictions escalate: the documents need fixing first. A `resolves` id must be a contradiction in the brief. The recommended option is moved first.
 
-**ledger:** `status` (`needs-human` | `escalate` | `design-ready`), `reason`, `brief`, `questions`, `preflight`,
+**ledger:** `status` (`needs-human` | `escalate` | `design-ready` | `backlog-ready`), `reason`, `brief`, `questions`, `preflight`,
 `assumptions` (each with an `id`: `A<n>`, or the `Q<n>` of a question past the cap, so an override
 names it exactly), `design`, `gate`, `designRounds`, `issues`, `history`. In stage design,
 `questions` holds the gate's `{about, question}` entries.
@@ -93,6 +112,18 @@ whole design. A re-gate's blocking issue must start with `#<n>:` (an issue it se
 finding becomes a `notes` entry for the human, and a re-gate `revise` with nothing in scope is `design-ready`. A `blocked` question must start with the id it challenges
 (`Q2: ...`) or `new: `, or the run escalates; the ledger returns `questions[] {about, question}`.
 
+**backlog args:** the design args plus `stage: "backlog"`, `designPath` (absolute `run2.json`, which
+the slicer and the advisor read), and `knowledge` (the design's knowledge ids; empty when it has none);
+one pinned command builds them and refuses a `run2.json` that is not `design-ready`.
+
+**backlog** (slicer): `{app, slices[] {id: S1.., title, goal, requirements[], acceptance[] {id: S<n>-AC<k>, criterion, fails_when}, depends_on[]},
+knowledge[] {id: K<n>, built_in, used_by[]}}`. The code adds `version`, `integrationBranch`
+(`integration/<app>`), and `requirements` (the design's ids), then rejects what `validateBacklog`
+rejects (a copy of `core/skills/backlog/backlog.mjs`'s, drift-tested) plus: a knowledge id the design
+lacks, listed twice, or missing; empty `used_by`, an unknown or repeated slice in it; a `built_in` that
+is not the first slice in `used_by` (an owner is built by its first user, never ahead of it). The
+ledger returns `backlog` (the format), `owners` (the knowledge list), `backlogRounds`, and `notes`.
+
 Default stack: `core/skills/default-stack` (one owner, preloaded by the questioner, architect, and
 advisor): the `scaffold-app` stack, or the repo's own in an existing repo. A question about the stack is
 asked only when a requirement may force a departure.
@@ -101,12 +132,14 @@ asked only when a requirement may force a departure.
 
 - `workflows/blueprint-design.js`: the graph. Helpers marked `// shared` are copied verbatim from the
   QA graph's script, and a test fails if they drift.
-- `agents/`: extractor, questioner, architect.
+- `agents/`: extractor, questioner, architect, slicer.
 - `skills/blueprint/SKILL.md`: the `/blueprint` orchestrator. State lives in
   `$(git rev-parse --path-format=absolute --git-path harness-blueprint)` (`request.json`, `run1.json`,
-  `state.json`, `run2.json`), never committed. The interview is the only AskUserQuestion use: preflight
+  `state.json`, `run2.json`, `run3.json`), never committed. The interview is the only AskUserQuestion use: preflight
   and assumption overrides come back in one reply.
-- `tests/blueprint-design.test.mjs`: routing tests, run by `scripts/test-workflow.sh`.
+- `skills/blueprint/write-docs.mjs`: writes the approved runs into the repo; never overwrites a file.
+- `tests/blueprint-design.test.mjs`: routing tests, run by `scripts/test-workflow.sh`;
+  `tests/write-docs.test.mjs`: what is written, and that nothing is overwritten.
 - Run 2 gets ids in args and reads `state.json` itself: the ids are about 0.5 KB, so it needs no injected seam.
 
 ## Credits

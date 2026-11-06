@@ -32,7 +32,7 @@
 
 | Family | Graph | Run it with | What it does | Status |
 |--------|-------|-------------|--------------|--------|
-| build | [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once → architect designs, advisor gates it; research and backlog not built yet | interview and design live-run once each |
+| build | [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once → architect designs, slicer cuts the backlog, advisor gates each → your one approval commits both on `integration/<app>`; research not built yet | interview and design live-run once each; backlog tested with mocked agents |
 | build | [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
 | build | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
 | build | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
@@ -64,12 +64,13 @@ and the backlog once, then leave. The work comes back as one PR to approve.
   - three different slices escalating with none landing in between.
 - Production deploys are never autonomous.
 
-Built so far: `/blueprint` run 1 (interview) and run 2a (design behind the
-advisor gate), plus `/dev`, `/loop`, `/release-pr`, and the backlog format
-and its next-step rules (`backlog.mjs`). Next, in order:
-- research and spikes before the design;
-- the backlog stage and your one approval;
+Built so far: `/blueprint` run 1 (interview), run 2a (design behind the
+advisor gate), and run 3 (the backlog behind the same gate, and your one
+approval), plus `/dev`, `/loop`, `/release-pr`, and the backlog format and its
+next-step rules (`backlog.mjs`). Next, in order:
+- `/dev` slice mode (a slice from the backlog, unattended, on `integration/<app>`);
 - `/build-app` (a driver that runs each slice in a fresh headless session);
+- research and spikes before the design;
 - a live end-to-end build of a toy reading-list app.
 
 Families: **build** graphs change your code. **Marketing** graphs (SEO first) change what you
