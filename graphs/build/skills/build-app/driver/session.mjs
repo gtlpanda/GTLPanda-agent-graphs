@@ -12,7 +12,7 @@ import { classifyOutcome, parseResetTime, planLimitWait } from './limits.mjs'
 // workflow agent onto one model (measured 2026-11-05). --settings overrides the
 // user's settings.json env.
 // A headless `claude -p` stops background work (the /dev Workflow run) 10 minutes
-// after its last turn unless the ceiling is 0 (measured 2026-11-06: a design run
+// after its last turn unless the ceiling is 0 (measured 2026-11-05: a design run
 // was killed at 10 min). The driver's own session timeout is the outer limit.
 export const NO_BG_CEILING = { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0' }
 export const SESSION_ENV = {

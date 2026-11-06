@@ -97,8 +97,10 @@ await test('each session gets bypassPermissions, the injected settings, and a cl
   assert.equal(c.cwd, root)
   assert.equal(c.env.CLAUDE_CODE_INHERITED, undefined)
   assert.equal(c.env.HARNESS_BUILD_ACTIVE, '1')
-  // A headless session would stop the /dev Workflow 10 minutes after its last turn.
+  // A headless session would stop the /dev Workflow 10 minutes after its last turn;
+  // the final QA session runs a Workflow too.
   assert.equal(c.env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, '0')
+  assert.equal(calls[1].env.CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, '0')
   assert.ok(c.args.includes('--append-system-prompt'))
   const settings = JSON.parse(readFileSync(c.args[c.args.indexOf('--settings') + 1], 'utf8'))
   assert.deepEqual(settings.env, { CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5-5', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0', CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL: '', CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0' })

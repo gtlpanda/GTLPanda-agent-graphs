@@ -867,7 +867,7 @@ so the pins hold inside Workflow agents under the driver's settings (the open it
 **Stats.** 10 new tests (388 workflow tests passed, 0 failed), 14 mutations, all caught. 2 validate.sh
 rules.
 
-## 23. The headless background-wait ceiling (2026-11-06)
+## 23. The headless background-wait ceiling (2026-11-05)
 
 **What changed.** The first stage of the live end-to-end run (PR 6) that ran longer than 10
 minutes, the design, was killed: a headless `claude -p` that starts a Workflow and ends its turn
@@ -878,5 +878,9 @@ have died at 10 minutes. The driver now sets the ceiling to 0 in each session's 
 own 6-hour session timeout stays the outer limit. Entry 18's "a headless `claude -p` runs a Workflow
 script to completion" is corrected in place.
 
-**Stats.** 2 assertions added to an existing test (388 workflow tests passed, 0 failed); the mutation
-that drops the env entry is caught.
+**Untested hypothesis, until the live design rerun passes 10 minutes:** that `=0` lifts the limit.
+Only the kill itself is measured so far.
+
+**Stats.** 3 assertions added to an existing test (388 workflow tests passed, 0 failed): the slice
+session's env and the final QA session's env, plus the settings. The mutation that drops the setting
+is caught.
