@@ -29,9 +29,9 @@ symlinks. A page with `noindex` or `none` in a `robots` or `googlebot` meta tag
 in `<head>` skips every check but `json-ld`. Each rule names its source;
 "our rule" means PandaStack's, not a search engine's.
 
-The sitemap decides which pages are strict. It is `sitemap.xml`,
-`sitemap-index.xml`, or `sitemap_index.xml` at the top of the dir (under
-`--site`'s path), with every index followed. A page it lists is strict; a page
+The sitemap decides which pages are strict. It is each on-site `Sitemap:` line
+in robots.txt, plus `sitemap.xml`, `sitemap-index.xml`, or `sitemap_index.xml`
+at the top of the dir (under `--site`'s path), with every index followed. A page it lists is strict; a page
 it leaves out gets its errors as warnings, marked `(not in the sitemap)`,
 except `json-ld`'s. With no sitemap, every page is strict. A sitemap URL finds
 its page the way the canonical check does: `/a`, `/a/`, `/a.html`, and
@@ -45,6 +45,7 @@ its page the way the canonical check does: `/a`, `/a/`, `/a.html`, and
 | `canonical` | no `<link rel="canonical">`, no href, a relative one (Google recommends absolute), or one not under `--site` | it points to another page, so search engines index that page instead |
 | `og` | no `og:title`, `og:description`, `og:image`, or `og:url`, an empty one, or an `og:image` or `og:url` that is not an absolute http(s) URL (the Open Graph URL type) | |
 | `sitemap` | a root that is not `<urlset>` or `<sitemapindex>`; no entries, or over 50,000 (Google); an entry without `<loc>`; a loc not absolute (Google), 2,048 characters or more (sitemaps.org), not on `--site`, served by no page, a `noindex` page, or a page whose canonical is another URL (Google: list the URLs you want in search results); a listed sitemap with no file | no sitemap; `<priority>` or `<changefreq>` (Google ignores both); a URL listed twice; a URL outside the sitemap's directory (Google: a sitemap affects only descendants of its parent directory); an off-site or gzipped sitemap, which it does not read |
+| `robots` | robots.txt blocks a URL a sitemap lists, or every indexable page (a staging build); a `Sitemap:` line that is not absolute (Google) | no robots.txt; a `noindex` page it blocks (Google: the crawler never sees the noindex); no `Sitemap:` line; over 500 KiB (Google ignores the rest); a line Google ignores: a rule before any `User-agent`, an unknown field, a line that is not `field: value`; an off-site `Sitemap:`; robots.txt under a `--site` path (crawlers read only the host's) |
 | `json-ld` | a `application/ld+json` script that does not parse, has no `@context`, or has a node (top level or in `@graph`) without `@type` | `FAQPage`: Google stopped showing FAQ rich results on 2026-05-07 |
 
 For `description`, `canonical`, and `og`: a tag only in `<body>` is an error
@@ -58,8 +59,11 @@ JSON-LD counts anywhere.
   scripts (most link previews) see the same thing.
 - HTTP headers (`X-Robots-Tag`, a `Link: rel=canonical` header) and redirects.
 - Whether a URL resolves: it fetches nothing.
-- Not built yet (G2b): robots.txt, titles and descriptions shared across
-  pages, and the warning for a single-page app whose tags only JavaScript sets.
+- robots.txt is read as Google reads it, for Googlebot only: every group that
+  names `googlebot` (by product token), combined, else every `*` group; the
+  longest matching path wins, and `Allow` wins a tie; `*` and a final `$`.
+- Not built yet (G2b): titles and descriptions shared across pages, and the
+  warning for a single-page app whose tags only JavaScript sets.
 
 It is a tag scanner, not an HTML parser. It skips comments and the content of
 `<script>`, `<style>`, and `<textarea>`; reads attributes in any order, quoting,

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // seo-check.mjs - checks the HTML of a built site for the tags search engines
 // and link previews read: title, meta description, canonical, Open Graph, and
-// JSON-LD, and the sitemaps that list its pages. Zero dependencies. It reads
-// files only and fetches nothing.
+// JSON-LD, and the sitemaps and robots.txt that steer crawlers to its pages.
+// Zero dependencies. It reads files only and fetches nothing.
 //   node seo-check.mjs check <built dir> --site <https://example.com/> [--json]
 // Prints one line per finding, then SEO-CHECK: PASS|FAIL. Errors fail, warnings
 // never do. Exit 0 pass, 1 fail, 2 usage.
@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Every check a finding can name; SKILL.md documents each one.
-export const CHECKS = ['files', 'title', 'description', 'canonical', 'og', 'json-ld', 'sitemap']
+export const CHECKS = ['files', 'title', 'description', 'canonical', 'og', 'json-ld', 'sitemap', 'robots']
 const OG_REQUIRED = ['og:title', 'og:description', 'og:image', 'og:url']
 const OG_URLS = ['og:image', 'og:url']
 // Open Graph arrays: a page may list several images, so two values do not disagree.
@@ -24,6 +24,10 @@ const SITEMAP_FILES = ['sitemap.xml', 'sitemap-index.xml', 'sitemap_index.xml']
 // Google: at most 50,000 URLs per sitemap and 50,000 locs per index. sitemaps.org: a loc is under 2,048 characters.
 const SITEMAP_MAX = 50000
 const LOC_MAX = 2048
+// Google ignores robots.txt after 500 KiB. Fields it reads; others it ignores
+// (no warning for these, which other crawlers read).
+const ROBOTS_MAX = 500 * 1024
+const OTHER_ROBOTS_FIELDS = ['crawl-delay', 'host', 'clean-param']
 
 // ---- The tag scanner ----
 // Elements whose content is text, not markup: a "<meta" inside them is not a tag.
@@ -355,11 +359,118 @@ function readSitemaps(dir, site, starts, pages, add) {
       const page = byKey.get(key)
       if (!page) { problem(`no page in the build serves ${loc}`); continue }
       page.listed = true
+      page.loc = href
       if (!page.indexable) problem(`${loc} has noindex, but the sitemap lists it (Google: list the URLs you want in search results)`)
       else if (page.canonical && pageKey(page.canonical) !== key) problem(`${loc} has the canonical ${page.canonical}; list that URL instead (Google: list the URLs you want in search results)`)
     }
   }
   return read
+}
+
+// ---- robots.txt ----
+// Parses robots.txt as Google does. Returns {groups: [{agents, rules: [{allow,
+// path, line}]}], sitemaps: [{url, line}], problems: [{line, message}]}.
+// agents are lowercased product tokens ("googlebot" from "Googlebot/2.1"), or
+// "*". A run of User-agent lines starts a group; an Allow or Disallow ends the run.
+export function parseRobots(source) {
+  const groups = []
+  const sitemaps = []
+  const problems = []
+  let group = null
+  let ruled = false
+  String(source).replace(/\r\n?/g, '\n').split('\n').forEach((raw, i) => {
+    const line = i + 1
+    const text = raw.replace(/#.*/, '').trim()
+    if (!text) return
+    const m = /^([^:\s]+)\s*:\s*(.*)$/.exec(text)
+    if (!m) { problems.push({ line, message: `"${text}" is not a "field: value" line; Google ignores it` }); return }
+    const field = m[1].toLowerCase()
+    const value = m[2]
+    if (field === 'user-agent') {
+      if (!group || ruled) { group = { agents: [], rules: [] }; groups.push(group); ruled = false }
+      group.agents.push(/^\*(\s|$)/.test(value) ? '*' : (/^[A-Za-z_-]+/.exec(value)?.[0] ?? '').toLowerCase())
+    } else if (field === 'allow' || field === 'disallow') {
+      if (!group) { problems.push({ line, message: `${m[1]} comes before any User-agent line; Google ignores it` }); return }
+      ruled = true
+      if (value) group.rules.push({ allow: field === 'allow', path: value, line })   // a rule without a path is ignored
+    } else if (field === 'sitemap') sitemaps.push({ url: value, line })
+    else if (!OTHER_ROBOTS_FIELDS.includes(field)) problems.push({ line, message: `"${m[1]}" is not a field Google reads; it ignores the line` })
+  })
+  return { groups, sitemaps, problems }
+}
+
+// Googlebot follows every group that names it, combined; with none, every "*" group.
+export function googlebotRules(groups) {
+  const named = groups.filter(g => g.agents.includes('googlebot'))
+  return (named.length ? named : groups.filter(g => g.agents.includes('*'))).flatMap(g => g.rules)
+}
+
+// A rule path as a regex: "*" is any run of characters, a final "$" ends the
+// URL, and the rest is literal and case-sensitive, compared percent-encoded.
+const robotsPattern = path => {
+  const encoded = path.replace(/[^\x00-\x7f]/gu, c => encodeURIComponent(c))
+  const anchored = encoded.endsWith('$')
+  const body = (anchored ? encoded.slice(0, -1) : encoded).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*')
+  return new RegExp(`^${body}${anchored ? '$' : ''}`)
+}
+
+// The rule that decides whether a crawler may fetch url: the matching rule with
+// the longest path, allow winning a tie (Google). null when none matches (allowed).
+export function decidingRule(rules, url) {
+  const u = new URL(url)
+  let best = null
+  for (const rule of rules) {
+    if (!robotsPattern(rule.path).test(u.pathname + u.search)) continue
+    const longer = !best || rule.path.length > best.path.length
+    if (longer || (rule.path.length === best.path.length && rule.allow && !best.allow)) best = rule
+  }
+  return best
+}
+
+// Reads robots.txt at the top of the dir. Returns {rules, sitemaps} with
+// Googlebot's rules, or null when there is none or crawlers would not read it.
+function readRobots(dir, site, add) {
+  let text
+  try { text = readText(join(dir, 'robots.txt')) } catch (e) {
+    if (!/: ENOENT$/.test(e.message)) add('robots.txt', 0, 'error', 'files', e.message)
+    else if (site.pathname === '/') add('.', 0, 'warn', 'robots', 'no robots.txt, so no Sitemap: line points crawlers to the sitemap')
+    return null
+  }
+  if (site.pathname !== '/') {
+    add('robots.txt', 0, 'warn', 'robots', `robots.txt is served at ${site.href}robots.txt; crawlers read only ${site.origin}/robots.txt, so it is not checked`)
+    return null
+  }
+  const bytes = Buffer.from(text)
+  if (bytes.length > ROBOTS_MAX) {
+    add('robots.txt', 0, 'warn', 'robots', `robots.txt is ${Math.ceil(bytes.length / 1024)} KiB; Google ignores everything after ${ROBOTS_MAX / 1024} KiB`)
+    text = bytes.subarray(0, ROBOTS_MAX).toString()
+  }
+  const { groups, sitemaps, problems } = parseRobots(text)
+  for (const p of problems) add('robots.txt', p.line, 'warn', 'robots', p.message)
+  return { rules: googlebotRules(groups), sitemaps }
+}
+
+// Where robots.txt blocks Googlebot: a URL a sitemap lists (an error), a
+// noindex page (its noindex is never seen), or every indexable page.
+function checkBlocked(robots, pages, add) {
+  const blocking = page => {
+    const rule = decidingRule(robots.rules, page.loc ?? page.url)
+    return rule && !rule.allow ? rule : null
+  }
+  const indexable = pages.filter(p => p.indexable)
+  if (indexable.length && indexable.every(blocking)) {
+    add('robots.txt', 0, 'error', 'robots', 'robots.txt blocks every indexable page from Googlebot (a staging build?)')
+    return
+  }
+  for (const page of pages) {
+    const rule = blocking(page)
+    if (!rule) continue
+    const url = page.loc ?? page.url
+    if (page.listed) add('robots.txt', rule.line, 'error', 'robots', `Disallow: ${rule.path} blocks ${url}, which the sitemap lists`)
+    else if (!page.indexable) {
+      add('robots.txt', rule.line, 'warn', 'robots', `Disallow: ${rule.path} blocks ${url}, so Googlebot never sees its noindex and the page can still appear in search results (Google)`)
+    }
+  }
 }
 
 // ---- The site ----
@@ -395,7 +506,7 @@ export function readText(path) {
 // Findings by file (the dir itself, ".", last), then by line.
 const byPlace = (a, b) => (a.file === '.') - (b.file === '.') || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line
 
-// Checks every page under dir and the sitemaps that list them. Returns
+// Checks every page under dir, the sitemaps that list them, and robots.txt. Returns
 // {pages: [{file, url, indexable, listed}], findings: [{file, line, level,
 // check, message}]}; file "." is the dir itself. listed is null when no
 // sitemap was read. A page a sitemap leaves out is not strict: its errors,
@@ -418,9 +529,18 @@ export function checkSite(dir, site) {
     pages.push({ file, url, listed: false, ...checkPage(html, url, site) })
   }
 
-  const starts = SITEMAP_FILES.map(name => ({ url: new URL(name, site).href, optional: true }))
+  const robots = readRobots(dir, site, add)
+  const starts = []
+  for (const { url, line } of robots?.sitemaps ?? []) {
+    if (!isAbsolute(url)) add('robots.txt', line, 'error', 'robots', `Sitemap: "${url}" is not an absolute http(s) URL (Google: a fully qualified URL)`)
+    else if (!onSite(url, site)) add('robots.txt', line, 'warn', 'robots', `Sitemap: ${url} is not on --site ${site.href}; not checked (seo-check fetches nothing)`)
+    else starts.push({ url: new URL(url).href, from: 'robots.txt', line })
+  }
+  for (const name of SITEMAP_FILES) starts.push({ url: new URL(name, site).href, optional: true })
   const sitemaps = readSitemaps(dir, site, starts, pages, add)
-  if (!sitemaps) add('.', 0, 'warn', 'sitemap', `no sitemap (${SITEMAP_FILES.join(', ')}), so every page is checked strictly`)
+  if (!sitemaps) add('.', 0, 'warn', 'sitemap', `no sitemap (a robots.txt Sitemap: line, or ${SITEMAP_FILES.join(', ')}), so every page is checked strictly`)
+  else if (robots && !robots.sitemaps.length) add('robots.txt', 0, 'warn', 'robots', 'robots.txt has no Sitemap: line; Google finds a sitemap through one or through Search Console')
+  if (robots) checkBlocked(robots, pages, add)
 
   for (const page of pages) {
     const strict = !sitemaps || page.listed

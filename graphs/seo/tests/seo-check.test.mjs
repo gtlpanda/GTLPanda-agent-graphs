@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { test, REPO } from '../../../scripts/workflow-harness.mjs'
-import { CHECKS, checkPage, checkSite, findPages, pageUrl, parseSitemap, parseSite, scanTags } from '../skills/seo-check/seo-check.mjs'
+import { CHECKS, checkPage, checkSite, decidingRule, findPages, googlebotRules, pageUrl, parseRobots, parseSitemap, parseSite, scanTags } from '../skills/seo-check/seo-check.mjs'
 
 const SKILL = join(REPO, 'graphs', 'seo', 'skills', 'seo-check')
 const SCRIPT = join(SKILL, 'seo-check.mjs')
@@ -32,6 +32,7 @@ const SITEMAP = `<?xml version="1.0" encoding="UTF-8"?>
   <url><loc>https://shelf.example/</loc></url>
 </urlset>
 `
+const ROBOTS = 'User-agent: *\nAllow: /\nSitemap: https://shelf.example/sitemap.xml\n'
 const findings = (html, url = 'https://shelf.example/') => checkPage(html, url, SITE).findings
 const said = (html, url) => findings(html, url).map(f => `${f.level} ${f.check}: ${f.message}`)
 const swap = (from, to) => { assert.ok(PAGE.includes(from), from); return PAGE.replace(from, to) }
@@ -304,7 +305,8 @@ await test('checkSite checks each page, and a missing dir, an empty dir, or an u
       ['bad.html', 'canonical', 'canonical points to https://shelf.example/, not this page (https://shelf.example/bad.html): search engines index that page instead'],
       ['bin.html', 'files', '<dir>/bin.html is not a text file'],
       ['latin1.html', 'files', '<dir>/latin1.html is not UTF-8 text'],
-      ['.', 'sitemap', 'no sitemap (sitemap.xml, sitemap-index.xml, sitemap_index.xml), so every page is checked strictly'],
+      ['.', 'robots', 'no robots.txt, so no Sitemap: line points crawlers to the sitemap'],
+      ['.', 'sitemap', 'no sitemap (a robots.txt Sitemap: line, or sitemap.xml, sitemap-index.xml, sitemap_index.xml), so every page is checked strictly'],
     ])
     assert.match(checkSite(join(dir, 'gone'), SITE).findings[0].message, /cannot read .*gone: ENOENT/)
     assert.match(checkSite(join(dir, 'index.html'), SITE).findings[0].message, /cannot read .*index\.html: ENOTDIR/)
@@ -343,7 +345,7 @@ await test('parseSitemap reads <url> or <sitemap> entries with their lines, CDAT
 })
 const page = (title, extra = '') => PAGE.replace('Shelf - a reading list that remembers every book', title).replace('<head>', `<head>${extra}`)
 const urlset = (...locs) => `<urlset>\n${locs.map(l => `<url><loc>${l}</loc></url>`).join('\n')}\n</urlset>\n`
-const report = (dir, s = SITE) => checkSite(dir, s).findings.map(f => [f.file, f.line, f.level, f.check, f.message])
+const report = (dir, s = SITE) => checkSite(dir, s).findings.filter(f => f.check !== 'robots').map(f => [f.file, f.line, f.level, f.check, f.message])
 await test('a sitemap lists pages; each URL must be absolute, on --site, served, indexable, and canonical', async () => {
   const dir = site({
     'index.html': PAGE,
@@ -399,7 +401,7 @@ await test('with a sitemap, a page it leaves out is not strict: its errors becom
     ])
     assert.deepEqual(checkSite(dir, SITE).pages.map(p => [p.file, p.listed]), [['drafts/x.html', false], ['index.html', true], ['listed.html', true]])
     const cli = spawnSync(process.execPath, [SCRIPT, 'check', dir, '--site', 'https://shelf.example'], { encoding: 'utf8' })
-    assert.match(cli.stdout, /\nseo-check: 3 pages \(1 not in the sitemap, errors shown as warnings\), 2 errors, 2 warnings\nSEO-CHECK: FAIL\n$/)
+    assert.match(cli.stdout, /\nseo-check: 3 pages \(1 not in the sitemap, errors shown as warnings\), 2 errors, 3 warnings\nSEO-CHECK: FAIL\n$/)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 await test('sitemap indexes are followed, once each; a bad or missing sitemap is an error', async () => {
@@ -434,6 +436,126 @@ await test('sitemap indexes are followed, once each; a bad or missing sitemap is
   try { assert.deepEqual(report(docs, parseSite('https://shelf.example/docs')), [], 'under a --site path, the sitemap is at <path>/sitemap.xml') } finally { rmSync(docs, { recursive: true, force: true }) }
 })
 
+console.log('== seo-check: robots.txt')
+const decide = (robots, path) => {
+  const rule = decidingRule(googlebotRules(parseRobots(robots).groups), `https://shelf.example${path}`)
+  return rule ? `${rule.allow ? 'allow' : 'disallow'} ${rule.path}` : 'none'
+}
+await test('rule paths match as in Google\'s table: prefix, *, a final $, case-sensitive, percent-encoded', async () => {
+  // Google's "URL matching based on path values" examples.
+  for (const [path, yes, no] of [
+    ['/', ['/', '/page', '/a/b?c=d'], []],
+    ['/*', ['/', '/page'], []],
+    ['/$', ['/'], ['/page.htm', '/?x=1']],
+    ['/fish', ['/fish', '/fish.html', '/fish/salmon.html', '/fishheads', '/fishheads/yummy.html', '/fish.php?id=anything'], ['/Fish.asp', '/catfish', '/?id=fish', '/desert/fish']],
+    ['/fish*', ['/fish', '/fish.html', '/fishheads/yummy.html'], ['/Fish.asp', '/catfish']],
+    ['/fish/', ['/fish/', '/fish/?id=anything', '/fish/salmon.htm'], ['/fish', '/fish.html', '/animals/fish/', '/Fish/Salmon.asp']],
+    ['/*.php', ['/index.php', '/filename.php', '/folder/filename.php', '/folder/filename.php?parameters', '/folder/any.php.file.html', '/filename.php/'], ['/', '/windows.PHP']],
+    ['/*.php$', ['/filename.php', '/folder/filename.php'], ['/filename.php?parameters', '/filename.php/', '/filename.php5', '/windows.PHP']],
+    ['/fish*.php', ['/fish.php', '/fishheads/catfish.php?parameters'], ['/Fish.PHP']],
+    ['/a.b(c)+$x', ['/a.b(c)+$x', '/a.b(c)+$xy'], ['/aXb(c)+$x', '/a.b(c)$x']],
+    ['/caf\u00e9', ['/caf%C3%A9'], ['/cafe']],
+  ]) {
+    for (const url of yes) assert.equal(decide(`User-agent: *\nDisallow: ${path}`, url), `disallow ${path}`, `${path} matches ${url}`)
+    for (const url of no) assert.equal(decide(`User-agent: *\nDisallow: ${path}`, url), 'none', `${path} does not match ${url}`)
+  }
+})
+await test('the longest matching rule wins and allow wins a tie, as in Google\'s precedence table', async () => {
+  for (const [rules, path, expected] of [
+    ['Allow: /p\nDisallow: /', '/page', 'allow /p'],
+    ['Allow: /folder\nDisallow: /folder', '/folder/page', 'allow /folder'],
+    ['Disallow: /folder\nAllow: /folder', '/folder/page', 'allow /folder'],
+    ['Allow: /page\nDisallow: /*.htm', '/page.htm', 'disallow /*.htm'],
+    ['Allow: /page\nDisallow: /*.ph', '/page.php5', 'allow /page'],
+    ['Allow: /$\nDisallow: /', '/', 'allow /$'],
+    ['Allow: /$\nDisallow: /', '/page.htm', 'disallow /'],
+    ['Disallow:\nAllow: /x', '/page', 'none'],
+  ]) assert.equal(decide(`User-agent: *\n${rules}`, path), expected, `${rules} for ${path}`)
+})
+await test('parseRobots groups User-agent runs, reads product tokens, and warns on lines Google ignores', async () => {
+  const robots = [
+    '\ufeffDisallow: /early',
+    '# a comment',
+    'USER-AGENT: Googlebot/2.1 # the web crawler',
+    'user-agent: bingbot',
+    'disallow: /a  ',
+    'Sitemap: https://shelf.example/sitemap.xml',
+    'User-agent: *',
+    'Allow: /',
+    'Crawl-delay: 5',
+    'Dissallow: /typo',
+    'this is not a field',
+    'User-agent: googlebot-news',
+    'Disallow: /news',
+    'User-agent: googlebot',
+    'Disallow: /b',
+  ].join('\r\n')
+  const parsed = parseRobots(robots)
+  assert.deepEqual(parsed.groups.map(g => [g.agents, g.rules.map(r => `${r.allow ? 'allow' : 'disallow'} ${r.path} @${r.line}`)]), [
+    [['googlebot', 'bingbot'], ['disallow /a @5']],
+    [['*'], ['allow / @8']],
+    [['googlebot-news'], ['disallow /news @13']],
+    [['googlebot'], ['disallow /b @15']],
+  ])
+  assert.deepEqual(parsed.sitemaps, [{ url: 'https://shelf.example/sitemap.xml', line: 6 }])
+  assert.deepEqual(parsed.problems, [
+    { line: 1, message: 'Disallow comes before any User-agent line; Google ignores it' },
+    { line: 10, message: '"Dissallow" is not a field Google reads; it ignores the line' },
+    { line: 11, message: '"this is not a field" is not a "field: value" line; Google ignores it' },
+  ])
+  assert.deepEqual(googlebotRules(parsed.groups).map(r => r.path), ['/a', '/b'], 'every googlebot group, combined; not googlebot-news, not *')
+  assert.deepEqual(googlebotRules(parseRobots('User-agent: googlebot-news\nDisallow: /\nUser-agent: *\nDisallow: /x').groups).map(r => r.path), ['/x'])
+  assert.deepEqual(googlebotRules(parseRobots('User-agent: *x\nDisallow: /\nUser-agent: Googlebot*\nDisallow: /y').groups).map(r => r.path), ['/y'], '"Googlebot*" is googlebot')
+  assert.deepEqual(googlebotRules(parseRobots('User-agent: *x\nDisallow: /').groups), [], '"*x" is not the "*" group')
+  assert.deepEqual(parseRobots('User-agent: a\nDisallow:\nUser-agent: b\nDisallow: /z').groups.map(g => g.agents), [['a'], ['b']], 'an empty Disallow still ends the run')
+})
+await test('robots.txt must not block a listed URL or every page; its Sitemap: lines lead to sitemaps', async () => {
+  const robotsSaid = dir => checkSite(dir, SITE).findings.filter(f => f.check === 'robots' || f.file === 'robots.txt').map(f => [f.line, f.level, f.check, f.message])
+  const dir = site({
+    'index.html': PAGE,
+    'a.html': page('A', '<link rel="canonical" href="https://shelf.example/a">').replace('<link rel="canonical" href="https://shelf.example/">', ''),
+    'private.html': '<meta name="robots" content="noindex"><title>Private</title>',
+    'drafts/b.html': page('B'),
+    'maps/main.xml': urlset('https://shelf.example/', 'https://shelf.example/a'),
+    'robots.txt': [
+      'User-agent: *', 'Disallow: /a$', 'Disallow: /private', 'Disallow: /drafts/', 'Allow: /a.html',
+      'Sitemap: https://shelf.example/maps/main.xml', 'Sitemap: /relative.xml', 'Sitemap: https://cdn.example/s.xml', 'Sitemap: https://shelf.example/gone.xml',
+      'Noindex: /private',
+    ].join('\n'),
+  })
+  try {
+    assert.deepEqual(robotsSaid(dir), [
+      [2, 'error', 'robots', 'Disallow: /a$ blocks https://shelf.example/a, which the sitemap lists'],
+      [3, 'warn', 'robots', 'Disallow: /private blocks https://shelf.example/private.html, so Googlebot never sees its noindex and the page can still appear in search results (Google)'],
+      [7, 'error', 'robots', 'Sitemap: "/relative.xml" is not an absolute http(s) URL (Google: a fully qualified URL)'],
+      [8, 'warn', 'robots', 'Sitemap: https://cdn.example/s.xml is not on --site https://shelf.example/; not checked (seo-check fetches nothing)'],
+      [9, 'error', 'sitemap', 'no file in the build serves the sitemap https://shelf.example/gone.xml'],
+      [10, 'warn', 'robots', '"Noindex" is not a field Google reads; it ignores the line'],
+    ], 'the listed URL /a is checked, not the file a.html; an unlisted blocked page is fine')
+    writeFileSync(join(dir, 'robots.txt'), 'User-agent: *\nDisallow: /\n')
+    writeFileSync(join(dir, 'sitemap.xml'), urlset('https://shelf.example/'))
+    assert.deepEqual(robotsSaid(dir), [
+      [0, 'warn', 'robots', 'robots.txt has no Sitemap: line; Google finds a sitemap through one or through Search Console'],
+      [0, 'error', 'robots', 'robots.txt blocks every indexable page from Googlebot (a staging build?)'],
+    ], 'and no per-URL finding when every page is blocked')
+    writeFileSync(join(dir, 'robots.txt'), `User-agent: *\n${'#'.repeat(500 * 1024)}\nDisallow: /\n`)
+    assert.deepEqual(robotsSaid(dir), [
+      [0, 'warn', 'robots', 'robots.txt is 501 KiB; Google ignores everything after 500 KiB'],
+      [0, 'warn', 'robots', 'robots.txt has no Sitemap: line; Google finds a sitemap through one or through Search Console'],
+    ], 'a rule past 500 KiB is ignored')
+    writeFileSync(join(dir, 'robots.txt'), '\u0000')
+    assert.deepEqual(robotsSaid(dir), [[0, 'error', 'files', `${join(dir, 'robots.txt')} is not a text file`]])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+  const docs = site({ 'index.html': PAGE.replaceAll('https://shelf.example/', 'https://shelf.example/docs/'), 'robots.txt': 'User-agent: *\nDisallow: /\n' })
+  try {
+    assert.deepEqual(checkSite(docs, parseSite('https://shelf.example/docs')).findings.filter(f => f.check === 'robots').map(f => [f.file, f.message]), [
+      ['robots.txt', 'robots.txt is served at https://shelf.example/docs/robots.txt; crawlers read only https://shelf.example/robots.txt, so it is not checked'],
+    ], 'under a --site path, robots.txt is not at the root')
+    rmSync(join(docs, 'robots.txt'))
+    assert.deepEqual(checkSite(docs, parseSite('https://shelf.example/docs')).findings.filter(f => f.check === 'robots'), [], 'nor is a missing one: the root is out of sight')
+  } finally { rmSync(docs, { recursive: true, force: true }) }
+})
+
 console.log('== seo-check: the docs and the command')
 await test('SKILL.md documents every check, and the file reader matches gtm-brief\'s', async () => {
   const skill = readFileSync(join(SKILL, 'SKILL.md'), 'utf8')
@@ -446,9 +568,12 @@ await test('check prints each finding and ends with SEO-CHECK: PASS|FAIL and exi
   const dir = site({
     'good/index.html': PAGE,
     'good/sitemap.xml': SITEMAP,
+    'good/robots.txt': ROBOTS,
     'bad/index.html': PAGE.replace('<title>Shelf - a reading list that remembers every book</title>', ''),
     'bad/sitemap.xml': SITEMAP,
+    'bad/robots.txt': ROBOTS,
     'warned/sitemap.xml': SITEMAP,
+    'warned/robots.txt': ROBOTS,
     'warned/index.html': PAGE.replace('<title>Shelf - a reading list that remembers every book</title>', `<title>${'x'.repeat(61)}</title>`),
     'warned/404.html': '<html><head><meta name="robots" content="noindex"><title>Not found</title></head></html>',
   })
