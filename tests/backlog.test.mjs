@@ -1,13 +1,13 @@
 // backlog.test.mjs — the backlog format, the build ledger, and the next-step
 // rules (core/skills/backlog/backlog.mjs).
 import { join } from 'node:path'
-import { mkdtempSync, writeFileSync, readFileSync, symlinkSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { test, REPO } from '../scripts/workflow-harness.mjs'
 import {
-  validateBacklog, sliceTask, readLedger, writeLedger, emptyLedger, sliceState, nextSlice, blockedClosure,
+  validateBacklog, sliceTask, ledgerPath, readLedger, writeLedger, emptyLedger, sliceState, nextSlice, blockedClosure,
   frozenFiles, recordOutcome, brake, unblock, resume, MAX_REPLANS, MAX_ESCALATED_SLICES,
 } from '../core/skills/backlog/backlog.mjs'
 
@@ -151,7 +151,7 @@ await test('check: PASS exits 0, FAIL lists each problem and exits 1, bad usage 
   for (const args of [[], ['check'], ['lint', good], ['check', good, 'extra']]) {
     r = cli(args)
     assert.equal(r.status, 2, JSON.stringify(args))
-    assert.match(r.stderr, /usage: backlog\.mjs check <backlog\.json> \| backlog\.mjs task <backlog\.json> <S<n>> \[ledger\.json\]/)
+    assert.match(r.stderr, /usage: backlog\.mjs check <backlog\.json> \| backlog\.mjs task <backlog\.json> <S<n>> \[build state dir\]/)
   }
 })
 await test('check: a missing or unparseable file is a FAIL with the reason, not a crash', () => {
@@ -381,6 +381,10 @@ await test('sliceTask: a re-planned or unblocked slice carries every earlier rea
   assert.match(t, /The human answered questions about this slice; the answers are binding:\n- use SQLite$/)
   assert.doesNotMatch(sliceTask(BACKLOG(), 'S2', l).task, /Earlier attempts|answered/, 'another slice\'s history stays out')
 })
+await test('ledgerPath: one ledger per app in the build state directory; a bad slug never makes a path', () => {
+  assert.equal(ledgerPath('/r/.git/harness-build', 'reading-list'), '/r/.git/harness-build/reading-list/ledger.json')
+  for (const bad of ['../x', 'Bad', '', undefined, 'a/b']) assert.throws(() => ledgerPath('/s', bad), /is not an app slug/, String(bad))
+})
 await test('sliceTask: an unknown slice or a backlog that fails its check throws', () => {
   assert.throws(() => sliceTask(BACKLOG(), 'S9'), /"S9" is not a slice of the backlog/)
   assert.throws(() => sliceTask(BACKLOG(), undefined), /is not a slice/)
@@ -392,18 +396,25 @@ await test('task command: prints the JSON and exits 0; a bad slice, a broken led
   const ok = cli(['task', path, 'S2'])
   assert.equal(ok.status, 0, ok.stderr)
   assert.deepEqual(JSON.parse(ok.stdout), sliceTask(BACKLOG(), 'S2'))
-  const ledgerPath = join(dir, 'task-ledger.json')
-  writeLedger(ledgerPath, escalate(emptyLedger(), 'S2', 'no db'))
-  assert.match(JSON.parse(cli(['task', path, 'S2', ledgerPath]).stdout).task, /- no db$/)
-  assert.equal(cli(['task', path, 'S2', join(dir, 'no-ledger-yet.json')]).status, 0, 'a missing ledger is a first attempt')
-  writeFileSync(join(dir, 'bad-ledger.json'), '{')
-  const broken = cli(['task', path, 'S2', join(dir, 'bad-ledger.json')])
+  const state = join(dir, 'harness-build')
+  writeLedger(ledgerPath(state, 'reading-list'), escalate(emptyLedger(), 'S2', 'no db'))
+  writeLedger(ledgerPath(state, 'other-app'), escalate(emptyLedger(), 'S2', 'another app'))
+  const withLedger = JSON.parse(cli(['task', path, 'S2', state]).stdout).task
+  assert.match(withLedger, /- no db$/)
+  assert.doesNotMatch(withLedger, /another app/, 'only this app\'s ledger is read')
+  assert.equal(cli(['task', path, 'S2', join(dir, 'no-state-yet')]).status, 0, 'a missing ledger is a first attempt')
+  const badState = join(dir, 'bad-state')
+  mkdirSync(join(badState, 'reading-list'), { recursive: true })
+  writeFileSync(ledgerPath(badState, 'reading-list'), '{')
+  const broken = cli(['task', path, 'S2', badState])
   assert.equal(broken.status, 1)
-  assert.match(broken.stderr, /^backlog: .*bad-ledger\.json is not valid JSON/)
+  assert.match(broken.stderr, /^backlog: .*ledger\.json is not valid JSON/)
+  writeFileSync(join(dir, 'bad-app.json'), JSON.stringify({ ...BACKLOG(), app: '../escape' }))
+  assert.match(cli(['task', join(dir, 'bad-app.json'), 'S1', state]).stderr, /the backlog does not pass its check: app must be a lowercase slug/)
   const unknown = cli(['task', path, 'S7'])
   assert.equal(unknown.status, 1)
   assert.match(unknown.stderr, /"S7" is not a slice/)
   assert.equal(unknown.stdout, '')
-  for (const args of [['task', path], ['task', path, 'S1', 'l.json', 'extra']]) assert.equal(cli(args).status, 2, JSON.stringify(args))
+  for (const args of [['task', path], ['task', path, 'S1', 'dir', 'extra']]) assert.equal(cli(args).status, 2, JSON.stringify(args))
 })
 rmSync(dir, { recursive: true, force: true })

@@ -5,7 +5,7 @@
 //   node backlog.mjs check <path>
 // Prints one line per problem, then BACKLOG: PASS|FAIL. Exit 0 pass, 1 fail, 2 usage.
 import { readFileSync, writeFileSync, mkdirSync, renameSync, realpathSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The driver's stop rules (README "Three brakes").
@@ -109,6 +109,14 @@ function readJson(path) {
 
 export function readBacklog(path) {
   return readJson(path)
+}
+
+// Each app has its own ledger in the build state directory
+// (`$(git rev-parse --git-path harness-build)`), so a second backlog in one repo
+// never inherits the first one's progress.
+export function ledgerPath(stateDir, app) {
+  if (typeof app !== 'string' || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(app)) throw new Error(`${JSON.stringify(app)} is not an app slug`)
+  return join(stateDir, app, 'ledger.json')
 }
 
 export function emptyLedger() {
@@ -309,7 +317,7 @@ export function sliceTask(backlog, id, ledger = emptyLedger()) {
 
 // ---------- command line ----------
 
-const USAGE = 'usage: backlog.mjs check <backlog.json> | backlog.mjs task <backlog.json> <S<n>> [ledger.json]'
+const USAGE = 'usage: backlog.mjs check <backlog.json> | backlog.mjs task <backlog.json> <S<n>> [build state dir]'
 
 function main(argv) {
   const [cmd, path, ...rest] = argv
@@ -330,12 +338,15 @@ function main(argv) {
 }
 
 // Prints the slice's task as JSON ({slice, app, task, requiredCriteria}) and
-// exits 0, or prints the reason to stderr and exits 1. A missing ledger is a
-// first attempt; a broken one is an error, never a guess.
-function taskCommand(path, id, ledgerPath) {
+// exits 0, or prints the reason to stderr and exits 1. The app's ledger is read
+// from the build state directory; a missing one is a first attempt, a broken
+// one is an error, never a guess.
+function taskCommand(path, id, stateDir) {
   try {
-    const ledger = ledgerPath ? readLedger(ledgerPath) : emptyLedger()
-    console.log(JSON.stringify(sliceTask(readBacklog(path), id, ledger), null, 2))
+    const backlog = readBacklog(path)
+    // A backlog that fails its check gets sliceTask's full report, not a path error.
+    const ledger = stateDir && !validateBacklog(backlog).length ? readLedger(ledgerPath(stateDir, backlog.app)) : emptyLedger()
+    console.log(JSON.stringify(sliceTask(backlog, id, ledger), null, 2))
     return 0
   } catch (e) {
     console.error(`backlog: ${e.message}`)

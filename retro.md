@@ -731,9 +731,11 @@ them checked to fail when their text is removed.
 
 **What changed.** `/dev --slice S<n> --base integration/<app> --unattended` builds one backlog slice
 with nobody there, the way the `/build-app` driver will call it.
-- `backlog.mjs task <backlog> S<n> [ledger]` (`sliceTask`) turns the slice into the task text (goal,
-  requirements, every criterion with its id) plus every earlier reason and answer from the build
-  ledger, and prints the `requiredCriteria`. A missing ledger is a first attempt; a broken one fails.
+- `backlog.mjs task <backlog> S<n> [build state dir]` (`sliceTask`) turns the slice into the task
+  text (goal, requirements, every criterion with its id) plus every earlier reason and answer from
+  the app's build ledger, and prints the `requiredCriteria`. A missing ledger is a first attempt; a
+  broken one fails. Each app has its own ledger, `<state dir>/<app>/ledger.json` (`ledgerPath`), so
+  a second backlog in one repo never inherits the first one's done slices.
 - `dev-build.js` takes `requiredCriteria`: a plan that drops one, or rewords its criterion, goes back
   to the planner before any gate, and an approved plan in `args` that lacks one escalates. So the
   acceptance audit proves the backlog's own criteria, not a paraphrase. The planner agent keeps the
@@ -748,6 +750,11 @@ with nobody there, the way the `/build-app` driver will call it.
 **Bugs caught.** My own tests: the planner prompt shows issues as JSON, so a quoted criterion
 arrives escaped; the build fixture's auditor reported the wrong criterion ids. Both were test
 mistakes, not code.
+PR review (#22; 2 MEDIUM, 1 LOW, all fixed): under `--slice` the branch step came before the step
+that produces the task text its name needs, so a failed slice lookup left a stray branch behind
+(the lookup now runs first); `$C` was defined once in prose, but shell state does not carry between
+commands, so the run-script path (which worked before) would have broken (every command now spells
+out `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`); the retro's test count was one too high.
 
-**Stats.** 9 new tests (334 passed, 0 failed), 9 mutations, all caught. 3 validate.sh rules, each
+**Stats.** 9 new tests (335 passed, 0 failed), 12 mutations, all caught. 3 validate.sh rules, each
 checked to fail when its text is removed.

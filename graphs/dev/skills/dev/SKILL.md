@@ -14,13 +14,14 @@ Arguments: the task text, plus optional `--review` and `--resume`. `--auto` is
 accepted and means the default. Also:
 - `--base <branch>`: the base branch, instead of detecting it (section 1).
 - `--slice S<n>`: the task is slice `S<n>` of `docs/backlog.json` instead of
-  task text (section 1, step 7), and every commit subject starts with `S<n>: `.
+  task text (section 1, step 5), and every commit subject starts with `S<n>: `.
 - `--unattended`: nobody is there. Never use AskUserQuestion, whatever the
   task text says; every point below that would ask is a report instead
   (section 5), and the run ends there. `--review` cannot be combined with it.
 
-Paths: `C="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"` is where `install.sh` linked
-PandaStack; every installed path below starts with it.
+Installed paths start with `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`, where
+`install.sh` linked PandaStack. Write it out in every command: shell state does
+not carry from one command to the next.
 
 ## When to ask
 
@@ -47,24 +48,27 @@ Questions come before any code exists, or not at all.
    must succeed, or stop and say so); otherwise
    `git symbolic-ref --short refs/remotes/origin/HEAD` with the `origin/`
    prefix removed; if that fails, `main` if it exists, else `master`.
-4. Branch: if the current branch is the base, create
-   `dev/<slug>` (slug: lowercase task words joined by `-`, at most 40 chars) and
-   switch to it. Otherwise stay on the current branch.
-5. State: `D="$(git rev-parse --path-format=absolute --git-path harness-dev)"`; `mkdir -p "$D"`. It
-   holds `task.txt`, `plan.json`, and `ledger.json`, inside `.git`, never committed.
-6. Known-stuck signatures: if `"$(git rev-parse --path-format=absolute --git-path harness-loop)/ledger.json"`
+4. State: `D="$(git rev-parse --path-format=absolute --git-path harness-dev)"`; `mkdir -p "$D"`. It
+   holds `task.txt`, `plan.json`, `slice.json`, and `ledger.json`, inside `.git`, never committed.
+5. `--slice S<n>`, before any branch is made: `docs/backlog.json` must exist
+   in `REPO`. Run
+   `node "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/backlog/backlog.mjs" task "$REPO/docs/backlog.json" S<n> "$(git rev-parse --path-format=absolute --git-path harness-build)" > "$D/slice.json"`
+   (the last argument is the build state directory; the app's ledger in it
+   is read when it exists, and a missing one is a first attempt). A
+   non-zero exit: report its message and stop. The task text is
+   `slice.json`'s `task`, and `requiredCriteria` is its `requiredCriteria`,
+   both copied exactly as printed.
+6. Branch: if the current branch is the base, create `dev/<slug>` and switch
+   to it (slug: lowercase task words joined by `-`, at most 40 chars; with
+   `--slice`, `S<n>-` then the slice title's words). Otherwise stay on the
+   current branch (the `/build-app` driver puts each slice on its own).
+7. Known-stuck signatures: if `"$(git rev-parse --path-format=absolute --git-path harness-loop)/ledger.json"`
    exists and parses, use its `stuckSigs`; otherwise `[]`.
-7. `--slice S<n>`: `docs/backlog.json` must exist in `REPO`. Run
-   `node "$C/skills/backlog/backlog.mjs" task "$REPO/docs/backlog.json" S<n> "$(git rev-parse --path-format=absolute --git-path harness-build)/ledger.json" > "$D/slice.json"`
-   (a missing build ledger is a first attempt). A non-zero exit: report its
-   message and stop. The task text is `slice.json`'s `task`, and
-   `requiredCriteria` is its `requiredCriteria`, both copied exactly as
-   printed.
 
 ## 2. Run the graph
 
 Workflow tool with `name: "dev-build"` (if not found, `scriptPath` set to the
-absolute path of `$C/workflows/dev-build.js`). Args:
+absolute path of `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/workflows/dev-build.js`, expanded first). Args:
 
 - New task: `{"repo": REPO, "task": <task text>, "base": BASE, "approval": "advisor" (or "human" with --review), "maxFixRounds": 3, "knownStuckSigs": [...]}`,
   plus `"requiredCriteria"` with `--slice`.
@@ -78,7 +82,7 @@ absolute path of `$C/workflows/dev-build.js`). Args:
 **Running an approved plan.** Never pass the plan in `args` and never retype
 it: a real plan is ~50 KB and workflow scripts cannot read files. Write it into
 a run script instead:
-`node "$C/skills/workflow-state/run-script.mjs" INJECTED_PLAN "$D/plan.json" "$C/workflows/dev-build.js" "$D/run.js"`
+`node "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workflow-state/run-script.mjs" INJECTED_PLAN "$D/plan.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/workflows/dev-build.js" "$D/run.js"`
 (the shared `workflow-state` skill).
 Its output must start with `run-script: wrote <path>`; anything else, report it
 and stop. If node cannot find the script, it moved to the shared skill: tell
