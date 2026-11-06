@@ -62,8 +62,9 @@ Rules the check enforces:
   `fails_when` each, and `depends_on` naming only earlier slices, so there is
   never a cycle.
 - At most 40 slices.
-- A goal never says "stop and ask": `/dev` lets task text override its
-  no-ask rule, and an unattended build has no one to ask.
+- A goal never says "stop and ask", and neither does a title, criterion, or
+  `fails_when`: a slice is `/dev`'s task text, `/dev` lets task text override
+  its no-ask rule, and an unattended build has no one to ask.
 
 What the check cannot see is the advisor's job at the backlog gate: whether
 each slice is small enough for one `/dev` run, whether the criteria really
@@ -93,4 +94,4 @@ re-plans, reasons, questions, and the test files it froze when it landed.
 - **The way back in:** after a brake, `resume` starts the first two counters
   over (the human has looked). A blocked slice stays blocked until `unblock`
   gives it the human's answers; it then starts from a fresh plan with fresh
-  counts, and keeps its earlier reasons.
+  counts, and keeps its earlier reasons and every earlier answer.

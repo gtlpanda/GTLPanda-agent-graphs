@@ -671,7 +671,15 @@ could never clear and a blocked slice had no way back, so a resumed build would 
 `resume` and `unblock`); one ordering assertion could not fail; a comment claimed a drift test that does
 not exist yet (the backlog stage adds it with the copy).
 
-**Stats.** 27 new tests (294 passed, 0 failed in the suite, after rebasing on entries 15-17), 17 mutations, all caught (one survived at first:
+PR review (#20, 1 MEDIUM, 3 LOW, each reproduced, all fixed with tests): a second `unblock` replaced
+the first round's answers, so a re-planned slice lost the human's earlier decision (answers now
+accumulate); `readLedger` checked only the top level, so `{S1: "done"}` read as pending (rebuilt) and
+`status: "complete"` was offered forever (now every entry, status, and count is checked); any read
+error whose message held "ENOENT" (a directory named so) turned a corrupt ledger into a fresh build
+(now the error code); "stop and ask" was checked in the goal only, though the whole slice is task text
+(now title, criteria, and `fails_when` too).
+
+**Stats.** 28 new tests (295 passed, 0 failed in the suite, after rebasing on entries 15-17), 27 mutations, all caught (one survived at first:
 `unblock` keeping the re-plan count; an assertion was added).
 
 **Also measured this session (outside the repo).** `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` in the user

@@ -57,8 +57,13 @@ function validateBacklog(backlog, requiredIds) {
     if (s.id !== id) problems.push(`slice ${i + 1} must have id ${id} (ids run S1, S2, ... in build order), got ${show(s.id)}`)
     if (!text(s.title)) problems.push(`${id}: title is empty`)
     if (!text(s.goal)) problems.push(`${id}: goal is empty`)
-    // /dev lets task text override its no-ask rule, so a slice must never ask for that.
-    else if (/stop[\s-]+and[\s-]+ask/i.test(s.goal)) problems.push(`${id}: goal says "stop and ask", which would make an unattended /dev wait for a human`)
+    // A slice's text is /dev's task text, and /dev lets task text override its
+    // no-ask rule, so no part of a slice may ask for that.
+    const asks = v => typeof v === 'string' && /stop[\s-]+and[\s-]+ask/i.test(v)
+    const askers = [['title', s.title], ['goal', s.goal]]
+      .concat(arr(s.acceptance).flatMap((c, k) => (c && typeof c === 'object' ? [[`AC${k + 1} criterion`, c.criterion], [`AC${k + 1} fails_when`, c.fails_when]] : [])))
+      .filter(([, v]) => asks(v)).map(([where]) => where)
+    if (askers.length) problems.push(`${id}: ${askers.join(', ')} says "stop and ask", which would make an unattended /dev wait for a human`)
     const own = arr(s.requirements)
     if (!Array.isArray(s.requirements)) problems.push(`${id}: requirements must be a list (it may be empty)`)
     for (const r of own) {
@@ -96,7 +101,9 @@ export { validateBacklog }
 // Parses a JSON file; throws with a plain message when it cannot.
 function readJson(path) {
   let raw
-  try { raw = readFileSync(path, 'utf8') } catch (e) { throw new Error(`cannot read ${path}: ${e.code || e.message}`) }
+  try { raw = readFileSync(path, 'utf8') } catch (e) {
+    throw Object.assign(new Error(`cannot read ${path}: ${e.code || e.message}`), { code: e.code })
+  }
   try { return JSON.parse(raw) } catch (e) { throw new Error(`${path} is not valid JSON: ${e.message}`) }
 }
 
@@ -115,14 +122,33 @@ export function readLedger(path) {
   try {
     ledger = readJson(path)
   } catch (e) {
-    if (/ENOENT/.test(e.message)) return emptyLedger()
+    if (e.code === 'ENOENT') return emptyLedger()
     throw e
   }
-  if (!ledger || typeof ledger !== 'object' || ledger.version !== 1 || typeof ledger.slices !== 'object' || ledger.slices === null ||
-      !Number.isInteger(ledger.replans) || !Array.isArray(ledger.escalatedSinceLanding)) {
-    throw new Error(`${path} is not a version 1 build ledger`)
-  }
+  const bad = ledgerProblem(ledger)
+  if (bad) throw new Error(`${path} is not a version 1 build ledger: ${bad}`)
   return ledger
+}
+
+// The first thing in a parsed ledger the rules below cannot interpret, or null.
+function ledgerProblem(ledger) {
+  const plain = v => v !== null && typeof v === 'object' && !Array.isArray(v)
+  const count = v => Number.isInteger(v) && v >= 0
+  const strings = v => Array.isArray(v) && v.every(x => typeof x === 'string')
+  if (!plain(ledger)) return 'not an object'
+  if (ledger.version !== 1) return `version ${JSON.stringify(ledger.version)}`
+  if (!count(ledger.replans)) return 'replans must be a count'
+  if (!strings(ledger.escalatedSinceLanding)) return 'escalatedSinceLanding must be a list of slice ids'
+  if (!plain(ledger.slices)) return 'slices must be an object keyed by slice id'
+  for (const [id, s] of Object.entries(ledger.slices)) {
+    if (!/^S[1-9]\d*$/.test(id)) return `${JSON.stringify(id)} is not a slice id`
+    if (!plain(s)) return `${id} must be an object`
+    if (s.status !== undefined && !['pending', 'done', 'blocked'].includes(s.status)) return `${id} has status ${JSON.stringify(s.status)}`
+    for (const k of ['escalations', 'replans']) if (s[k] !== undefined && !count(s[k])) return `${id}.${k} must be a count`
+    for (const k of ['replan', 'stuck']) if (s[k] !== undefined && typeof s[k] !== 'boolean') return `${id}.${k} must be true or false`
+    for (const k of ['reasons', 'questions', 'answers', 'frozen']) if (s[k] !== undefined && !strings(s[k])) return `${id}.${k} must be a list of text`
+  }
+  return null
 }
 
 // Write to a temp file, then rename: a crash mid-write never leaves half a ledger.
@@ -214,8 +240,9 @@ export function recordOutcome(ledger, id, outcome) {
   return next
 }
 
-// The human's way back in. Unblocks one slice: it gets their answers and
-// starts over with a fresh count. Throws unless the slice is blocked.
+// The human's way back in. Unblocks one slice: it starts over with a fresh
+// count, and every answer the human ever gave it, oldest first, so a second
+// unblock never drops the first decision. Throws unless the slice is blocked.
 export function unblock(ledger, id, answers) {
   const s = sliceState(ledger, id)
   if (s.status !== 'blocked') throw new Error(`${id} is ${s.status}; only a blocked slice can be unblocked`)
@@ -223,7 +250,7 @@ export function unblock(ledger, id, answers) {
     throw new Error('unblocking needs the human\'s answers: a non-empty list of text')
   }
   const next = JSON.parse(JSON.stringify(ledger))
-  next.slices[id] = { ...s, status: 'pending', escalations: 0, replans: 0, replan: true, stuck: false, questions: [], answers }
+  next.slices[id] = { ...s, status: 'pending', escalations: 0, replans: 0, replan: true, stuck: false, questions: [], answers: [...s.answers, ...answers] }
   return next
 }
 

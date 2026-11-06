@@ -80,6 +80,16 @@ await test('a slice needs a title and a goal, and a goal never says "stop and as
   for (const goal of ['Build it, then stop and ask the user.', 'STOP AND ASK first', 'stop\nand  ask', 'stop-and-ask before saving']) {
     assert.deepEqual(problems(variant(b => { b.slices[0].goal = goal })), ['S1: goal says "stop and ask", which would make an unattended /dev wait for a human'], goal)
   }
+  // The whole slice is /dev's task text, so every field is checked, and one problem names them all.
+  const everywhere = variant(b => {
+    b.slices[0].title = 'Stop and ask'
+    b.slices[0].acceptance[0].criterion = 'it should stop and ask the user'
+    b.slices[1].acceptance[0].fails_when = 'it does not stop-and-ask'
+  })
+  assert.deepEqual(problems(everywhere), [
+    'S1: title, AC1 criterion says "stop and ask", which would make an unattended /dev wait for a human',
+    'S2: AC1 fails_when says "stop and ask", which would make an unattended /dev wait for a human',
+  ])
   for (const goal of ['Add a Stop button and an Ask dialog.', 'Never stop; ask nothing.', 'Stop asking for the title twice.']) {
     assert.deepEqual(problems(variant(b => { b.slices[0].goal = goal })), [], goal)
   }
@@ -169,11 +179,25 @@ await test('a missing ledger is a fresh build; an unreadable or wrong-shaped one
   const broken = join(dir, 'broken-ledger.json')
   writeFileSync(broken, '{"version":')
   assert.throws(() => readLedger(broken), /is not valid JSON/)
-  for (const shape of [[], { version: 2, replans: 0, escalatedSinceLanding: [], slices: {} }, { version: 1, replans: 0, escalatedSinceLanding: [] },
-    { version: 1, replans: '0', escalatedSinceLanding: [], slices: {} }, { version: 1, replans: 0, slices: {} }, { version: 1, replans: 0, escalatedSinceLanding: [], slices: null }]) {
+  const top = { version: 1, replans: 0, escalatedSinceLanding: [], slices: {} }
+  const withSlice = s1 => ({ ...top, slices: { S1: s1 } })
+  for (const shape of [[], null, { ...top, version: 2 }, { version: 1, replans: 0, escalatedSinceLanding: [] },
+    { ...top, replans: '0' }, { ...top, replans: -1 }, { version: 1, replans: 0, slices: {} }, { ...top, escalatedSinceLanding: [1] },
+    { ...top, slices: null }, { ...top, slices: [] }, { ...top, slices: { S01: {} } },
+    // A slice entry the rules cannot read would be rebuilt or offered forever: never guess.
+    withSlice('done'), withSlice({ status: 'complete' }), withSlice({ escalations: '1' }), withSlice({ replans: 1.5 }),
+    withSlice({ replan: 'yes' }), withSlice({ frozen: 'tests/a.test.js' }), withSlice({ answers: [2] })]) {
     writeFileSync(broken, JSON.stringify(shape))
-    assert.throws(() => readLedger(broken), /is not a version 1 build ledger/, JSON.stringify(shape))
+    assert.throws(() => readLedger(broken), /is not a version 1 build ledger: /, JSON.stringify(shape))
   }
+  writeFileSync(broken, JSON.stringify(withSlice({ status: 'done', frozen: ['t.js'] })))
+  assert.equal(readLedger(broken).slices.S1.status, 'done', 'a well-formed entry still reads')
+})
+await test('only a missing file is a fresh build: a path that merely contains ENOENT still throws when corrupt', () => {
+  const odd = join(dir, 'ENOENTdir', 'ledger.json')
+  writeLedger(odd, emptyLedger())
+  writeFileSync(odd, '{bad')
+  assert.throws(() => readLedger(odd), /is not valid JSON/)
 })
 await test('writeLedger round-trips, creates the directory, and leaves no temp file', () => {
   const path = join(dir, 'harness-build', 'ledger.json')
@@ -267,6 +291,9 @@ await test('unblock: a blocked slice gets the answers, a fresh plan, and fresh c
   assert.equal(sliceState(stuck, 'S1').stuck, false)
   assert.equal(sliceState(stuck, 'S1').replans, 0, 'a fresh re-plan budget, or the next failure would block it at once')
   assert.equal(sliceState(stuck, 'S1').reasons.length, 4, 'the reasons stay for the fresh plan')
+  let twice = unblock(ask(emptyLedger(), 'S1'), 'S1', ['use SQLite'])
+  twice = unblock(recordOutcome(twice, 'S1', { kind: 'needs-human', questions: ['S1: which port?'] }), 'S1', ['port 3000'])
+  assert.deepEqual(sliceState(twice, 'S1').answers, ['use SQLite', 'port 3000'], 'a second unblock never drops the first decision')
   assert.throws(() => unblock(emptyLedger(), 'S1', ['x']), /S1 is pending; only a blocked slice can be unblocked/)
   assert.throws(() => unblock(land(emptyLedger(), 'S1'), 'S1', ['x']), /S1 is done/)
   for (const bad of [undefined, [], [''], [' '], [1], 'yes']) {
