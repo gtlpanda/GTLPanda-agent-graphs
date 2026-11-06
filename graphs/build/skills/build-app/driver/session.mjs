@@ -11,10 +11,15 @@ import { classifyOutcome, parseResetTime, planLimitWait } from './limits.mjs'
 // inherited CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL is blanked: set, it forces every
 // workflow agent onto one model (measured 2026-11-05). --settings overrides the
 // user's settings.json env.
+// A headless `claude -p` stops background work (the /dev Workflow run) 10 minutes
+// after its last turn unless the ceiling is 0 (measured 2026-11-05: a design run
+// was killed at 10 min). The driver's own session timeout is the outer limit.
+export const NO_BG_CEILING = { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: '0' }
 export const SESSION_ENV = {
   CLAUDE_CODE_SUBAGENT_MODEL: 'claude-sonnet-5-5',
   CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0',
   CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL: '',
+  ...NO_BG_CEILING,
 }
 // A second layer under the guard hook; command-text rules alone are not a boundary.
 export const DENY = ['Bash(git push)', 'Bash(git push *)', 'Bash(git remote *)', 'Bash(git reset --hard*)', 'Bash(git rebase*)', 'Bash(rm -rf /*)', 'Bash(rm -rf ~*)']

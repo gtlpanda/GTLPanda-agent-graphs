@@ -53,6 +53,7 @@ loop: brake? --> stop (exit 3)
 | Deny rules | `git push`, `git remote`, `git reset --hard`, `git rebase`, `rm -rf /` `~` | a second layer: rules match command text only |
 | StopFailure hook | `hooks/stop-failure.mjs` | records `rate_limit` and other API errors, so the driver waits instead of counting a failure |
 | Model env | `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5-5`, `..._FORCE=0`, `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=""` | pinned agents keep their pins; a set workflow model forces every workflow agent onto it (measured) |
+| Background wait | `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, in the env and the settings | a headless `claude -p` stops a running Workflow 10 minutes after its last turn (measured: it killed a design run), and a `/dev` slice runs for an hour or more |
 | Env | the parent's `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT` removed, except auth and provider settings (`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_*`, `CLAUDE_CODE_SKIP_*_AUTH`, client certs) | a session started from a session would inherit its settings; an unattended box still needs to log in |
 | Main model | `opus` (`HARNESS_BUILD_MODEL`) | the `/dev` orchestrator |
 | Timeout | 6 h per session (`HARNESS_BUILD_SESSION_TIMEOUT_MS`), then SIGTERM, then SIGKILL | `/dev` notes: ~30 min planning plus 55-85 min per 7-8-component build |
