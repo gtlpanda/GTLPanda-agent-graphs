@@ -11,8 +11,9 @@ Status: **run 1 (intake and interview)** passed its first live run (a reading-li
 app: 8 questions in about a minute). **Run 2 (design and the advisor's design gate)**
 passed its live run on the same app. The first attempt took 21 minutes and escalated, because the
 second gate reviewed the whole design again. With the re-gate, it was approved in round 2 with 6
-notes (retro 14). **Run 3 (the backlog, the knowledge map, and your one approval)** is
-tested with mocked agents and has not had a live run yet. Research and spikes (run 2's
+notes (retro 14). **Run 3 (the backlog, the knowledge map, and your one approval)**
+passed its first live run on a reading-list CLI: 7 slices, approved in round 2 after the
+re-gate checked only the 3 issues it sent back (10 min 40 s, $5.25; retro 24). Research and spikes (run 2's
 evidence) are planned, not built.
 
 ## Graph (run 1: `stage: interview`, the default)

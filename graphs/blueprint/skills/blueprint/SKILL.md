@@ -139,7 +139,7 @@ Redact the returned ledger, write it to `$S/run1.json`, then act on `status`.
 2. Run the same workflow with those args plus `"repo": REPO`,
    `"stage": "backlog"`, `"statePath": "$S/state.json"`, and
    `"designPath": "$S/run2.json"` (both absolute). Say at launch that the
-   backlog has not been live-run yet. Redact the returned ledger, write it to
+   first live backlog run took about 11 minutes. Redact the returned ledger, write it to
    `$S/run3.json`, then act on `status`:
    - `backlog-ready`: section 6.
    - `needs-human`: answer it as in section 4 (the questions name the ids

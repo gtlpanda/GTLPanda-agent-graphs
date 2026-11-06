@@ -87,6 +87,9 @@ await test('every slice lands in order on the integration branch, each from a fr
   assert.equal(gitOut(root, 'branch', '--list', 'slice/*'), '', 'slice branches are deleted once landed')
   assert.equal(status(root).state, 'done')
   assert.equal(status(root).exitCode, 0)
+  // Four sessions at $0.01 each, every result line counted once though the log repeats it.
+  assert.equal(status(root).costUsd, 0.04)
+  assert.match(driverLog(root), /S1: landed \(exit 0, \$0\.01\)/)
 })
 await test('each session gets bypassPermissions, the injected settings, and a clean env without the parent\'s CLAUDE_CODE_*', () => {
   const root = repo({ ...BACKLOG, requirements: ['R1'], slices: [slice(1, [])] })
@@ -183,6 +186,7 @@ await test('running again resumes from the ledger: landed slices are not rebuilt
   assert.equal(code, 0)
   assert.equal(calls.length, 2)
   assert.match(calls[0].args.join(' '), /--slice S2/)
+  assert.equal(status(root).costUsd, 0.04, 'the total carries over from the earlier run (2 sessions there, 2 here)')
 })
 
 console.log('== build-app driver: limits and the API')
@@ -283,7 +287,7 @@ await test('the final QA pass lands its "final: " fixes on integration; --no-pr 
 })
 await test('a final QA that escalates, commits off-prefix, or writes no report brakes; every slice stays landed; a rerun repeats only the QA', () => {
   for (const [qa, why] of [
-    [{ qa: 'escalate', reason: 'a HIGH finding the advisor confirmed' }, /the final QA did not pass \(escalate: a HIGH finding the advisor confirmed\)/],
+    [{ qa: 'escalate', reason: 'a HIGH finding the advisor confirmed' }, /the final QA did not pass \(\$0\.01; escalate: a HIGH finding the advisor confirmed\)/],
     [{ qa: 'done', commits: [{ subject: 'QA fixes', files: { 'src/x.js': '1\n' } }] }, /commits that do not start with "final: "/],
     [{ error: 'something unexpected' }, /the final QA session wrote no report/],
   ]) {
@@ -479,6 +483,8 @@ await test('stop ends the running session, keeps nothing half-landed, and exits 
   const code = await new Promise(r => child.on('close', r))
   assert.equal(code, 130)
   assert.equal(status(root).state, 'stopped')
+  // The killed session wrote no result line: its cost is unknown, never a misleading $0.00.
+  assert.match(status(root).message, /stopped by request during S1 \(no result line, cost unknown\)/)
   assert.equal(gitOut(root, 'rev-parse', '--abbrev-ref', 'HEAD'), INT)
   assert.equal(existsSync(join(stateDir(root), 'driver.pid')), false)
   const st = spawnSync(process.execPath, [DRIVER, 'status', '--repo', root, '--app', APP], { encoding: 'utf8' })
