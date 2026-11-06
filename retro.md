@@ -854,5 +854,13 @@ cleaning its own scratch, had run `rm -rf /tmp/smoke-build-*`. The driver then c
 log; its bookkeeping now never crashes it, and live runs use the session scratchpad, not a shared
 /tmp glob (tasks/lessons.md).
 
+Live smoke run, second attempt (`scripts/smoke-build.sh`, one real slice, `--no-pr`): **PASS** in 4.5
+minutes and $4.89 over 2 sessions. The slice session ran `dev-build`; its plan carried the backlog's
+`S1-AC1` and `S1-AC2` unchanged and added AC1 and AC2, and all four were met. The driver's own checks
+passed, and the slice landed. The final session ran `harness-repair` (check, review, QA: no findings) and
+wrote its report through the guard's one writable file. modelUsage: opus $2.28 (the orchestrators),
+sonnet $0.98, fable $1.62, haiku $0.01. Fable and Haiku appear only through the agents pinned to them,
+so the pins hold inside Workflow agents under the driver's settings (the open item from entry 21).
+
 **Stats.** 10 new tests (388 workflow tests passed, 0 failed), 14 mutations, all caught. 2 validate.sh
 rules.
