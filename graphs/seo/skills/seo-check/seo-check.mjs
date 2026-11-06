@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // seo-check.mjs - checks the HTML of a built site for the tags search engines
 // and link previews read: title, meta description, canonical, Open Graph, and
-// JSON-LD. Zero dependencies. It reads files only and fetches nothing.
+// JSON-LD, and the sitemaps that list its pages. Zero dependencies. It reads
+// files only and fetches nothing.
 //   node seo-check.mjs check <built dir> --site <https://example.com/> [--json]
 // Prints one line per finding, then SEO-CHECK: PASS|FAIL. Errors fail, warnings
 // never do. Exit 0 pass, 1 fail, 2 usage.
@@ -10,7 +11,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Every check a finding can name; SKILL.md documents each one.
-export const CHECKS = ['files', 'title', 'description', 'canonical', 'og', 'json-ld']
+export const CHECKS = ['files', 'title', 'description', 'canonical', 'og', 'json-ld', 'sitemap']
 const OG_REQUIRED = ['og:title', 'og:description', 'og:image', 'og:url']
 const OG_URLS = ['og:image', 'og:url']
 // Open Graph arrays: a page may list several images, so two values do not disagree.
@@ -18,6 +19,11 @@ const OG_ARRAYS = ['og:image']
 // Our guide, not Google's: Google sets no length limit and cuts to the screen width.
 const TITLE_MAX = 60
 const DESCRIPTION_RANGE = [70, 160]
+// Where a build puts its sitemap when robots.txt names none.
+const SITEMAP_FILES = ['sitemap.xml', 'sitemap-index.xml', 'sitemap_index.xml']
+// Google: at most 50,000 URLs per sitemap and 50,000 locs per index. sitemaps.org: a loc is under 2,048 characters.
+const SITEMAP_MAX = 50000
+const LOC_MAX = 2048
 
 // ---- The tag scanner ----
 // Elements whose content is text, not markup: a "<meta" inside them is not a tag.
@@ -133,6 +139,7 @@ const pageKey = url => {
   const u = new URL(url)
   return u.origin + u.pathname.replace(/(\/index)?\.html?$/i, '').replace(/\/+$/, '') + u.search
 }
+const knownCheck = check => { if (!CHECKS.includes(check)) throw new Error(`unknown check "${check}"`) }
 const onSite = (url, site) => {
   const u = new URL(url)
   return u.origin === site.origin && `${u.pathname}/`.startsWith(site.pathname)
@@ -154,7 +161,7 @@ export function parseSite(value) {
 export function checkPage(html, url, site) {
   const findings = []
   const add = (level, line, check, message) => {
-    if (!CHECKS.includes(check)) throw new Error(`unknown check "${check}"`)
+    knownCheck(check)
     findings.push({ line, level, check, message })
   }
   const error = (...a) => add('error', ...a)
@@ -268,6 +275,93 @@ function checkJsonLd(script, error, warn) {
   }
 }
 
+// ---- Sitemaps ----
+const XML_NAME = '(?:[\\w.-]+:)?'   // an optional namespace prefix
+const xmlElement = name => new RegExp(`<${XML_NAME}${name}(?=[\\s>])[^>]*>([\\s\\S]*?)</${XML_NAME}${name}\\s*>`, 'g')
+
+// Reads a sitemap or a sitemap index. Returns {root, entries: [{loc, line}],
+// hints}: root is the root element's name without a prefix, entries its <url>
+// or <sitemap> children (loc is null when one has none), hints how many set
+// <priority> or <changefreq>. A regex reader, not an XML parser.
+export function parseSitemap(source) {
+  const xml = String(source).replace(/\r\n?/g, '\n').replace(/<!--[\s\S]*?-->/g, c => c.replace(/[^\n]/g, ' '))
+  const root = new RegExp(`<(?![?!])${XML_NAME}([\\w.-]+)`).exec(xml)?.[1] ?? null
+  const entries = []
+  let hints = 0
+  let line = 1
+  let counted = 0
+  for (const m of xml.matchAll(xmlElement(root === 'sitemapindex' ? 'sitemap' : 'url'))) {
+    for (; counted < m.index; counted++) if (xml.charCodeAt(counted) === 10) line++
+    const loc = xmlElement('loc').exec(m[1])?.[1].trim() ?? null
+    const cdata = loc && /^<!\[CDATA\[([\s\S]*)\]\]>$/.exec(loc)
+    entries.push({ loc: cdata ? cdata[1].trim() : loc && decode(loc), line })
+    if (new RegExp(`<${XML_NAME}(priority|changefreq)[\\s>]`).test(m[1])) hints++
+  }
+  return { root, entries, hints }
+}
+
+// Reads the sitemaps at `starts` ([{url, from, line, optional}]), following
+// indexes, and marks each page it lists (page.listed = true). `from` and `line`
+// say where the URL came from, for the finding when no file serves it;
+// `optional` skips a missing file silently. Returns how many sitemaps it read.
+function readSitemaps(dir, site, starts, pages, add) {
+  const byKey = new Map()
+  for (const page of pages) if (!byKey.has(pageKey(page.url))) byKey.set(pageKey(page.url), page)
+  const listedAt = new Map()
+  const seen = new Set()
+  const queue = [...starts]
+  let read = 0
+  while (queue.length) {
+    const { url, from, line, optional } = queue.shift()
+    if (seen.has(url)) continue
+    seen.add(url)
+    if (/\.gz$/i.test(new URL(url).pathname)) { add(from, line, 'warn', 'sitemap', `${url} is gzipped; seo-check does not read it`); continue }
+    let file = new URL(url).pathname.slice(site.pathname.length)
+    let xml
+    try { file = decodeURIComponent(file); xml = readText(join(dir, file)) } catch (e) {
+      if (e instanceof URIError) add(from, line, 'error', 'sitemap', `${url} has a malformed %-escape`)
+      else if (!/: ENOENT$/.test(e.message)) add(file, 0, 'error', 'files', e.message)
+      else if (!optional) add(from, line, 'error', 'sitemap', `no file in the build serves the sitemap ${url}`)
+      continue
+    }
+    const { root, entries, hints } = parseSitemap(xml)
+    const index = root === 'sitemapindex'
+    if (!index && root !== 'urlset') {
+      add(file, 0, 'error', 'sitemap', `not a sitemap: the root element is ${root ? `<${root}>` : 'missing'}, not <urlset> or <sitemapindex>`)
+      continue
+    }
+    read++
+    if (!entries.length) add(file, 0, 'error', 'sitemap', index ? 'the sitemap index lists no sitemaps' : 'the sitemap lists no URLs')
+    if (entries.length > SITEMAP_MAX) add(file, 0, 'error', 'sitemap', `${entries.length} entries; Google reads at most ${SITEMAP_MAX} per file`)
+    if (hints) add(file, 0, 'warn', 'sitemap', `${hints} ${hints === 1 ? 'entry sets' : 'entries set'} <priority> or <changefreq>; Google ignores both`)
+    const scope = new URL('.', url).href
+    for (const { loc, line } of entries) {
+      const problem = message => add(file, line, 'error', 'sitemap', message)
+      if (!loc) { problem(`<${index ? 'sitemap' : 'url'}> has no <loc>`); continue }
+      if (chars(loc) >= LOC_MAX) { problem(`<loc> is ${chars(loc)} characters; sitemaps.org allows under ${LOC_MAX}`); continue }
+      if (!isAbsolute(loc)) { problem(`<loc> "${loc}" is not an absolute http(s) URL (Google: use fully-qualified, absolute URLs)`); continue }
+      const href = new URL(loc).href
+      if (!onSite(href, site)) {
+        if (index) add(file, line, 'warn', 'sitemap', `${loc} is not on --site ${site.href}; not checked (seo-check fetches nothing)`)
+        else problem(`${loc} is not on --site ${site.href}`)
+        continue
+      }
+      if (index) { queue.push({ url: href, from: file, line }); continue }
+      if (!href.startsWith(scope)) add(file, line, 'warn', 'sitemap', `${loc} is outside ${scope} (Google: a sitemap affects only descendants of its parent directory)`)
+      const key = pageKey(href)
+      const first = listedAt.get(key)
+      if (first) { add(file, line, 'warn', 'sitemap', `${loc} is listed twice (first at ${first})`); continue }
+      listedAt.set(key, `${file}:${line}`)
+      const page = byKey.get(key)
+      if (!page) { problem(`no page in the build serves ${loc}`); continue }
+      page.listed = true
+      if (!page.indexable) problem(`${loc} has noindex, but the sitemap lists it (Google: list the URLs you want in search results)`)
+      else if (page.canonical && pageKey(page.canonical) !== key) problem(`${loc} has the canonical ${page.canonical}; list that URL instead (Google: list the URLs you want in search results)`)
+    }
+  }
+  return read
+}
+
 // ---- The site ----
 // Every .html file under dir, relative to it with "/" separators, sorted.
 // Skips node_modules, dot directories, and symlinks.
@@ -298,31 +392,50 @@ export function readText(path) {
   try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { throw new Error(`${path} is not UTF-8 text`) }
 }
 
-// Checks every page under dir. Returns {pages: [{file, url, indexable}],
-// findings: [{file, line, level, check, message}]}; file "." is the dir itself.
+// Findings by file (the dir itself, ".", last), then by line.
+const byPlace = (a, b) => (a.file === '.') - (b.file === '.') || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line
+
+// Checks every page under dir and the sitemaps that list them. Returns
+// {pages: [{file, url, indexable, listed}], findings: [{file, line, level,
+// check, message}]}; file "." is the dir itself. listed is null when no
+// sitemap was read. A page a sitemap leaves out is not strict: its errors,
+// except json-ld's, become warnings (with no sitemap, every page is strict).
 export function checkSite(dir, site) {
-  const pages = []
   const findings = []
+  const add = (file, line, level, check, message) => { knownCheck(check); findings.push({ file, line, level, check, message }) }
   let files
   try { files = findPages(dir) } catch (e) {
-    return { pages, findings: [{ file: '.', line: 0, level: 'error', check: 'files', message: `cannot read ${dir}: ${e.code || e.message}` }] }
+    add('.', 0, 'error', 'files', `cannot read ${dir}: ${e.code || e.message}`)
+    return { pages: [], findings }
   }
-  if (!files.length) findings.push({ file: '.', line: 0, level: 'error', check: 'files', message: `no .html files under ${dir}` })
+  if (!files.length) add('.', 0, 'error', 'files', `no .html files under ${dir}`)
+
+  const pages = []
   for (const file of files) {
     const url = pageUrl(file, site)
     let html
-    try { html = readText(join(dir, file)) } catch (e) {
-      findings.push({ file, line: 0, level: 'error', check: 'files', message: e.message })
-      continue
+    try { html = readText(join(dir, file)) } catch (e) { add(file, 0, 'error', 'files', e.message); continue }
+    pages.push({ file, url, listed: false, ...checkPage(html, url, site) })
+  }
+
+  const starts = SITEMAP_FILES.map(name => ({ url: new URL(name, site).href, optional: true }))
+  const sitemaps = readSitemaps(dir, site, starts, pages, add)
+  if (!sitemaps) add('.', 0, 'warn', 'sitemap', `no sitemap (${SITEMAP_FILES.join(', ')}), so every page is checked strictly`)
+
+  for (const page of pages) {
+    const strict = !sitemaps || page.listed
+    for (const f of page.findings) {
+      if (strict || f.level !== 'error' || f.check === 'json-ld') add(page.file, f.line, f.level, f.check, f.message)
+      else add(page.file, f.line, 'warn', f.check, `${f.message} (not in the sitemap)`)
     }
-    const page = checkPage(html, url, site)
-    pages.push({ file, url, indexable: page.indexable })
-    for (const f of page.findings) findings.push({ file, ...f })
   }
   if (pages.length && !pages.some(p => p.indexable)) {
-    findings.push({ file: '.', line: 0, level: 'error', check: 'files', message: 'every page has noindex, so search engines index nothing (a staging build?)' })
+    add('.', 0, 'error', 'files', 'every page has noindex, so search engines index nothing (a staging build?)')
   }
-  return { pages, findings }
+  return {
+    pages: pages.map(p => ({ file: p.file, url: p.url, indexable: p.indexable, listed: sitemaps ? p.listed : null })),
+    findings: findings.sort(byPlace),
+  }
 }
 
 const USAGE = 'usage: seo-check.mjs check <built dir> --site <https://example.com/> [--json]'
@@ -357,7 +470,9 @@ function main(argv) {
     }
     const count = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`
     const skipped = pages.filter(p => !p.indexable).length
-    console.log(`seo-check: ${count(pages.length, 'page')}${skipped ? ` (${skipped} noindex, checked for JSON-LD only)` : ''}, ${count(errors, 'error')}, ${count(findings.length - errors, 'warning')}`)
+    const unlisted = pages.filter(p => p.indexable && p.listed === false).length
+    const notes = [skipped && `${skipped} noindex, checked for JSON-LD only`, unlisted && `${unlisted} not in the sitemap, errors shown as warnings`].filter(Boolean)
+    console.log(`seo-check: ${count(pages.length, 'page')}${notes.length ? ` (${notes.join('; ')})` : ''}, ${count(errors, 'error')}, ${count(findings.length - errors, 'warning')}`)
   }
   console.log(`SEO-CHECK: ${errors ? 'FAIL' : 'PASS'}`)
   return errors ? 1 : 0

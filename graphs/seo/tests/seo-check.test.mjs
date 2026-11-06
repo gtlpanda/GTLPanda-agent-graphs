@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { test, REPO } from '../../../scripts/workflow-harness.mjs'
-import { CHECKS, checkPage, checkSite, findPages, pageUrl, parseSite, scanTags } from '../skills/seo-check/seo-check.mjs'
+import { CHECKS, checkPage, checkSite, findPages, pageUrl, parseSitemap, parseSite, scanTags } from '../skills/seo-check/seo-check.mjs'
 
 const SKILL = join(REPO, 'graphs', 'seo', 'skills', 'seo-check')
 const SCRIPT = join(SKILL, 'seo-check.mjs')
@@ -26,6 +26,11 @@ const PAGE = `<!doctype html>
 </head>
 <body><h1>Shelf</h1></body>
 </html>
+`
+const SITEMAP = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://shelf.example/</loc></url>
+</urlset>
 `
 const findings = (html, url = 'https://shelf.example/') => checkPage(html, url, SITE).findings
 const said = (html, url) => findings(html, url).map(f => `${f.level} ${f.check}: ${f.message}`)
@@ -292,23 +297,141 @@ await test('checkSite checks each page, and a missing dir, an empty dir, or an u
   try {
     writeFileSync(join(dir, 'latin1.html'), Buffer.from([0x3c, 0xe9, 0x3e]))
     const got = checkSite(dir, SITE)
-    assert.deepEqual(got.pages.map(p => [p.file, p.url, p.indexable]), [['bad.html', 'https://shelf.example/bad.html', true], ['index.html', 'https://shelf.example/', true]])
+    assert.deepEqual(got.pages.map(p => [p.file, p.url, p.indexable, p.listed]), [['bad.html', 'https://shelf.example/bad.html', true, null], ['index.html', 'https://shelf.example/', true, null]])
     assert.deepEqual(got.findings.map(f => [f.file, f.check, f.message.replace(dir, '<dir>')]), [
       ['bad.html', 'title', `two <title> elements in <head> (first at line ${line('<title>')})`],
       ['bad.html', 'title', '<title> is empty'],
       ['bad.html', 'canonical', 'canonical points to https://shelf.example/, not this page (https://shelf.example/bad.html): search engines index that page instead'],
       ['bin.html', 'files', '<dir>/bin.html is not a text file'],
       ['latin1.html', 'files', '<dir>/latin1.html is not UTF-8 text'],
+      ['.', 'sitemap', 'no sitemap (sitemap.xml, sitemap-index.xml, sitemap_index.xml), so every page is checked strictly'],
     ])
     assert.match(checkSite(join(dir, 'gone'), SITE).findings[0].message, /cannot read .*gone: ENOENT/)
     assert.match(checkSite(join(dir, 'index.html'), SITE).findings[0].message, /cannot read .*index\.html: ENOTDIR/)
   } finally { rmSync(dir, { recursive: true, force: true }) }
   const staging = site({ 'index.html': PAGE.replace('<head>', '<head><meta name="robots" content="noindex">'), 'a.html': '<meta name=robots content=noindex>' })
   try {
-    assert.deepEqual(checkSite(staging, SITE).findings.map(f => [f.file, f.message]), [['.', 'every page has noindex, so search engines index nothing (a staging build?)']])
+    assert.deepEqual(checkSite(staging, SITE).findings.filter(f => f.check === 'files').map(f => [f.file, f.message]), [['.', 'every page has noindex, so search engines index nothing (a staging build?)']])
   } finally { rmSync(staging, { recursive: true, force: true }) }
   const empty = site({ 'style.css': '' })
-  try { assert.deepEqual(checkSite(empty, SITE).findings.map(f => f.message), [`no .html files under ${empty}`]) } finally { rmSync(empty, { recursive: true, force: true }) }
+  try { assert.deepEqual(checkSite(empty, SITE).findings.filter(f => f.check === 'files').map(f => f.message), [`no .html files under ${empty}`]) } finally { rmSync(empty, { recursive: true, force: true }) }
+})
+
+console.log('== seo-check: sitemaps')
+await test('parseSitemap reads <url> or <sitemap> entries with their lines, CDATA, entities, and prefixes', async () => {
+  assert.deepEqual(parseSitemap(SITEMAP), { root: 'urlset', entries: [{ loc: 'https://shelf.example/', line: 3 }], hints: 0 })
+  const xml = [
+    '<?xml version="1.0"?>\r',
+    '<!-- <url><loc>https://shelf.example/hidden</loc></url>\r',
+    '-->\r',
+    '<s:urlset xmlns:s="http://www.sitemaps.org/schemas/sitemap/0.9">\r',
+    '<s:url><s:loc> https://shelf.example/a?x=1&amp;y=2 </s:loc><s:priority>0.8</s:priority></s:url>\r',
+    '<url>\r<loc><![CDATA[https://shelf.example/b&c]]></loc>\r<changefreq>daily</changefreq></url>\r',
+    '<url><lastmod>2026-11-05</lastmod></url>\r',
+    '<urls><loc>https://shelf.example/not-an-entry</loc></urls>\r',
+    '</s:urlset>',
+  ].join('\n')
+  assert.deepEqual(parseSitemap(xml), {
+    root: 'urlset',
+    entries: [{ loc: 'https://shelf.example/a?x=1&y=2', line: 5 }, { loc: 'https://shelf.example/b&c', line: 6 }, { loc: null, line: 9 }],
+    hints: 2,
+  })
+  const index = '<sitemapindex><sitemap><loc>https://shelf.example/s1.xml</loc></sitemap><url><loc>https://shelf.example/</loc></url></sitemapindex>'
+  assert.deepEqual(parseSitemap(index), { root: 'sitemapindex', entries: [{ loc: 'https://shelf.example/s1.xml', line: 1 }], hints: 0 })
+  assert.equal(parseSitemap('<!-- <urlset> --><html><body>404</body></html>').root, 'html')
+  assert.equal(parseSitemap('').root, null)
+})
+const page = (title, extra = '') => PAGE.replace('Shelf - a reading list that remembers every book', title).replace('<head>', `<head>${extra}`)
+const urlset = (...locs) => `<urlset>\n${locs.map(l => `<url><loc>${l}</loc></url>`).join('\n')}\n</urlset>\n`
+const report = (dir, s = SITE) => checkSite(dir, s).findings.map(f => [f.file, f.line, f.level, f.check, f.message])
+await test('a sitemap lists pages; each URL must be absolute, on --site, served, indexable, and canonical', async () => {
+  const dir = site({
+    'index.html': PAGE,
+    'a.html': page('A'),
+    'blog/index.html': page('Blog').replace('href="https://shelf.example/"', 'href="https://shelf.example/blog/"'),
+    'hidden.html': '<meta name="robots" content="noindex"><title>Hidden</title>',
+    'copy.html': page('Copy'),
+    'sitemap.xml': urlset(
+      'https://shelf.example/', 'https://shelf.example/a', 'https://shelf.example/blog', '/relative', 'https://other.example/',
+      'https://shelf.example/hidden.html', 'https://shelf.example/copy.html', 'https://shelf.example/gone', 'https://shelf.example/index.html',
+      `https://shelf.example/${'x'.repeat(2048)}`,
+    ).replace('<url><loc>https://shelf.example/a</loc>', '<url><loc>https://shelf.example/a</loc><priority>1</priority>'),
+  })
+  try {
+    assert.deepEqual(report(dir), [
+      ['a.html', line('rel="canonical"'), 'warn', 'canonical', 'canonical points to https://shelf.example/, not this page (https://shelf.example/a.html): search engines index that page instead'],
+      ['copy.html', line('rel="canonical"'), 'warn', 'canonical', 'canonical points to https://shelf.example/, not this page (https://shelf.example/copy.html): search engines index that page instead'],
+      ['sitemap.xml', 0, 'warn', 'sitemap', '1 entry sets <priority> or <changefreq>; Google ignores both'],
+      ['sitemap.xml', 3, 'error', 'sitemap', 'https://shelf.example/a has the canonical https://shelf.example/; list that URL instead (Google: list the URLs you want in search results)'],
+      ['sitemap.xml', 5, 'error', 'sitemap', '<loc> "/relative" is not an absolute http(s) URL (Google: use fully-qualified, absolute URLs)'],
+      ['sitemap.xml', 6, 'error', 'sitemap', 'https://other.example/ is not on --site https://shelf.example/'],
+      ['sitemap.xml', 7, 'error', 'sitemap', 'https://shelf.example/hidden.html has noindex, but the sitemap lists it (Google: list the URLs you want in search results)'],
+      ['sitemap.xml', 8, 'error', 'sitemap', 'https://shelf.example/copy.html has the canonical https://shelf.example/; list that URL instead (Google: list the URLs you want in search results)'],
+      ['sitemap.xml', 9, 'error', 'sitemap', 'no page in the build serves https://shelf.example/gone'],
+      ['sitemap.xml', 10, 'warn', 'sitemap', 'https://shelf.example/index.html is listed twice (first at sitemap.xml:2)'],
+      ['sitemap.xml', 11, 'error', 'sitemap', '<loc> is 2070 characters; sitemaps.org allows under 2048'],
+    ])
+    assert.deepEqual(checkSite(dir, SITE).pages.map(p => [p.file, p.listed]), [['a.html', true], ['blog/index.html', true], ['copy.html', true], ['hidden.html', true], ['index.html', true]])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+  const twice = site({ 'a.html': PAGE, 'a/index.html': PAGE, 'sitemap.xml': urlset('https://shelf.example/a') })
+  try {
+    assert.deepEqual(checkSite(twice, SITE).pages.map(p => [p.file, p.listed]), [['a.html', true], ['a/index.html', false]], 'the first file that serves a URL is the one listed')
+  } finally { rmSync(twice, { recursive: true, force: true }) }
+  const big = site({ 'index.html': PAGE, 'sitemap.xml': urlset(...Array.from({ length: 50001 }, () => 'https://shelf.example/')) })
+  try {
+    assert.deepEqual(report(big).filter(f => f[1] === 0), [['sitemap.xml', 0, 'error', 'sitemap', '50001 entries; Google reads at most 50000 per file']])
+  } finally { rmSync(big, { recursive: true, force: true }) }
+})
+await test('with a sitemap, a page it leaves out is not strict: its errors become warnings, except JSON-LD', async () => {
+  const dir = site({
+    'index.html': PAGE,
+    'listed.html': page('', `<link rel="canonical" href="https://shelf.example/listed.html">`).replace('<link rel="canonical" href="https://shelf.example/">', ''),
+    'drafts/x.html': page('').replace('"@type":"WebSite"', '"@type":""'),
+    'sitemap.xml': urlset('https://shelf.example/', 'https://shelf.example/listed.html'),
+  })
+  try {
+    const titleLine = line('<title>')
+    assert.deepEqual(report(dir), [
+      ['drafts/x.html', titleLine, 'warn', 'title', '<title> is empty (not in the sitemap)'],
+      ['drafts/x.html', line('rel="canonical"'), 'warn', 'canonical', 'canonical points to https://shelf.example/, not this page (https://shelf.example/drafts/x.html): search engines index that page instead'],
+      ['drafts/x.html', line('ld+json'), 'error', 'json-ld', 'a JSON-LD node has no @type'],
+      ['listed.html', titleLine, 'error', 'title', '<title> is empty'],
+    ])
+    assert.deepEqual(checkSite(dir, SITE).pages.map(p => [p.file, p.listed]), [['drafts/x.html', false], ['index.html', true], ['listed.html', true]])
+    const cli = spawnSync(process.execPath, [SCRIPT, 'check', dir, '--site', 'https://shelf.example'], { encoding: 'utf8' })
+    assert.match(cli.stdout, /\nseo-check: 3 pages \(1 not in the sitemap, errors shown as warnings\), 2 errors, 2 warnings\nSEO-CHECK: FAIL\n$/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+await test('sitemap indexes are followed, once each; a bad or missing sitemap is an error', async () => {
+  const dir = site({
+    'index.html': PAGE,
+    'a.html': page('A', '<link rel="canonical" href="https://shelf.example/a.html">').replace('<link rel="canonical" href="https://shelf.example/">', ''),
+    'sitemap-index.xml': '<sitemapindex>\n' + [
+      'https://shelf.example/maps/pages.xml', 'https://shelf.example/sitemap-index.xml',
+      'https://shelf.example/maps/gone.xml', 'https://shelf.example/maps/pages.xml.gz', 'https://shelf.example/maps/%zz.xml',
+      'https://shelf.example/maps/empty.xml', 'https://shelf.example/maps/page.xml', 'https://shelf.example/maps/next.xml', 'https://cdn.example/s.xml',
+    ].map(l => `<sitemap><loc>${l}</loc></sitemap>`).join('\n') + '\n</sitemapindex>\n',
+    'maps/pages.xml': urlset('https://shelf.example/', 'https://shelf.example/a.html'),
+    'maps/empty.xml': '<urlset>\n</urlset>\n',
+    'maps/page.xml': PAGE,
+    'maps/next.xml': '<sitemapindex>\n<sitemap><loc>https://shelf.example/maps/pages.xml</loc></sitemap>\n<sitemap></sitemap>\n</sitemapindex>\n',
+  })
+  try {
+    assert.deepEqual(report(dir), [
+      ['maps/empty.xml', 0, 'error', 'sitemap', 'the sitemap lists no URLs'],
+      ['maps/next.xml', 3, 'error', 'sitemap', '<sitemap> has no <loc>'],
+      ['maps/page.xml', 0, 'error', 'sitemap', 'not a sitemap: the root element is <html>, not <urlset> or <sitemapindex>'],
+      ['maps/pages.xml', 2, 'warn', 'sitemap', 'https://shelf.example/ is outside https://shelf.example/maps/ (Google: a sitemap affects only descendants of its parent directory)'],
+      ['maps/pages.xml', 3, 'warn', 'sitemap', 'https://shelf.example/a.html is outside https://shelf.example/maps/ (Google: a sitemap affects only descendants of its parent directory)'],
+      ['sitemap-index.xml', 4, 'error', 'sitemap', 'no file in the build serves the sitemap https://shelf.example/maps/gone.xml'],
+      ['sitemap-index.xml', 5, 'warn', 'sitemap', 'https://shelf.example/maps/pages.xml.gz is gzipped; seo-check does not read it'],
+      ['sitemap-index.xml', 6, 'error', 'sitemap', 'https://shelf.example/maps/%zz.xml has a malformed %-escape'],
+      ['sitemap-index.xml', 10, 'warn', 'sitemap', 'https://cdn.example/s.xml is not on --site https://shelf.example/; not checked (seo-check fetches nothing)'],
+    ])
+    assert.ok(checkSite(dir, SITE).pages.every(p => p.listed), 'pages listed through an index count as listed')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+  const docs = site({ 'index.html': PAGE.replaceAll('https://shelf.example/', 'https://shelf.example/docs/'), 'sitemap.xml': urlset('https://shelf.example/docs/') })
+  try { assert.deepEqual(report(docs, parseSite('https://shelf.example/docs')), [], 'under a --site path, the sitemap is at <path>/sitemap.xml') } finally { rmSync(docs, { recursive: true, force: true }) }
 })
 
 console.log('== seo-check: the docs and the command')
@@ -322,7 +445,10 @@ const cli = (...args) => spawnSync(process.execPath, args, { encoding: 'utf8' })
 await test('check prints each finding and ends with SEO-CHECK: PASS|FAIL and exit 0|1, also through a symlink', async () => {
   const dir = site({
     'good/index.html': PAGE,
+    'good/sitemap.xml': SITEMAP,
     'bad/index.html': PAGE.replace('<title>Shelf - a reading list that remembers every book</title>', ''),
+    'bad/sitemap.xml': SITEMAP,
+    'warned/sitemap.xml': SITEMAP,
     'warned/index.html': PAGE.replace('<title>Shelf - a reading list that remembers every book</title>', `<title>${'x'.repeat(61)}</title>`),
     'warned/404.html': '<html><head><meta name="robots" content="noindex"><title>Not found</title></head></html>',
   })
@@ -343,7 +469,7 @@ await test('check prints each finding and ends with SEO-CHECK: PASS|FAIL and exi
     assert.equal(lines.pop(), 'SEO-CHECK: FAIL')
     const report = JSON.parse(lines.join('\n'))
     assert.deepEqual(report.findings, [{ file: 'index.html', line: 0, level: 'error', check: 'title', message: 'no <title> in <head>' }])
-    assert.deepEqual(report.pages, [{ file: 'index.html', url: 'https://shelf.example/', indexable: true }])
+    assert.deepEqual(report.pages, [{ file: 'index.html', url: 'https://shelf.example/', indexable: true, listed: true }])
     assert.equal(report.site, 'https://shelf.example/')
     const missing = cli(SCRIPT, 'check', join(dir, 'gone'), '--site', 'https://shelf.example')
     assert.equal(missing.status, 1)
