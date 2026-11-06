@@ -7,8 +7,8 @@
 //   node seo-check.mjs check <built dir> --site <https://example.com/> [--json]
 // Prints one line per finding, then SEO-CHECK: PASS|FAIL. Errors fail, warnings
 // never do. Exit 0 pass, 1 fail, 2 usage.
-import { readFileSync, readdirSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Every check a finding can name; SKILL.md documents each one.
@@ -77,6 +77,22 @@ function readAttrs(html, from) {
     if (!attrs.has(key)) attrs.set(key, value ? decode(value[1] ?? value[2] ?? value[3]) : '')
   }
   return { attrs, end: html.length }
+}
+
+// The text with each comment replaced by its line breaks, so lines still count.
+// An unclosed comment runs to the end, as in a parser.
+function dropComments(text) {
+  let out = ''
+  let i = 0
+  for (;;) {
+    const start = text.indexOf('<!--', i)
+    if (start < 0) return out + text.slice(i)
+    const end = text.indexOf('-->', start + 4)
+    const comment = text.slice(start, end < 0 ? text.length : end + 3)
+    out += text.slice(i, start) + comment.replace(/[^\n]/g, '')
+    if (end < 0) return out
+    i = end + 3
+  }
 }
 
 function closeTagAt(html, name, from) {
@@ -269,11 +285,20 @@ export function checkPage(html, url, site) {
 // styles, noscript, and templates. Without a <body> tag, any text counts: the
 // parser puts text before <body> in the body.
 function isAppShell(html) {
-  const source = html.replace(/<!--[\s\S]*?-->/g, '')
+  const source = dropComments(html)
   if (!/<script\b/i.test(source)) return false
-  const visible = source.replace(/<(script|style|noscript|template|title|textarea)\b[\s\S]*?<\/\1\s*>/gi, '')
-  const body = /<body\b[^>]*>/i.exec(visible)
-  const text = decode(visible.slice(body ? body.index + body[0].length : 0).replace(/<[^>]*>/g, ''))
+  let visible = ''
+  let from = 0
+  const open = /<(script|style|noscript|template|title|textarea)\b/gi
+  for (let m; (m = open.exec(source));) {
+    visible += source.slice(from, m.index)
+    const end = source.indexOf('>', closeTagAt(source, m[1], open.lastIndex))
+    from = open.lastIndex = end < 0 ? source.length : end + 1
+  }
+  visible += source.slice(from)
+  const body = /<body\b[^<>]*>/i.exec(visible)
+  // [^<>]: a "<" with no ">" after it must not rescan the rest for every "<".
+  const text = decode(visible.slice(body ? body.index + body[0].length : 0).replace(/<[^<>]*>/g, ''))
   return !/[^\t\n\f\r ]/.test(text)
 }
 
@@ -305,60 +330,88 @@ function checkJsonLd(script, error, warn) {
 
 // ---- Sitemaps ----
 const XML_NAME = '(?:[\\w.-]+:)?'   // an optional namespace prefix
-const xmlElement = name => new RegExp(`<${XML_NAME}${name}(?=[\\s>])[^>]*>([\\s\\S]*?)</${XML_NAME}${name}\\s*>`, 'g')
+// The contents of each <name> element, in order. Linear: the first open tag
+// with no close tag after it ends the search, since none later can close either.
+function* xmlElements(xml, name) {
+  const open = new RegExp(`<${XML_NAME}${name}(?=[\\s>])[^<>]*>`, 'g')
+  const close = new RegExp(`</${XML_NAME}${name}\\s*>`, 'g')
+  for (let m; (m = open.exec(xml));) {
+    close.lastIndex = open.lastIndex
+    const end = close.exec(xml)
+    if (!end) return
+    yield { index: m.index, body: xml.slice(open.lastIndex, end.index) }
+    open.lastIndex = close.lastIndex
+  }
+}
 
 // Reads a sitemap or a sitemap index. Returns {root, entries: [{loc, line}],
 // hints}: root is the root element's name without a prefix, entries its <url>
 // or <sitemap> children (loc is null when one has none), hints how many set
 // <priority> or <changefreq>. A regex reader, not an XML parser.
 export function parseSitemap(source) {
-  const xml = String(source).replace(/\r\n?/g, '\n').replace(/<!--[\s\S]*?-->/g, c => c.replace(/[^\n]/g, ' '))
+  const xml = dropComments(String(source).replace(/\r\n?/g, '\n'))
   const root = new RegExp(`<(?![?!])${XML_NAME}([\\w.-]+)`).exec(xml)?.[1] ?? null
   const entries = []
   let hints = 0
   let line = 1
   let counted = 0
-  for (const m of xml.matchAll(xmlElement(root === 'sitemapindex' ? 'sitemap' : 'url'))) {
+  for (const m of xmlElements(xml, root === 'sitemapindex' ? 'sitemap' : 'url')) {
     for (; counted < m.index; counted++) if (xml.charCodeAt(counted) === 10) line++
-    const loc = xmlElement('loc').exec(m[1])?.[1].trim() ?? null
+    const loc = xmlElements(m.body, 'loc').next().value?.body.trim() ?? null
     const cdata = loc && /^<!\[CDATA\[([\s\S]*)\]\]>$/.exec(loc)
     entries.push({ loc: cdata ? cdata[1].trim() : loc && decode(loc), line })
-    if (new RegExp(`<${XML_NAME}(priority|changefreq)[\\s>]`).test(m[1])) hints++
+    if (new RegExp(`<${XML_NAME}(priority|changefreq)[\\s>]`).test(m.body)) hints++
   }
   return { root, entries, hints }
+}
+
+// Where a sitemap URL is in the build: its path under --site, decoded, or null
+// when it is not a regular file inside dir (a directory, or "..%2f" or a symlink leading out).
+function sitemapPath(dir, site, url) {
+  let file
+  try { file = decodeURIComponent(new URL(url).pathname.slice(site.pathname.length)) } catch { return null }
+  let real
+  try { real = realpathSync(join(dir, file)) } catch { return { file, real: null } }
+  return real.startsWith(realpathSync(dir) + sep) && statSync(real).isFile() ? { file, real } : null
 }
 
 // Reads the sitemaps at `starts` ([{url, from, line, optional}]), following
 // indexes, and marks each page it lists (page.listed = true). `from` and `line`
 // say where the URL came from, for the finding when no file serves it;
-// `optional` skips a missing file silently. Returns how many sitemaps it read.
+// `optional` skips a missing file silently. Returns {read, skipped}: how many
+// sitemaps of pages (<urlset>) it read, and how many it could not (gzipped,
+// off-site, missing, or not a sitemap), whose pages it cannot know.
 function readSitemaps(dir, site, starts, pages, add) {
+  // Every file serving a URL (a.html and a/index.html both serve /a).
   const byKey = new Map()
-  for (const page of pages) if (!byKey.has(pageKey(page.url))) byKey.set(pageKey(page.url), page)
+  for (const page of pages) byKey.set(pageKey(page.url), [...byKey.get(pageKey(page.url)) ?? [], page])
   const listedAt = new Map()
   const seen = new Set()
   const queue = [...starts]
   let read = 0
+  let skipped = 0
   while (queue.length) {
     const { url, from, line, optional } = queue.shift()
     if (seen.has(url)) continue
     seen.add(url)
-    if (/\.gz$/i.test(new URL(url).pathname)) { add(from, line, 'warn', 'sitemap', `${url} is gzipped; seo-check does not read it`); continue }
-    let file = new URL(url).pathname.slice(site.pathname.length)
-    let xml
-    try { file = decodeURIComponent(file); xml = readText(join(dir, file)) } catch (e) {
-      if (e instanceof URIError) add(from, line, 'error', 'sitemap', `${url} has a malformed %-escape`)
-      else if (!/: ENOENT$/.test(e.message)) add(file, 0, 'error', 'files', e.message)
-      else if (!optional) add(from, line, 'error', 'sitemap', `no file in the build serves the sitemap ${url}`)
+    if (/\.gz$/i.test(new URL(url).pathname)) { skipped++; add(from, line, 'warn', 'sitemap', `${url} is gzipped; seo-check does not read it`); continue }
+    const path = sitemapPath(dir, site, url)
+    if (!path) { skipped++; add(from, line, 'error', 'sitemap', `${url} is not a file in the build`); continue }
+    if (!path.real) {
+      if (!optional) { skipped++; add(from, line, 'error', 'sitemap', `no file in the build serves the sitemap ${url}`) }
       continue
     }
+    const file = path.file
+    let xml
+    try { xml = readText(path.real) } catch (e) { skipped++; add(file, 0, 'error', 'files', e.message); continue }
     const { root, entries, hints } = parseSitemap(xml)
     const index = root === 'sitemapindex'
     if (!index && root !== 'urlset') {
+      skipped++
       add(file, 0, 'error', 'sitemap', `not a sitemap: the root element is ${root ? `<${root}>` : 'missing'}, not <urlset> or <sitemapindex>`)
       continue
     }
-    read++
+    if (!index) read++
     if (!entries.length) add(file, 0, 'error', 'sitemap', index ? 'the sitemap index lists no sitemaps' : 'the sitemap lists no URLs')
     if (entries.length > SITEMAP_MAX) add(file, 0, 'error', 'sitemap', `${entries.length} entries; Google reads at most ${SITEMAP_MAX} per file`)
     if (hints) add(file, 0, 'warn', 'sitemap', `${hints} ${hints === 1 ? 'entry sets' : 'entries set'} <priority> or <changefreq>; Google ignores both`)
@@ -370,7 +423,7 @@ function readSitemaps(dir, site, starts, pages, add) {
       if (!isAbsolute(loc)) { problem(`<loc> "${loc}" is not an absolute http(s) URL (Google: use fully-qualified, absolute URLs)`); continue }
       const href = new URL(loc).href
       if (!onSite(href, site)) {
-        if (index) add(file, line, 'warn', 'sitemap', `${loc} is not on --site ${site.href}; not checked (seo-check fetches nothing)`)
+        if (index) { skipped++; add(file, line, 'warn', 'sitemap', `${loc} is not on --site ${site.href}; not checked (seo-check fetches nothing)`) }
         else problem(`${loc} is not on --site ${site.href}`)
         continue
       }
@@ -380,15 +433,15 @@ function readSitemaps(dir, site, starts, pages, add) {
       const first = listedAt.get(key)
       if (first) { add(file, line, 'warn', 'sitemap', `${loc} is listed twice (first at ${first})`); continue }
       listedAt.set(key, `${file}:${line}`)
-      const page = byKey.get(key)
-      if (!page) { problem(`no page in the build serves ${loc}`); continue }
-      page.listed = true
-      page.loc = href
+      const served = byKey.get(key)
+      if (!served) { problem(`no page in the build serves ${loc}`); continue }
+      for (const page of served) Object.assign(page, { listed: true, loc: href })
+      const page = served[0]
       if (!page.indexable) problem(`${loc} has noindex, but the sitemap lists it (Google: list the URLs you want in search results)`)
       else if (page.canonical && pageKey(page.canonical) !== key) problem(`${loc} has the canonical ${page.canonical}; list that URL instead (Google: list the URLs you want in search results)`)
     }
   }
-  return read
+  return { read, skipped }
 }
 
 // ---- robots.txt ----
@@ -429,13 +482,28 @@ export function googlebotRules(groups) {
   return (named.length ? named : groups.filter(g => g.agents.includes('*'))).flatMap(g => g.rules)
 }
 
-// A rule path as a regex: "*" is any run of characters, a final "$" ends the
-// URL, and the rest is literal and case-sensitive, compared percent-encoded.
-const robotsPattern = path => {
-  const encoded = path.replace(/[^\x00-\x7f]/gu, c => encodeURIComponent(c))
-  const anchored = encoded.endsWith('$')
-  const body = (anchored ? encoded.slice(0, -1) : encoded).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*')
-  return new RegExp(`^${body}${anchored ? '$' : ''}`)
+// Percent-encoded, with every %-escape's hex in upper case (RFC 3986 calls the cases equal).
+const encoded = text => text.replace(/[^\x00-\x7f]/gu, c => encodeURIComponent(c)).replace(/%[0-9a-f]{2}/gi, e => e.toUpperCase())
+
+// Whether a rule path matches a URL path: "*" is any run of characters, a final
+// "$" ends the URL, and the rest is a literal, case-sensitive prefix. The
+// two-pointer wildcard match: at most pattern x text steps, never exponential.
+function pathMatches(path, target) {
+  const anchored = path.endsWith('$')
+  const pattern = encoded(anchored ? path.slice(0, -1) : path) + (anchored ? '' : '*')
+  const text = encoded(target)
+  let p = 0
+  let t = 0
+  let star = -1
+  let resume = 0
+  while (t < text.length) {
+    if (pattern[p] === '*') { star = p++; resume = t }
+    else if (p < pattern.length && pattern[p] === text[t]) { p++; t++ }
+    else if (star >= 0) { p = star + 1; t = ++resume }
+    else return false
+  }
+  while (pattern[p] === '*') p++
+  return p === pattern.length
 }
 
 // The rule that decides whether a crawler may fetch url: the matching rule with
@@ -444,7 +512,7 @@ export function decidingRule(rules, url) {
   const u = new URL(url)
   let best = null
   for (const rule of rules) {
-    if (!robotsPattern(rule.path).test(u.pathname + u.search)) continue
+    if (!pathMatches(rule.path, u.pathname + u.search)) continue
     const longer = !best || rule.path.length > best.path.length
     if (longer || (rule.path.length === best.path.length && rule.allow && !best.allow)) best = rule
   }
@@ -454,16 +522,23 @@ export function decidingRule(rules, url) {
 // Reads robots.txt at the top of the dir. Returns {rules, sitemaps} with
 // Googlebot's rules, or null when there is none or crawlers would not read it.
 function readRobots(dir, site, add) {
+  const path = join(dir, 'robots.txt')
   let text
-  try { text = readText(join(dir, 'robots.txt')) } catch (e) {
-    if (!/: ENOENT$/.test(e.message)) add('robots.txt', 0, 'error', 'files', e.message)
-    else if (site.pathname === '/') add('.', 0, 'warn', 'robots', 'no robots.txt, so no Sitemap: line points crawlers to the sitemap')
-    return null
+  let notUtf8 = false
+  try { text = readText(path) } catch (e) {
+    if (/: ENOENT$/.test(e.message)) {
+      if (site.pathname === '/') add('.', 0, 'warn', 'robots', 'no robots.txt, so no Sitemap: line points crawlers to the sitemap')
+      return null
+    }
+    if (!/ is not UTF-8 text$/.test(e.message)) { add('robots.txt', 0, 'error', 'files', e.message); return null }
+    try { text = new TextDecoder().decode(readFileSync(path)) } catch (e2) { add('robots.txt', 0, 'error', 'files', e2.message); return null }
+    notUtf8 = true
   }
   if (site.pathname !== '/') {
     add('robots.txt', 0, 'warn', 'robots', `robots.txt is served at ${site.href}robots.txt; crawlers read only ${site.origin}/robots.txt, so it is not checked`)
     return null
   }
+  if (notUtf8) add('robots.txt', 0, 'warn', 'robots', 'robots.txt is not UTF-8 (Google: it must be, and may ignore the characters that are not)')
   const bytes = Buffer.from(text)
   if (bytes.length > ROBOTS_MAX) {
     add('robots.txt', 0, 'warn', 'robots', `robots.txt is ${Math.ceil(bytes.length / 1024)} KiB; Google ignores everything after ${ROBOTS_MAX / 1024} KiB`)
@@ -536,6 +611,7 @@ function checkDuplicates(pages, strict, add) {
     for (const page of [...own.filter(strict), ...own.filter(p => !strict(p))]) {
       const other = first.get(page[field])
       if (!other) { first.set(page[field], page); continue }
+      if (pageKey(other.url) === pageKey(page.url)) continue   // two files, one URL
       add(page.file, page.lines[field], strict(page) ? 'error' : 'warn', 'duplicates', `the same ${field} as ${other.file} (Google: ${google})`)
     }
   }
@@ -570,15 +646,19 @@ export function checkSite(dir, site) {
 
   const robots = readRobots(dir, site, add)
   const starts = []
+  let offSite = 0
   for (const { url, line } of robots?.sitemaps ?? []) {
     if (!isAbsolute(url)) add('robots.txt', line, 'error', 'robots', `Sitemap: "${url}" is not an absolute http(s) URL (Google: a fully qualified URL)`)
-    else if (!onSite(url, site)) add('robots.txt', line, 'warn', 'robots', `Sitemap: ${url} is not on --site ${site.href}; not checked (seo-check fetches nothing)`)
+    else if (!onSite(url, site)) { offSite++; add('robots.txt', line, 'warn', 'robots', `Sitemap: ${url} is not on --site ${site.href}; not checked (seo-check fetches nothing)`) }
     else starts.push({ url: new URL(url).href, from: 'robots.txt', line })
   }
   for (const name of SITEMAP_FILES) starts.push({ url: new URL(name, site).href, optional: true })
-  const sitemaps = readSitemaps(dir, site, starts, pages, add)
-  if (!sitemaps) add('.', 0, 'warn', 'sitemap', `no sitemap (a robots.txt Sitemap: line, or ${SITEMAP_FILES.join(', ')}), so every page is checked strictly`)
-  else if (robots && !robots.sitemaps.length) add('robots.txt', 0, 'warn', 'robots', 'robots.txt has no Sitemap: line; Google finds a sitemap through one or through Search Console')
+  const { read, skipped } = readSitemaps(dir, site, starts, pages, add)
+  // Strict only by a sitemap seen whole: a skipped one may list any page.
+  const sitemaps = read > 0 && !skipped && !offSite
+  if (!read) add('.', 0, 'warn', 'sitemap', `no sitemap of pages (from a robots.txt Sitemap: line, or ${SITEMAP_FILES.join(', ')}), so every page is checked strictly`)
+  else if (!sitemaps) add('.', 0, 'warn', 'sitemap', 'a sitemap was not read, so every page is checked strictly')
+  if (read && robots && !robots.sitemaps.length) add('robots.txt', 0, 'warn', 'robots', 'robots.txt has no Sitemap: line; Google finds a sitemap through one or through Search Console')
   if (robots) checkBlocked(robots, pages, add)
 
   const strict = page => page.indexable && (!sitemaps || page.listed)

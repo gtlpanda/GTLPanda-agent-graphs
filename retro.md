@@ -591,3 +591,53 @@ non-breaking space counted as whitespace. The scanner now follows the HTML parse
 **Stats.** 21 tests (252 passed, 0 failed in the suite), 67 mutations, all caught (the scanner
 tests alone catch its 25). 2 validate.sh rules, both checked to fail when their text is removed.
 858 added lines in three PRs: 180, 358, and 320 (the last includes this entry).
+
+## 17. seo-check: sitemaps, robots.txt, duplicates, and app shells (2026-11-05)
+
+**What changed.** seo-check now reads the build the way a crawler finds it, as well as page by page.
+- **Sitemaps.** It reads robots.txt `Sitemap:` lines, plus `sitemap.xml`, `sitemap-index.xml`, or
+  `sitemap_index.xml`, and follows every index once.
+- **Strictness (user, 2A).** The sitemap decides which pages are strict. A page it leaves out gets its
+  errors as warnings, except JSON-LD's. With no sitemap, every page is strict, and the same holds
+  when a sitemap could not be read, since that one may list any page.
+- **robots.txt** is read as Google documents for Googlebot. Groups that name it are combined,
+  matching uses the product token, and the longest matching path wins, with Allow winning a tie.
+  `*` and a final `$` are supported. Paths are compared case-sensitively, percent-encoded. A rule
+  with no path is ignored, and anything after 500 KiB is ignored. Errors: blocking a listed URL,
+  and blocking every page (a staging build).
+- **Duplicates.** A title or description shared between pages is an error when both pages are
+  strict.
+- **App shells.** A page whose tags are missing and whose `<body>` is empty until a script runs gets
+  the single-page-app warning.
+
+Four new checks: `sitemap`, `robots`, `duplicates`, `spa`. Every rule was checked on 2026-11-05
+against Google's build-sitemap, large-sitemaps, block-indexing, robots_txt, title-link, and snippet
+docs, and against sitemaps.org. Neither source says whether an index may list another index, so
+nested indexes are followed and nothing is claimed. The user asked for one pass with no check-ins
+("Stop stopping"). The advisor caught the first plan revising answer 2A (a robots-blocked page made
+non-strict); the build follows 2A as answered.
+
+**Bugs caught.**
+- Mutation runs found 11 test gaps and one piece of dead code (isAppShell's `</head>` fallback,
+  which no input can reach), deleted.
+- The reviewer could not run commands, so I reproduced each of its findings before fixing. The
+  reviewer and the QA auditor together reported 7 distinct defects, and all 7 reproduced:
+  - HIGH: an index whose children were all gzipped or off-site counted as a sitemap, so every page
+    became non-strict. A page missing its title passed. Pages that only an unread sitemap listed
+    were demoted too.
+  - MEDIUM: a `..%2f` sitemap URL (from an index or a `Sitemap:` line) read files outside the build.
+    Reproduced by reading `/etc/hosts`.
+  - MEDIUM: two files serving one URL (`a.html`, `a/index.html`): only the first in sort order was
+    listed, so the verdict depended on file names. With no sitemap, the two were flagged as
+    duplicates of each other.
+  - LOW: a `*`-heavy robots rule backtracked (a 60-character path took over 60 seconds); an
+    unclosed `<url>` was quadratic (35.7 seconds for 200,000); `%c3%a9` never matched `%C3%A9`; a
+    Latin-1 byte in robots.txt was a hard FAIL (Google: it must be UTF-8 and may ignore the rest).
+- One regression in my own fix: the new tag stripper went quadratic once the stripped `<script>`
+  took the last `>` with it (7 seconds), caught by the new timing test.
+
+**Stats.** 36 seo-check tests (267 passed, 0 failed in the suite). On the final code, 175 of 177
+mutants are caught. The 2 missed are equivalent: noindex pages have no title fact and only JSON-LD
+findings, so the explicit `indexable` guards cannot be told apart. 1 new validate.sh rule, shown to
+fail when its phrase is removed. Four stacked PRs: 278, 266, 132, and 263 added lines (the review fixes, this entry
+included).

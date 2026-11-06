@@ -306,7 +306,7 @@ await test('checkSite checks each page, and a missing dir, an empty dir, or an u
       ['bin.html', 'files', '<dir>/bin.html is not a text file'],
       ['latin1.html', 'files', '<dir>/latin1.html is not UTF-8 text'],
       ['.', 'robots', 'no robots.txt, so no Sitemap: line points crawlers to the sitemap'],
-      ['.', 'sitemap', 'no sitemap (a robots.txt Sitemap: line, or sitemap.xml, sitemap-index.xml, sitemap_index.xml), so every page is checked strictly'],
+      ['.', 'sitemap', 'no sitemap of pages (from a robots.txt Sitemap: line, or sitemap.xml, sitemap-index.xml, sitemap_index.xml), so every page is checked strictly'],
     ])
     assert.match(checkSite(join(dir, 'gone'), SITE).findings[0].message, /cannot read .*gone: ENOENT/)
     assert.match(checkSite(join(dir, 'index.html'), SITE).findings[0].message, /cannot read .*index\.html: ENOTDIR/)
@@ -342,6 +342,8 @@ await test('parseSitemap reads <url> or <sitemap> entries with their lines, CDAT
   assert.deepEqual(parseSitemap(index), { root: 'sitemapindex', entries: [{ loc: 'https://shelf.example/s1.xml', line: 1 }], hints: 0 })
   assert.equal(parseSitemap('<!-- <urlset> --><html><body>404</body></html>').root, 'html')
   assert.equal(parseSitemap('').root, null)
+  assert.deepEqual(parseSitemap('<urlset><url><loc><![CDATA[https://shelf.example/<url>x]]></loc></url></urlset>').entries.map(e => e.loc), ['https://shelf.example/<url>x'], 'an entry ends at its </url>')
+  assert.deepEqual(parseSitemap('<urlset><url><loc>https://shelf.example/</loc></url><!-- <url><loc>https://shelf.example/b</loc></url>').entries.map(e => e.loc), ['https://shelf.example/'], 'an unclosed comment runs to the end')
 })
 const page = (title, extra = '') => PAGE.replace('Shelf - a reading list that remembers every book', title).replace('<head>', `<head>${extra}`)
 const urlset = (...locs) => `<urlset>\n${locs.map(l => `<url><loc>${l}</loc></url>`).join('\n')}\n</urlset>\n`
@@ -378,7 +380,7 @@ await test('a sitemap lists pages; each URL must be absolute, on --site, served,
   } finally { rmSync(dir, { recursive: true, force: true }) }
   const twice = site({ 'a.html': PAGE, 'a/index.html': PAGE, 'sitemap.xml': urlset('https://shelf.example/a') })
   try {
-    assert.deepEqual(checkSite(twice, SITE).pages.map(p => [p.file, p.listed]), [['a.html', true], ['a/index.html', false]], 'the first file that serves a URL is the one listed')
+    assert.deepEqual(checkSite(twice, SITE).pages.map(p => [p.file, p.listed]), [['a.html', true], ['a/index.html', true]], 'every file that serves a listed URL is listed')
   } finally { rmSync(twice, { recursive: true, force: true }) }
   const big = site({ 'index.html': PAGE, 'sitemap.xml': urlset(...Array.from({ length: 50001 }, () => 'https://shelf.example/')) })
   try {
@@ -428,10 +430,13 @@ await test('sitemap indexes are followed, once each; a bad or missing sitemap is
       ['maps/pages.xml', 3, 'warn', 'sitemap', 'https://shelf.example/a.html is outside https://shelf.example/maps/ (Google: a sitemap affects only descendants of its parent directory)'],
       ['sitemap-index.xml', 4, 'error', 'sitemap', 'no file in the build serves the sitemap https://shelf.example/maps/gone.xml'],
       ['sitemap-index.xml', 5, 'warn', 'sitemap', 'https://shelf.example/maps/pages.xml.gz is gzipped; seo-check does not read it'],
-      ['sitemap-index.xml', 6, 'error', 'sitemap', 'https://shelf.example/maps/%zz.xml has a malformed %-escape'],
+      ['sitemap-index.xml', 6, 'error', 'sitemap', 'https://shelf.example/maps/%zz.xml is not a file in the build'],
       ['sitemap-index.xml', 10, 'warn', 'sitemap', 'https://cdn.example/s.xml is not on --site https://shelf.example/; not checked (seo-check fetches nothing)'],
+      ['.', 0, 'warn', 'sitemap', 'a sitemap was not read, so every page is checked strictly'],
     ])
-    assert.ok(checkSite(dir, SITE).pages.every(p => p.listed), 'pages listed through an index count as listed')
+    assert.ok(checkSite(dir, SITE).pages.every(p => p.listed === null), 'a sitemap left unread may list any page, so none is unlisted')
+    writeFileSync(join(dir, 'sitemap-index.xml'), '<sitemapindex><sitemap><loc>https://shelf.example/maps/pages.xml</loc></sitemap></sitemapindex>')
+    assert.ok(checkSite(dir, SITE).pages.every(p => p.listed === true), 'pages listed through an index count as listed')
   } finally { rmSync(dir, { recursive: true, force: true }) }
   const docs = site({ 'index.html': PAGE.replaceAll('https://shelf.example/', 'https://shelf.example/docs/'), 'sitemap.xml': urlset('https://shelf.example/docs/') })
   try { assert.deepEqual(report(docs, parseSite('https://shelf.example/docs')), [], 'under a --site path, the sitemap is at <path>/sitemap.xml') } finally { rmSync(docs, { recursive: true, force: true }) }
@@ -552,6 +557,8 @@ await test('robots.txt must not block a listed URL or every page; its Sitemap: l
     assert.deepEqual(checkSite(docs, parseSite('https://shelf.example/docs')).findings.filter(f => f.check === 'robots').map(f => [f.file, f.message]), [
       ['robots.txt', 'robots.txt is served at https://shelf.example/docs/robots.txt; crawlers read only https://shelf.example/robots.txt, so it is not checked'],
     ], 'under a --site path, robots.txt is not at the root')
+    writeFileSync(join(docs, 'robots.txt'), Buffer.from([0x23, 0xe9, 0x0a]))
+    assert.deepEqual(checkSite(docs, parseSite('https://shelf.example/docs')).findings.filter(f => f.check === 'robots').map(f => f.message.slice(0, 26)), ['robots.txt is served at ht'], 'not read there even when it is not UTF-8')
     rmSync(join(docs, 'robots.txt'))
     assert.deepEqual(checkSite(docs, parseSite('https://shelf.example/docs')).findings.filter(f => f.check === 'robots'), [], 'nor is a missing one: the root is out of sight')
   } finally { rmSync(docs, { recursive: true, force: true }) }
@@ -600,6 +607,7 @@ await test('a page whose tags are missing and whose <body> is empty until a scri
     `${head.replace('</head>', '')}<div id="app"></div>`,
     `${head}<div id="app"></div><style>p { color: red }</style><template><p>Later</p></template>`,
     `${head}<body><!-- a > b --><div id="root"></div></body></html>`,
+    `${head}<body><div id="root"></div><script src="/late.js"`,
     ...['<title>Shelf - a reading list that remembers every book</title>', /<meta name="description"[^>]*>/].map(tag =>
       PAGE.replace(tag, '').replace('<body><h1>Shelf</h1></body>', '<body><div id="root"></div><script src="/main.js"></script></body>')),
   ]) assert.ok(said(shell).includes(SPA), shell)
@@ -611,6 +619,75 @@ await test('a page whose tags are missing and whose <body> is empty until a scri
     '<html><head><title>T</title></head><body><!-- <script src="/main.js"></script> --><div id="root"></div></body></html>',
     PAGE.replace('<body><h1>Shelf</h1></body>', '<body><div id="root"></div><script src="/main.js"></script></body>'),
   ]) assert.ok(!said(page).some(f => f.startsWith('warn spa')), page)
+})
+
+console.log('== seo-check: review regressions')
+await test('a sitemap URL never reads a file outside the build: "..%2f", a symlink, or a directory', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'seo-check-outside-'))
+  const dir = site({ 'index.html': PAGE, 'robots.txt': `User-agent: *\nAllow: /\nSitemap: https://shelf.example/..%2f${encodeURIComponent(outside.split('/').pop())}%2fsecret.xml\n` })
+  try {
+    writeFileSync(join(outside, 'secret.xml'), urlset('https://shelf.example/zzz'))
+    symlinkSync(join(outside, 'secret.xml'), join(dir, 'linked.xml'))
+    mkdirSync(join(dir, 'maps'))
+    writeFileSync(join(dir, 'sitemap-index.xml'), urlset().replace(/urlset/g, 'sitemapindex').replace('\n\n', '\n' + ['/linked.xml', '/maps/', '/maps'].map(p => `<sitemap><loc>https://shelf.example${p}</loc></sitemap>`).join('\n') + '\n'))
+    const said = checkSite(dir, SITE).findings.map(f => `${f.file}:${f.line} ${f.message}`)
+    assert.ok(!said.some(m => m.includes('zzz') || m.includes('secret.xml:')), said.join('\n'))
+    assert.ok(said.some(m => /^robots\.txt:3 https:\/\/shelf\.example\/\.\.%2f.*secret\.xml is not a file in the build$/.test(m)), said.join('\n'))
+    for (const [n, p] of [[2, 'linked.xml'], [3, 'maps/'], [4, 'maps']]) assert.ok(said.includes(`sitemap-index.xml:${n} https://shelf.example/${p} is not a file in the build`), `${p}: ${said.join('\n')}`)
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }) }
+})
+await test('any sitemap left unread (gzipped, off-site, missing) keeps every page strict', async () => {
+  const broken = '<html><head></head><body>x</body></html>'
+  for (const [extra, label] of [
+    [{ 'sitemap-index.xml': '<sitemapindex><sitemap><loc>https://shelf.example/s.xml.gz</loc></sitemap></sitemapindex>' }, 'an index of only a gzipped sitemap'],
+    [{ 'sitemap-index.xml': '<sitemapindex><sitemap><loc>https://cdn.example/s.xml</loc></sitemap><sitemap><loc>https://shelf.example/s.xml</loc></sitemap></sitemapindex>', 's.xml': urlset('https://shelf.example/') }, 'an off-site child next to a real one'],
+    [{ 'robots.txt': 'User-agent: *\nAllow: /\nSitemap: https://cdn.example/s.xml\n', 'sitemap.xml': urlset('https://shelf.example/') }, 'an off-site robots Sitemap: line'],
+    [{ 'sitemap-index.xml': '<sitemapindex>\n</sitemapindex>' }, 'an empty index, which lists no page'],
+    ...['/s.xml.gz', '/', '/gone.xml', '/index.html'].map(child => [{
+      'sitemap-index.xml': `<sitemapindex><sitemap><loc>https://shelf.example/s.xml</loc></sitemap><sitemap><loc>https://shelf.example${child}</loc></sitemap></sitemapindex>`,
+      's.xml': urlset('https://shelf.example/'),
+    }, `a real sitemap next to ${child}`]),
+  ]) {
+    const dir = site({ 'index.html': PAGE, 'broken.html': broken, ...extra })
+    try {
+      const got = checkSite(dir, SITE)
+      assert.ok(got.findings.some(f => f.file === 'broken.html' && f.level === 'error' && f.message === 'no <title> in <head>'), label)
+      assert.ok(got.pages.every(p => p.listed === null), label)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+})
+await test('two files serving one URL are one page: both listed, never each other\'s duplicate', async () => {
+  const broken = '<html><head></head><body>x</body></html>'
+  for (const [a, b] of [[PAGE, broken], [broken, PAGE]]) {
+    const dir = site({ 'a.html': a, 'a/index.html': b, 'sitemap.xml': urlset('https://shelf.example/a') })
+    try { assert.ok(checkSite(dir, SITE).findings.some(f => f.level === 'error' && f.message === 'no <title> in <head>'), 'the broken file fails, in either order') } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+  const twins = site({ 'a.html': own('/a'), 'a/index.html': own('/a') })
+  try { assert.deepEqual(checkSite(twins, SITE).findings.filter(f => f.check === 'duplicates'), []) } finally { rmSync(twins, { recursive: true, force: true }) }
+})
+await test('robots.txt that is not UTF-8 is still read, with a warning (Google: it must be UTF-8)', async () => {
+  const dir = site({ 'index.html': PAGE, 'sitemap.xml': SITEMAP, 'robots.txt': '' })
+  try {
+    writeFileSync(join(dir, 'robots.txt'), Buffer.concat([Buffer.from('User-agent: *\n# caf'), Buffer.from([0xe9]), Buffer.from('\nDisallow: /\nSitemap: https://shelf.example/sitemap.xml\n')]))
+    assert.deepEqual(checkSite(dir, SITE).findings.map(f => [f.file, f.line, f.level, f.message]), [
+      ['robots.txt', 0, 'warn', 'robots.txt is not UTF-8 (Google: it must be, and may ignore the characters that are not)'],
+      ['robots.txt', 0, 'error', 'robots.txt blocks every indexable page from Googlebot (a staging build?)'],
+    ])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+await test('hostile input stays fast: "*"-heavy rules, unclosed elements, lowercase escapes', async () => {
+  const timed = (label, fn) => { const t = performance.now(); fn(); const ms = performance.now() - t; assert.ok(ms < 1000, `${label}: ${Math.round(ms)} ms`) }
+  timed('a rule of many stars', () => decidingRule([{ allow: false, path: '/*a*a*a*a*a*a*a*a*a*b', line: 1 }], `https://x.example/${'a'.repeat(2000)}`))
+  timed('unclosed <url>', () => parseSitemap(`<urlset>${'<url>'.repeat(200000)}`))
+  timed('unclosed comments', () => parseSitemap(`<urlset>${'<!--'.repeat(200000)}`))
+  timed('unclosed <script>', () => checkPage(`<head></head><body>${'<script>'.repeat(50000)}`, 'https://shelf.example/', SITE))
+  timed('unclosed <body', () => checkPage(`<head></head>${'<body '.repeat(50000)}<script>`, 'https://shelf.example/', SITE))
+  assert.equal(decide('User-agent: *\nDisallow: /caf%c3%a9', '/caf%C3%A9'), 'disallow /caf%c3%a9', 'escapes compare in any case')
+  assert.equal(decide('User-agent: *\nDisallow: /caf%C3%A9', '/caf%c3%a9'), 'disallow /caf%C3%A9')
+  assert.equal(decide('User-agent: *\nDisallow: /a**b$', '/a/x/b'), 'disallow /a**b$')
+  assert.equal(decide('User-agent: *\nDisallow: /a*b$', '/a/x/bc'), 'none')
+  assert.equal(decide('User-agent: *\nDisallow: /*aab', '/aaab'), 'disallow /*aab', 'a partial match after "*" retries one character on')
+  assert.equal(decide('User-agent: *\nDisallow: /*ab*b', '/abx'), 'none', 'a retry never goes back before the last "*"')
 })
 
 console.log('== seo-check: the docs and the command')
