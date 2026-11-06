@@ -3,9 +3,12 @@
 // slice per fresh headless `claude -p "/dev --slice ..."` session, landing each on
 // integration/<app> only after its own checks pass.
 //
-//   node driver.mjs run    --repo <path> --app <slug>   build until done, a brake, or a stop
+//   node driver.mjs run    --repo <path> --app <slug> [--no-pr]   build until done, a brake, or a stop;
+//                          when every slice has landed: a final QA pass, then a push and one PR
 //   node driver.mjs status --repo <path> --app <slug>   print status.json
 //   node driver.mjs stop   --repo <path> --app <slug>   stop a running driver (and its session)
+//   node driver.mjs resume --repo <path> --app <slug>   after a brake: the brake counters start over
+//   node driver.mjs unblock --repo <path> --app <slug> --slice S<n> --answer <text> [--answer <text>]
 //
 // State: <git dir>/harness-build/<app>/ (ledger.json, status.json, driver.pid,
 // logs/), never committed. The next-step rules and the brakes are backlog.mjs's.
@@ -16,13 +19,14 @@
 //   6 preflight failed   7 the API stayed overloaded (run again later)
 //   8 a usage limit resets too far away (run again later)
 //   9 billing or spend limit   10 auth problem   11 another driver runs for this app
-//   12 the repo is in a state the driver will not touch   130 stopped
+//   12 the repo is in a state the driver will not touch   13 the push or the PR failed   130 stopped
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  validateBacklog, ledgerPath, readLedger, writeLedger, nextSlice, frozenFiles, recordOutcome, brake, sliceState,
+  validateBacklog, ledgerPath, readLedger, writeLedger, nextSlice, frozenFiles, recordOutcome, brake, sliceState, resume, unblock,
 } from '../../../../../core/skills/backlog/backlog.mjs'
+import { defaultBase, finalQaPrompt, qaReport, prBody, pushAndOpenPr } from './finish.mjs'
 import { parseResetTime, planLimitWait } from './limits.mjs'
 import { buildEnv, git, run } from './proc.mjs'
 import { sessionSettings, sliceArgs, runClaude, sessionVerdict, probeUntilAvailable, stopSessions, writeJson } from './session.mjs'
@@ -30,7 +34,7 @@ import { sliceChecks, devReport, outcomeOf, TEST_FILE } from './checks.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME || '', '.claude')
-export const EXIT = { done: 0, brake: 3, preflight: 6, apiDown: 7, limitTooFar: 8, billing: 9, auth: 10, locked: 11, gitState: 12, stopped: 130 }
+export const EXIT = { done: 0, brake: 3, preflight: 6, apiDown: 7, limitTooFar: 8, billing: 9, auth: 10, locked: 11, gitState: 12, pr: 13, stopped: 130 }
 
 // Everything a test may change comes from the environment, with these defaults.
 function settingsFromEnv(env = process.env) {
@@ -47,6 +51,7 @@ function settingsFromEnv(env = process.env) {
     transientWaitMinutes: num('HARNESS_BUILD_TRANSIENT_WAIT_MINUTES', 10),
     maxTransientRetries: 3,
     notify: env.PANDASTACK_NOTIFY || '',
+    gh: env.HARNESS_BUILD_GH || 'gh',
   }
 }
 
@@ -100,7 +105,7 @@ function reconcile(repo, integration, backlog, ledger, log) {
   return ledger
 }
 
-export async function runDriver({ repo: given, app }, cfg = settingsFromEnv()) {
+export async function runDriver({ repo: given, app, noPr = false }, cfg = settingsFromEnv()) {
   // One real path: the guard compares file paths against it.
   const repo = realpathSync(resolve(given))
   const integration = `integration/${app}`
@@ -110,7 +115,7 @@ export async function runDriver({ repo: given, app }, cfg = settingsFromEnv()) {
   const files = {
     ledger: join(state, 'ledger.json'), status: join(state, 'status.json'), pid: join(state, 'driver.pid'),
     settings: join(state, 'session-settings.json'), guard: join(state, 'guard.json'), stopFailure: join(state, 'stop-failure.json'), session: join(state, 'session.pid'),
-    driverLog: join(logs, 'driver.log'), probe: join(logs, 'probe.jsonl'),
+    driverLog: join(logs, 'driver.log'), probe: join(logs, 'probe.jsonl'), finalQa: join(state, 'final-qa.json'),
     devLedger: join(git(repo, ['rev-parse', '--path-format=absolute', '--git-path', 'harness-dev']).stdout.trim(), 'ledger.json'),
   }
   const log = message => {
@@ -130,9 +135,9 @@ export async function runDriver({ repo: given, app }, cfg = settingsFromEnv()) {
     const t = setTimeout(r, Math.min(ms, cfg.maxSleepMs))
     wake = () => { clearTimeout(t); r() }
   })
-  const end = (code, state_, message) => {
+  const end = (code, state_, message, extra = {}) => {
     log(message)
-    status({ state: state_, exitCode: code, message })
+    status({ state: state_, exitCode: code, message, ...extra })
     notify(message)
     return code
   }
@@ -154,15 +159,77 @@ export async function runDriver({ repo: given, app }, cfg = settingsFromEnv()) {
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
 
+  // A fresh branch from integration for an attempt. One left by a driver that
+  // died mid-attempt is kept first, never reset. Returns the attempt's time
+  // stamp, or null when git refused.
+  const freshBranch = (id, branch) => {
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
+    if (git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]).ok && git(repo, ['rev-list', '--count', `${integration}..${branch}`]).stdout.trim() !== '0') {
+      git(repo, ['branch', '-q', '-f', `attempt/${id}-${stamp}-recovered`, branch])
+      log(`${id}: kept the commits a stopped driver left on ${branch} as attempt/${id}-${stamp}-recovered`)
+    }
+    return git(repo, ['checkout', '-q', '-B', branch, integration]).ok ? stamp : null
+  }
+
+  // Every slice landed: one QA pass over the whole branch, then the push and the PR.
+  // Running again after a failure here repeats only this part.
+  let backlog
+  let ledger
+  const finishRun = async () => {
+    const base = defaultBase(repo)
+    const branch = 'slice/final'
+    log(`every slice landed on ${integration}; final QA over the whole branch against ${base}`)
+    const stamp = freshBranch('final', branch)
+    if (!stamp) return end(EXIT.gitState, 'failed', `could not create ${branch} from ${integration}`)
+    rmSync(files.finalQa, { force: true })
+    rmSync(files.stopFailure, { force: true })
+    writeJson(files.guard, { repo, frozen: frozenFiles(ledger) })
+    const attempt = `final-${stamp}`
+    const logFile = join(logs, `${attempt}.jsonl`)
+    status({ state: 'running', slice: 'final', message: 'final QA over the whole branch', log: logFile })
+    const code = await runClaude({
+      bin: cfg.bin, repo, logFile, timeoutMs: cfg.sessionTimeoutMs, pidFile: files.session,
+      args: sliceArgs({ prompt: finalQaPrompt({ repo, base, reportFile: files.finalQa, configDir: CONFIG_DIR }), model: cfg.model, settingsFile: files.settings }),
+      env: buildEnv({ HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
+    })
+    if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during the final QA; every slice stays landed`) }
+    const report = qaReport(files.finalQa)
+    if (!report) {
+      setAside(repo, branch, integration, attempt, log)
+      const verdict = sessionVerdict(logFile, files.stopFailure)
+      const byKind = { billing: EXIT.billing, auth: EXIT.auth, usage_limit: EXIT.limitTooFar, transient: EXIT.apiDown }
+      return end(byKind[verdict.kind] || EXIT.brake, verdict.kind === 'normal' ? 'braked' : 'paused', `the final QA session wrote no report (exit ${code}${verdict.message ? `, ${verdict.message}` : ''}); every slice stays landed: run /build-app resume to retry it`)
+    }
+    const checks = sliceChecks({ repo, integration, branch, sliceId: 'final', frozen: frozenFiles(ledger), verifyCommand: cfg.verifyCommand, allowEmpty: true })
+    if (report.status !== 'done' || checks.problems.length) {
+      setAside(repo, branch, integration, attempt, log)
+      return end(EXIT.brake, 'braked', `the final QA did not pass (${report.status}${report.reason ? `: ${report.reason}` : ''}${checks.problems.length ? `; the driver's checks: ${checks.problems.join('; ')}` : ''}); every slice stays landed`)
+    }
+    if (!(git(repo, ['checkout', '-q', integration]).ok && git(repo, ['merge', '-q', '--ff-only', branch]).ok)) return end(EXIT.gitState, 'failed', `the final QA fixes could not be fast-forwarded onto ${integration}`)
+    git(repo, ['branch', '-q', '-D', branch])
+    const fixes = git(repo, ['log', '--format=%s', `${base}..${integration}`]).stdout.split('\n').filter(s => s.startsWith('final: ')).length
+    const qaLine = `The QA graph ran once over the whole branch against \`${base}\`: ${report.reason || 'done'}${fixes ? ` (${fixes} fix commit${fixes > 1 ? 's' : ''})` : ' (nothing to fix)'}.`
+    log(qaLine)
+    if (noPr) return end(EXIT.done, 'done', `every slice landed on ${integration} and the final QA passed; --no-pr, so nothing was pushed`)
+    let pr
+    try {
+      pr = pushAndOpenPr({ repo, integration, base, gh: cfg.gh, title: `${app}: built from the backlog`, body: prBody(backlog, ledger, qaLine) })
+    } catch (e) {
+      return end(EXIT.pr, 'failed', `every slice landed and the final QA passed, but ${e.message}; push ${integration} and open the PR by hand, or run /build-app resume`)
+    }
+    return end(EXIT.done, 'done', `every slice landed on ${integration}, the final QA passed, and the PR is open: ${pr}`, { pr })
+  }
+
   try {
     // ----- preflight -----
     if (!git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${integration}`]).ok) return end(EXIT.preflight, 'failed', `preflight: no branch ${integration}; approve the backlog with /blueprint first`)
-    const { backlog, problems } = readBacklogAt(repo, integration)
+    const read = readBacklogAt(repo, integration)
+    backlog = read.backlog
+    const { problems } = read
     if (problems.length) return end(EXIT.preflight, 'failed', `preflight: the backlog on ${integration} does not pass its check: ${problems.join('; ')}`)
     if (backlog.app !== app) return end(EXIT.preflight, 'failed', `preflight: the backlog on ${integration} is for ${JSON.stringify(backlog.app)}, not ${app}`)
     if (git(repo, ['status', '--porcelain']).stdout.trim()) return end(EXIT.preflight, 'failed', 'preflight: the working tree has uncommitted changes; commit or stash them first')
     if (!run('bash', ['-c', `command -v ${JSON.stringify(cfg.bin)}`]).ok) return end(EXIT.preflight, 'failed', `preflight: ${cfg.bin} not found`)
-    let ledger
     try { ledger = readLedger(files.ledger) } catch (e) { return end(EXIT.preflight, 'failed', `preflight: ${e.message}`) }
     const reconciled = reconcile(repo, integration, backlog, ledger, log)
     if (reconciled !== ledger) { ledger = reconciled; writeLedger(files.ledger, ledger) }
@@ -176,17 +243,13 @@ export async function runDriver({ repo: given, app }, cfg = settingsFromEnv()) {
       const why = brake(backlog, ledger)
       if (why) return end(EXIT.brake, 'braked', `brake: ${why}`)
       const slice = nextSlice(backlog, ledger)
-      if (!slice) return end(EXIT.done, 'done', `every slice landed on ${integration}`)
+      if (!slice) return finishRun()
 
       // A fresh branch from integration for every attempt. One left by a driver
       // that died mid-attempt is kept first, never reset.
       const branch = `slice/${slice.id}`
-      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
-      if (git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]).ok && git(repo, ['rev-list', '--count', `${integration}..${branch}`]).stdout.trim() !== '0') {
-        git(repo, ['branch', '-q', '-f', `attempt/${slice.id}-${stamp}-recovered`, branch])
-        log(`${slice.id}: kept the commits a stopped driver left on ${branch} as attempt/${slice.id}-${stamp}-recovered`)
-      }
-      if (!git(repo, ['checkout', '-q', '-B', branch, integration]).ok) return end(EXIT.gitState, 'failed', `could not create ${branch} from ${integration}`)
+      const stamp = freshBranch(slice.id, branch)
+      if (!stamp) return end(EXIT.gitState, 'failed', `could not create ${branch} from ${integration}`)
       rmSync(files.devLedger, { force: true })
       rmSync(files.stopFailure, { force: true })
       writeJson(files.guard, { repo, frozen: frozenFiles(ledger) })
@@ -288,24 +351,55 @@ function setAside(repo, branch, integration, attempt, log) {
 
 function parseArgs(argv) {
   const [cmd, ...rest] = argv
-  const opts = {}
-  for (let i = 0; i < rest.length; i += 2) {
-    if (!['--repo', '--app'].includes(rest[i]) || rest[i + 1] === undefined) return null
-    opts[rest[i].slice(2)] = rest[i + 1]
+  const opts = { answers: [], noPr: false }
+  for (let i = 0; i < rest.length; i += 1) {
+    const flag = rest[i]
+    if (flag === '--no-pr') { opts.noPr = true; continue }
+    if (!['--repo', '--app', '--slice', '--answer'].includes(flag) || rest[i + 1] === undefined) return null
+    if (flag === '--answer') opts.answers.push(rest[i + 1])
+    else opts[flag.slice(2)] = rest[i + 1]
+    i += 1
   }
-  if (!['run', 'status', 'stop'].includes(cmd) || !opts.repo || !opts.app || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(opts.app)) return null
-  return { cmd, repo: opts.repo, app: opts.app }
+  if (!['run', 'status', 'stop', 'resume', 'unblock'].includes(cmd) || !opts.repo || !opts.app || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(opts.app)) return null
+  if (opts.noPr && cmd !== 'run') return null
+  if ((cmd === 'unblock') !== (opts.slice !== undefined || opts.answers.length > 0)) return null
+  if (cmd === 'unblock' && (!/^S[1-9]\d*$/.test(opts.slice || '') || !opts.answers.length)) return null
+  return { cmd, repo: opts.repo, app: opts.app, noPr: opts.noPr, slice: opts.slice, answers: opts.answers }
+}
+
+// resume and unblock change the ledger, so the driver must not be running.
+function changeLedger(state, change) {
+  if (isOurs(readPid(join(state, 'driver.pid')), 'driver.mjs')) { console.error('driver: the driver is running; stop it first'); return EXIT.locked }
+  const file = join(state, 'ledger.json')
+  try {
+    const next = change(readLedger(file))
+    writeLedger(file, next)
+    return 0
+  } catch (e) {
+    console.error(`driver: ${e.message}`)
+    return 1
+  }
 }
 
 export async function main(argv) {
   const a = parseArgs(argv)
   if (!a) {
-    console.error('usage: driver.mjs run|status|stop --repo <path> --app <slug>')
+    console.error('usage: driver.mjs run|status|stop|resume --repo <path> --app <slug> [--no-pr: run only] | unblock --repo <path> --app <slug> --slice S<n> --answer <text>...')
     return 2
   }
   let state
   try { state = stateDirOf(a.repo, a.app) } catch (e) { console.error(`driver: ${e.message}`); return EXIT.preflight }
   if (a.cmd === 'run') return runDriver(a)
+  if (a.cmd === 'resume') {
+    const code = changeLedger(state, resume)
+    if (!code) console.log(`resume: the brake counters for ${a.app} start over; blocked slices stay blocked until unblocked`)
+    return code
+  }
+  if (a.cmd === 'unblock') {
+    const code = changeLedger(state, l => unblock(l, a.slice, a.answers))
+    if (!code) console.log(`unblock: ${a.slice} gets a fresh plan with the answers; run the driver to build it`)
+    return code
+  }
   if (a.cmd === 'status') {
     const file = join(state, 'status.json')
     console.log(existsSync(file) ? readFileSync(file, 'utf8').trim() : JSON.stringify({ app: a.app, state: 'never run' }))

@@ -36,10 +36,10 @@
 | build | [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
 | build | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
 | build | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
-| build | [`graphs/build/`](graphs/build/README.md) | `/build-app` (skill not built yet; the driver runs as `driver.mjs run --repo <path> --app <slug>`) | the driver: one fresh headless `/dev --slice` session per backlog slice, its own checks (commit prefix, clean tree, frozen tests, its own verify), fast-forward onto `integration/<app>`, usage-limit waits, the backlog brakes | tested with a fake `claude` |
+| build | [`graphs/build/`](graphs/build/README.md) | `/build-app` | the driver, detached: one fresh headless `/dev --slice` session per backlog slice, its own checks (commit prefix, clean tree, frozen tests, its own verify), fast-forward onto `integration/<app>`, usage-limit waits, the backlog brakes; then one QA pass over the whole branch, the push, and one PR for you | tested with a fake `claude`; one real slice via `scripts/smoke-build.sh` |
 | marketing | [`graphs/seo/`](graphs/seo/README.md) | `seo-check.mjs check <dir> --site <url>` | so far only the check: a built site's title, description, canonical, Open Graph, and JSON-LD tags, duplicates across pages, the sitemaps (which decide the strict pages), and robots.txt, `SEO-CHECK: PASS\|FAIL`; the audit graph not built yet | check tested offline |
 
-## Where it's going: the build-app loop
+## The build-app loop
 
 The graphs above are the parts of one loop that builds an app or a feature end
 to end. You describe the idea and answer one interview. You approve the design
@@ -69,8 +69,8 @@ Built so far: `/blueprint` run 1 (interview), run 2a (design behind the
 advisor gate), and run 3 (the backlog behind the same gate, and your one
 approval), plus `/dev` (with a slice mode: one backlog slice, unattended, on
 `integration/<app>`), `/loop`, `/release-pr`, and the backlog format and its
-next-step rules (`backlog.mjs`), and the `/build-app` driver. Next, in order:
-- the `/build-app` skill around the driver (start, status, stop, resume, the final PR);
+next-step rules (`backlog.mjs`), and `/build-app` (the driver, the final QA pass, the PR).
+Next, in order:
 - research and spikes before the design;
 - a live end-to-end build of a toy reading-list app.
 

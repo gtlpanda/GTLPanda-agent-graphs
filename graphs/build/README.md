@@ -6,9 +6,12 @@ in a fresh headless `claude -p "/dev --slice S<n> --base integration/<app> --una
 session. It lands a slice on `integration/<app>` only after its own checks pass,
 and stops on the brakes in `core/skills/backlog`.
 
-Status: **the driver** is tested against a fake `claude` over throwaway git repos.
-It has not had a live run yet. The `/build-app` skill (start, status, stop,
-resume, and the final PR) is planned, not built.
+Entry point: the `/build-app` skill (start, status, stop, resume, unblock),
+which launches the driver detached and reads its state.
+
+Status: **the driver and the skill** are tested against a fake `claude` and a
+fake `gh` over throwaway git repos. `scripts/smoke-build.sh` runs one real
+slice (opt-in, never in `scripts/test.sh`).
 
 ## Graph
 
@@ -19,7 +22,12 @@ and the brakes are `backlog.mjs`'s.
 preflight (integration/<app> exists, its docs/backlog.json passes, the app matches, the tree is clean, claude is found,
            one driver per app, no session left running by a killed driver; a slice already on integration is recorded as landed)
 loop: brake? --> stop (exit 3)
-      nextSlice --none--> done (exit 0)
+      nextSlice --none--> finish:
+          slice/final from integration; claude -p (the QA graph, harness-repair, once over the whole
+          branch against the default branch; its fixes committed as "final: QA fixes")
+          --QA done + the same checks (no commits is fine)--> fast-forward, then push integration/<app>
+            and open one PR to the default branch (reused if one is open; skipped with --no-pr) (exit 0)
+          --anything else--> brake (exit 3), every slice stays landed; a rerun repeats only the finish
       slice/S<n> fresh from integration/<app>
       claude -p "/dev --slice S<n> --base integration/<app> --unattended"
         --usage limit--> wait for the reset (or probe), retry the same slice, not counted
@@ -51,7 +59,10 @@ loop: brake? --> stop (exit 3)
 
 ## Command line
 
-`node driver.mjs run|status|stop --repo <path> --app <slug>`. State lives in
+`node driver.mjs run|status|stop|resume --repo <path> --app <slug>` (`--no-pr`: run
+only), and `unblock --repo <path> --app <slug> --slice S<n> --answer <text>...`.
+`resume` starts the brake counters over; `unblock` gives a blocked slice the
+answers and a fresh start; both refuse while a driver runs. State lives in
 `$(git rev-parse --git-path harness-build)/<app>/`: `ledger.json`, `status.json`,
 `driver.pid`, and `logs/` (`driver.log` and one `S<n>-<time>.jsonl` per session).
 None of it is committed. `PANDASTACK_NOTIFY`, when set, is a command that gets
@@ -63,17 +74,21 @@ waited on.
 Exit codes: 0 every slice landed; 3 a brake (the reason is in `status.json`);
 6 preflight failed; 7 the API stayed overloaded; 8 a usage limit resets past the 26 h wait cap (run again
 after it); 9 billing or spend limit; 10 auth; 11 another driver runs for this
-app; 12 a git state the driver will not touch; 130 stopped.
+app; 12 a git state the driver will not touch; 13 the push or the PR failed;
+130 stopped.
 
 ## Files
 
-- `skills/build-app/driver/driver.mjs`: the loop, preflight, landing, and the CLI.
+- `skills/build-app/SKILL.md`: the `/build-app` skill.
+- `skills/build-app/driver/driver.mjs`: the loop, preflight, landing, the finish, and the CLI.
+- `skills/build-app/driver/finish.mjs`: the final QA prompt, the PR body, the push and the PR.
 - `skills/build-app/driver/checks.mjs`: the independent checks and the outcome.
 - `skills/build-app/driver/session.mjs`: settings, starting a session, reading its result, the probe.
 - `skills/build-app/driver/limits.mjs`: usage-limit classification and reset times, ported verbatim.
 - `skills/build-app/driver/proc.mjs`: the session env and process helpers.
 - `skills/build-app/driver/hooks/`: `guard.mjs` with `guard-rules.mjs`, and `stop-failure.mjs`.
-- `tests/`: `driver.test.mjs` (end to end, fake `claude` in `fixtures/`), `guard.test.mjs`, `limits.test.mjs`.
+- `tests/`: `driver.test.mjs` (end to end, a fake `claude` and `gh` in `fixtures/`), `guard.test.mjs`, `limits.test.mjs`.
+- `../../scripts/smoke-build.sh`: one real slice on a throwaway repo, with its cost and models.
 
 ## Credits
 

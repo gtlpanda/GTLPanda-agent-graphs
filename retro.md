@@ -820,3 +820,25 @@ PR review (#23; 1 HIGH, 8 MEDIUM, 1 LOW, each reproduced by the reviewer, all fi
 
 **Stats.** 43 new tests (23 end-to-end driver runs, 9 guard and session, 11 ported limits); 378 workflow
 tests passed, 0 failed. 37 mutations, all caught after the fixes.
+
+## 22. /build-app: the skill, the finish, and the smoke run (2026-11-05)
+
+**What changed.** `graphs/build/skills/build-app/SKILL.md` is `/build-app`: `start` (the default)
+preflights (Node 20.11+, a clean tree, the backlog on `integration/<app>` passes, a remote and `gh`
+login unless `--no-pr`, owed preflight items asked once), then launches the driver detached
+(`setsid nohup`) so it outlives the session; `status`, `stop`, `resume`, and `unblock S<n> <answer>`
+read and steer it. The driver gains the finish: once every slice has landed, one headless session
+runs the QA graph (`harness-repair`) over the whole branch against the default branch, commits its
+fixes as `final: QA fixes`, and reports through a file; the driver applies the same checks (no
+commits is fine), fast-forwards, pushes `integration/<app>` itself (sessions never push), and opens
+one PR to the default branch, or reuses an open one. A final QA that fails brakes with every slice
+still landed, and a rerun repeats only the finish. `driver.mjs resume` and `unblock` change the
+ledger only while no driver runs. `scripts/smoke-build.sh` builds one real slice on a throwaway repo
+with `--no-pr` and prints its cost and the models it used; it is opt-in and never in `scripts/test.sh`.
+
+**Bugs caught.** Tests: the first finish tests reused one bare remote for two repos, so the second
+push was rejected (a test mistake, which then became the test for a rejected push). Mutation run:
+1 of 10 survived (a failed push was untested), closed with that test.
+
+**Stats.** 15 new tests (386 workflow tests passed, 0 failed), 10 mutations, all caught. 2 validate.sh
+rules.
