@@ -878,8 +878,9 @@ have died at 10 minutes. The driver now sets the ceiling to 0 in each session's 
 own 6-hour session timeout stays the outer limit. Entry 18's "a headless `claude -p` runs a Workflow
 script to completion" is corrected in place.
 
-**Untested hypothesis, until the live design rerun passes 10 minutes:** that `=0` lifts the limit.
-Only the kill itself is measured so far.
+**Measured that `=0` lifts it.** The same live run's backlog stage then ran headless for 10 min 40 s
+with the ceiling at 0 and returned its ledger. The design rerun finished in 9 min 40 s, so it proved
+nothing.
 
 **Stats.** 3 assertions added to an existing test (388 workflow tests passed, 0 failed): the slice
 session's env and the final QA session's env, plus the settings. The mutation that drops the setting
