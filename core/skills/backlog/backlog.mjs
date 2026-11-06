@@ -5,7 +5,7 @@
 //   node backlog.mjs check <path>
 // Prints one line per problem, then BACKLOG: PASS|FAIL. Exit 0 pass, 1 fail, 2 usage.
 import { readFileSync, writeFileSync, mkdirSync, renameSync, realpathSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The driver's stop rules (README "Three brakes").
@@ -109,6 +109,14 @@ function readJson(path) {
 
 export function readBacklog(path) {
   return readJson(path)
+}
+
+// Each app has its own ledger in the build state directory
+// (`$(git rev-parse --git-path harness-build)`), so a second backlog in one repo
+// never inherits the first one's progress.
+export function ledgerPath(stateDir, app) {
+  if (typeof app !== 'string' || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(app)) throw new Error(`${JSON.stringify(app)} is not an app slug`)
+  return join(stateDir, app, 'ledger.json')
 }
 
 export function emptyLedger() {
@@ -275,12 +283,47 @@ export function brake(backlog, ledger) {
   return null
 }
 
+// ---------- a slice as /dev's task (pure) ----------
+
+// What `/dev --slice` builds: the task text, and the criteria its plan must
+// carry with their ids and wording unchanged. A re-planned or unblocked slice
+// also gets every earlier reason and answer, so its fresh plan starts from what
+// went wrong. Throws on a backlog that fails its check or an unknown slice.
+export function sliceTask(backlog, id, ledger = emptyLedger()) {
+  const problems = validateBacklog(backlog)
+  if (problems.length) throw new Error(`the backlog does not pass its check: ${problems.join('; ')}`)
+  const s = backlog.slices.find(x => x.id === id)
+  if (!s) throw new Error(`${JSON.stringify(id)} is not a slice of the backlog`)
+  const { reasons, answers } = sliceState(ledger, id)
+  const lines = [
+    `Slice ${s.id} of ${backlog.app}: ${s.title}`,
+    '',
+    s.goal,
+    '',
+    `Requirements: ${s.requirements.join(', ') || 'none (a scaffold slice)'}. Built before it: ${s.depends_on.join(', ') || 'nothing'}.`,
+    '',
+    'Acceptance criteria. The plan carries each one with its id and criterion unchanged, and a test proves it:',
+    ...s.acceptance.map(c => `- ${c.id}: ${c.criterion} (fails when: ${c.fails_when})`),
+  ]
+  if (reasons.length) lines.push('', 'Earlier attempts at this slice stopped for these reasons; plan around them:', ...reasons.map(r => `- ${r}`))
+  if (answers.length) lines.push('', 'The human answered questions about this slice; the answers are binding:', ...answers.map(a => `- ${a}`))
+  return {
+    slice: s.id,
+    app: backlog.app,
+    task: lines.join('\n'),
+    requiredCriteria: s.acceptance.map(c => ({ id: c.id, criterion: c.criterion, fails_when: c.fails_when })),
+  }
+}
+
 // ---------- command line ----------
+
+const USAGE = 'usage: backlog.mjs check <backlog.json> | backlog.mjs task <backlog.json> <S<n>> [build state dir]'
 
 function main(argv) {
   const [cmd, path, ...rest] = argv
+  if (cmd === 'task' && path && (rest.length === 1 || rest.length === 2)) return taskCommand(path, rest[0], rest[1])
   if (cmd !== 'check' || !path || rest.length) {
-    console.error('usage: backlog.mjs check <path>')
+    console.error(USAGE)
     return 2
   }
   let problems
@@ -292,6 +335,23 @@ function main(argv) {
   for (const p of problems) console.log(`backlog: ${path}: ${p}`)
   console.log(`BACKLOG: ${problems.length ? 'FAIL' : 'PASS'}`)
   return problems.length ? 1 : 0
+}
+
+// Prints the slice's task as JSON ({slice, app, task, requiredCriteria}) and
+// exits 0, or prints the reason to stderr and exits 1. The app's ledger is read
+// from the build state directory; a missing one is a first attempt, a broken
+// one is an error, never a guess.
+function taskCommand(path, id, stateDir) {
+  try {
+    const backlog = readBacklog(path)
+    // A backlog that fails its check gets sliceTask's full report, not a path error.
+    const ledger = stateDir && !validateBacklog(backlog).length ? readLedger(ledgerPath(stateDir, backlog.app)) : emptyLedger()
+    console.log(JSON.stringify(sliceTask(backlog, id, ledger), null, 2))
+    return 0
+  } catch (e) {
+    console.error(`backlog: ${e.message}`)
+    return 1
+  }
 }
 
 // Run as a command, also through the ~/.claude/skills symlink install.sh makes.

@@ -18,6 +18,17 @@ node ~/.claude/skills/backlog/backlog.mjs check docs/backlog.json
 
 It prints one line per problem, then `BACKLOG: PASS` or `BACKLOG: FAIL`.
 
+`/dev --slice S<n>` gets its task from the same file:
+
+```
+node ~/.claude/skills/backlog/backlog.mjs task docs/backlog.json S2 [build state dir]
+```
+
+It prints `{slice, app, task, requiredCriteria}` as JSON: the task text (the
+slice's goal and every criterion, plus each earlier reason and answer from the
+build ledger) and the criteria the plan must carry unchanged. The ledger is
+`<build state dir>/<app>/ledger.json`, one per app (`ledgerPath`).
+
 ## The format
 
 ```json
@@ -72,8 +83,8 @@ prove the requirements, and whether the order builds each owner before its users
 
 ## The ledger and the next step
 
-The `/build-app` driver keeps `.git/harness-build/ledger.json`, never
-committed: per slice its status (`pending`, `done`, `blocked`), escalations,
+The `/build-app` driver keeps `.git/harness-build/<app>/ledger.json`, one
+per app, never committed: per slice its status (`pending`, `done`, `blocked`), escalations,
 re-plans, reasons, questions, and the test files it froze when it landed.
 
 - **Next slice:** the first slice in order that is pending, not blocked, and

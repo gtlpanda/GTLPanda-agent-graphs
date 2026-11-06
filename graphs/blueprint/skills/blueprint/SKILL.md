@@ -63,7 +63,7 @@ repeat it.
 ## 2. Run the interview graph
 
 Workflow tool with `name: "blueprint-design"` (if not found, `scriptPath` set
-to the absolute path of `~/.claude/workflows/blueprint-design.js`; if that is
+to the absolute path of `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/workflows/blueprint-design.js`; if that is
 missing too, tell the human to run `./install.sh` in their PandaStack checkout
 and stop). Args:
 `{"repo": REPO, "request": <the redacted text, omitted if none>, "docs": [<absolute paths>]}`.
@@ -171,7 +171,7 @@ Redact the returned ledger, write it to `$S/run1.json`, then act on `status`.
       fails) gets one first:
       `git -C "$REPO" commit --allow-empty -m "blueprint: start <app>"`.
    3. `git -C "$REPO" switch -c "integration/<app>"`, then
-      `node ~/.claude/skills/blueprint/write-docs.mjs "$S/run2.json" "$S/run3.json" "$REPO"`.
+      `node "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/blueprint/write-docs.mjs" "$S/run2.json" "$S/run3.json" "$REPO"`.
       Its output must start with `write-docs: wrote `. Otherwise report it,
       `git -C "$REPO" switch -` back,
       `git -C "$REPO" branch -D "integration/<app>"`, and stop.
