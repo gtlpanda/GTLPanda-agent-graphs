@@ -38,7 +38,7 @@
 | build | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
 | marketing | [`graphs/seo/`](graphs/seo/README.md) | `seo-check.mjs check <dir> --site <url>` | so far only the check: a built site's title, description, canonical, Open Graph, and JSON-LD tags, duplicates across pages, the sitemaps (which decide the strict pages), and robots.txt, `SEO-CHECK: PASS\|FAIL`; the audit graph not built yet | check tested offline |
 
-## Where it's going: the autobuild loop
+## Where it's going: the build-app loop
 
 The graphs above are the parts of one loop that builds an app or a feature end
 to end. You describe the idea and answer one interview. You approve the design
@@ -46,28 +46,30 @@ and the backlog once, then leave. The work comes back as one PR to approve.
 
 ```
 /blueprint  interview → design → backlog of /dev-sized slices          ← you approve the design + backlog
-/autobuild  per slice: /dev on integration/<app> → /verify → fast-forward
+/build-app  per slice: /dev on integration/<app> → /verify → fast-forward
             done → one harness-repair over the branch → one PR → /release-pr   ← you approve the merge
 ```
 
 - A slice that gets stuck is marked blocked, and the other slices keep
   building. Two escalations on one slice re-plan it, and your decisions stay
-  fixed. A design call or a missing environment variable name sends you one
+  fixed; two more after the re-plan mark it stuck. A design call or a missing environment variable name sends you one
   ping.
 - `docs/backlog.json` holds the plan, and only `/blueprint` writes it. Progress
   lives in a ledger inside `.git`, and each slice commit starts with `S<n>:`.
-  A tested `backlog.mjs` owns the format and the next-step rules.
+  A tested `backlog.mjs` ([core/skills/backlog](core/skills/backlog/SKILL.md))
+  owns the format and the next-step rules.
 - Three brakes stop the run and ping you:
   - a third re-plan of one app;
   - every remaining slice blocked;
-  - three slice escalations in a row.
+  - three different slices escalating with none landing in between.
 - Production deploys are never autonomous.
 
 Built so far: `/blueprint` run 1 (interview) and run 2a (design behind the
-advisor gate), plus `/dev`, `/loop`, and `/release-pr`. Next, in order:
+advisor gate), plus `/dev`, `/loop`, `/release-pr`, and the backlog format
+and its next-step rules (`backlog.mjs`). Next, in order:
 - research and spikes before the design;
-- the backlog and your one approval;
-- `/autobuild`;
+- the backlog stage and your one approval;
+- `/build-app` (a driver that runs each slice in a fresh headless session);
 - a live end-to-end build of a toy reading-list app.
 
 Families: **build** graphs change your code. **Marketing** graphs (SEO first) change what you
@@ -85,7 +87,7 @@ symlinked into `~/.claude/` on every machine.
 
 ```
 install.sh  settings.json  CLAUDE.md  loop.md   shared config, linked into ~/.claude/
-core/skills/                                    skills more than one graph uses (verify, harness-review, knowledge-map, default-stack, gtm-brief)
+core/skills/                                    skills more than one graph uses (verify, harness-review, knowledge-map, default-stack, gtm-brief, backlog)
 core/agents/                                    agents more than one graph uses (advisor, checker)
 graphs/<graph>/agents/                          that graph's agents
 graphs/<graph>/workflows/                       that graph's workflow script

@@ -180,6 +180,8 @@ rule core/skills/gtm-brief/SKILL.md 'Never invent the' 'without a passing brief,
 rule graphs/seo/skills/seo-check/SKILL.md 'Errors fail; warnings never do.' 'a length guide or a Google-ignored tag never fails the SEO gate'
 rule graphs/seo/skills/seo-check/SKILL.md '"our rule" means PandaStack' 'every SEO rule names its source; house rules say so'
 rule graphs/seo/skills/seo-check/SKILL.md 'With no sitemap, every page' 'user 2A: the sitemap decides which pages are strict; none means all'
+rule core/skills/backlog/SKILL.md 'nothing else writes it' 'only /blueprint writes a backlog'
+rule core/skills/backlog/SKILL.md 'A goal never says "stop and ask"' 'an unattended slice can never wait for a human'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'decisions:s.decisions.map(d=>({id:d.id,answer:d.answer}))' 'design args come from one exact command, never paraphrased'
 rule graphs/blueprint/skills/blueprint/SKILL.md '"none" keeps every assumption' 'the optional last interview step says so (L0 finding)'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'Each answer replaces what it challenges' 'a gate answer never sits next to the decision it overrides'
