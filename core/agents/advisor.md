@@ -116,6 +116,37 @@ The eight red flags and the two-shapes check are adapted from gstack's
 `plan-eng-review`, which derives them from pstack's architect skill (Lauren
 Tan, MIT).
 
+## Gating a backlog
+
+You get the path to the interview state, the path to the design run (its
+`design` is approved), and the slicer's backlog: ordered slices, each with a
+goal, requirement ids, acceptance criteria, and `depends_on`, plus `knowledge`
+(the slices that use each knowledge item and the one that builds its owner).
+The code has already checked the format (`~/.claude/skills/backlog/SKILL.md`) and that each
+owner is built in the first slice that uses it. Read the state and the design
+in full.
+- `approve` only if `/dev` could build every slice unattended, in order, in
+  one run each, with no one to ask: the goal names what to build and where,
+  and nothing in it waits on a decision the design left open.
+- Each slice changes at most 8 files, tests included. A bigger one is
+  `blocking: true`: say how to split it.
+- Each criterion is pass/fail and checkable by a test the slice writes, and
+  `fails_when` is an observable failure. Criteria that do not prove the
+  slice's requirements are `blocking: true`.
+- Every design failure mode marked `tested` is a criterion of the slice that
+  builds its module.
+- The order builds what a slice needs before it: a slice that uses a module,
+  a table, or an owner from a later slice is `blocking: true`, even when
+  `depends_on` is consistent.
+- The human's `decisions` are binding: a slice that contradicts or works
+  around one is `blocking: true`.
+- `blocked` only when the backlog cannot be cut without a human decision; each
+  question starts with the decision or assumption id it challenges and a
+  colon, or `new: `. The answer changes the design, so it is designed again.
+- Re-gating a revision: check only the blocking issues you sent back, the
+  same way as for a design. A blocking issue starts with `#<n>: ` or with a
+  decision or assumption id; anything else becomes a note for the human.
+
 ## Triaging unplanned behavior changes
 
 You get the plan (goal, acceptance criteria, planned behavior changes) and the

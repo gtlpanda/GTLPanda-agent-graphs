@@ -689,3 +689,40 @@ env made every workflow `agent()` run on that model, ignoring `model: 'haiku'`/`
 `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=0` alone did not fix it. Removing it restored Haiku 5.5 and Fable 5.1
 (modelUsage in headless probes). A headless `claude -p` runs a Workflow script to completion. Both
 feed the driver design.
+
+## 19. /blueprint run 3: the backlog stage and the one approval (2026-11-05)
+
+**What changed.** `blueprint-design.js` gains `stage: "backlog"`. A new slicer agent (Sonnet) reads
+`state.json` and the design run (`run2.json`) by path and returns `{app, slices, knowledge}`; the code
+adds `version`, `integrationBranch`, and the design's requirement ids, so the parts a model could get
+wrong are not its to write. The structure check is `validateBacklog`, copied verbatim from
+`core/skills/backlog/backlog.mjs` with a drift test, plus the owner rule from the knowledge-map skill
+as code: every design knowledge item once, and `built_in` must be the first slice in `used_by` (never
+a shared slice ahead of its callers). Then the advisor's new "Gating a backlog" section: approve only
+if `/dev` could build every slice unattended. Same rounds and re-gate scope as the design (3 rounds;
+a re-gate checks only what it sent back). `/blueprint` gets sections 5 (backlog) and 6 (the one
+approval: Approve / Edit / Stop). Approve needs nothing staged and a new branch, creates
+`integration/<app>`, and commits only what `write-docs.mjs` writes: `docs/blueprint/<app>.md` (never
+overwritten), `docs/backlog.json` (an earlier backlog is replaced; git keeps it), and
+`docs/knowledge-map.json` (the knowledge-map format, `used_by` in build order, appended to an
+existing map).
+Edit becomes a binding `D<n>` decision and designs again. `gateRounds` is now in the `state.json`
+shape (it was counted there but never listed).
+
+**Design calls.** The backlog loop is a sibling of the design loop, sharing `inScope`, `note`,
+`gateQuestions`, and the re-gate prompt, rather than one generic loop with flags: the two would not
+change together (conflicts are design-only). No injected state: like run 2, the agents read the files
+and the code gets only ids (`knowledge`). The design doc goes to `docs/blueprint/<app>.md`, not
+`docs/design.md`, because `/blueprint --doc docs/design.md` is the common input and is never
+overwritten.
+
+**Bugs caught.** My own tests: a dependency message is quoted (`S1 depends on "S2"`).
+PR review (#21; 1 HIGH, 2 MEDIUM, all in the approval, each fixed and the git steps then run as
+written in a scratch repo): the clean-tree rule stopped every new app, because `/blueprint --doc`
+leaves the doc untracked (now: nothing staged); `git add` ran from the shell's folder while
+write-docs wrote under `REPO`, which fails when the repo is above it (now every command is
+`git -C "$REPO"`); and any repo blueprinted before could never be approved again, because the
+backlog and the knowledge map were refused instead of replaced and merged.
+
+**Stats.** 31 new tests (326 passed, 0 failed), 25 mutations, all caught. 5 validate.sh rules, 3 of
+them checked to fail when their text is removed.

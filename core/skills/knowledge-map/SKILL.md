@@ -79,7 +79,8 @@ records the owner's path.
   blueprint-design.js `designProblems` check the same pattern). Never reused.
 - `status`: `planned` (`owner` is the intended path, or null) or `built`
   (`owner` is the real path).
-- `used_by`: the slices or modules that use it.
+- `used_by`: the slices or modules that use it, in build order. The first
+  slice in it builds the owner.
 - `changes_together_because`: required. If it cannot be filled in, the item is
   not shared knowledge.
 - The map file is bookkeeping, not code: it never counts toward a plan's file

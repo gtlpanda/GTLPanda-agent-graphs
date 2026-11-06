@@ -1,12 +1,13 @@
 export const meta = {
   name: 'blueprint-design',
-  description: 'Plan an app or feature before any code: extract a brief and build the ranked interview (stage interview), then design it against the human\'s answers behind an advisor gate (stage design)',
-  whenToUse: 'Run by the /blueprint skill. args: {repo (required, absolute), stage? (interview, the default, or design), request?, docs? (interview: paths; at least one of request or docs), statePath, mode, requirements, decisions, assumptions (design)}',
+  description: 'Plan an app or feature before any code: extract a brief and build the ranked interview (stage interview), design it against the human\'s answers behind an advisor gate (stage design), then cut the design into /dev-sized slices behind the same gate (stage backlog)',
+  whenToUse: 'Run by the /blueprint skill. args: {repo (required, absolute), stage? (interview, the default, design, or backlog), request?, docs? (interview: paths; at least one of request or docs), statePath, mode, requirements, decisions, assumptions (design and backlog), designPath, knowledge (backlog)}',
   phases: [
     { title: 'Extract', detail: 'extractor reads the documents, the repo, and the request into a brief', model: 'sonnet' },
     { title: 'Interview', detail: 'questioner ranks the open decisions by cost to change and lists preflight and assumptions', model: 'sonnet' },
     { title: 'Design', detail: 'architect designs against the binding decisions and assumptions', model: 'sonnet' },
-    { title: 'Gate', detail: 'advisor gates the design', model: 'fable' },
+    { title: 'Backlog', detail: 'slicer cuts the approved design into ordered /dev-sized slices', model: 'sonnet' },
+    { title: 'Gate', detail: 'advisor gates the design, then the backlog', model: 'fable' },
   ],
 }
 
@@ -28,6 +29,13 @@ export const meta = {
 //                                                         the skill asks, replaces that decision or assumption, reruns)
 //   at most MAX_DESIGN_ROUNDS architect calls, then escalate
 //
+// stage backlog (run 3; the skill passes the saved answers and the design run's path):
+//   slicer --structure problems (backlog format, knowledge owners)--> slicer (next round)
+//          --well formed--> advisor(gate) --approve--> backlog-ready (the skill asks the human's one approval)
+//                                         --revise--> slicer (next round); re-gates as in stage design
+//                                         --blocked--> needs-human (the skill asks, then designs again)
+//   at most MAX_BACKLOG_ROUNDS slicer calls, then escalate
+//
 // Helpers marked "shared" are copied verbatim from harness-repair.js (scripts
 // cannot import each other) and a test fails if the copies drift. Returns a
 // ledger; /blueprint persists it.
@@ -38,6 +46,7 @@ const NODES = {
   extract: { agentType: 'extractor',  model: 'sonnet', effort: 'high', phase: 'Extract' },
   ask:     { agentType: 'questioner', model: 'sonnet', effort: 'high', phase: 'Interview' },
   design:  { agentType: 'architect',  model: 'sonnet', effort: 'high', phase: 'Design' },
+  slice:   { agentType: 'slicer',     model: 'sonnet', effort: 'high', phase: 'Backlog' },
   gate:    { agentType: 'advisor',    model: 'fable',  effort: 'high', phase: 'Gate' },
 }
 // Three AskUserQuestion calls of four. Lower-ranked questions become assumptions.
@@ -45,6 +54,8 @@ const MAX_QUESTIONS = 12
 // The design, the revision after the full review, and one more for what the
 // re-gate still blocks; a design the gate still rejects needs a human.
 const MAX_DESIGN_ROUNDS = 3
+// The same three rounds for the backlog: the cut, the revision, one more.
+const MAX_BACKLOG_ROUNDS = 3
 // Innovation tokens: departures from the default stack. A fourth is a blocking problem.
 const MAX_DEPARTURES = 3
 // The knowledge-map skill defines the kinds, which ones get an owner from their
@@ -99,6 +110,14 @@ const DESIGN_SCHEMA = obj({
   knowledge: { type: 'array', items: obj({ id: STR, knowledge: STR, kind: STR, owner: STR, used_by: STRS, changes_together_because: STR }) },
   premises: { type: 'array', items: obj({ claim: STR, evidence: STR, status: { type: 'string', enum: ['VERIFIED', 'UNVERIFIED'] } }) },
 })
+const SLICES_SCHEMA = obj({
+  app: STR,
+  slices: {
+    type: 'array',
+    items: obj({ id: STR, title: STR, goal: STR, requirements: STRS, acceptance: { type: 'array', items: obj({ id: STR, criterion: STR, fails_when: STR }) }, depends_on: STRS }),
+  },
+  knowledge: { type: 'array', items: obj({ id: STR, built_in: STR, used_by: STRS }) },
+})
 // shared
 const GATE_SCHEMA = {
   type: 'object',
@@ -117,7 +136,7 @@ const REPO = typeof A.repo === 'string' && A.repo.startsWith('/') ? A.repo : nul
 const REQUEST = typeof A.request === 'string' && A.request.trim() !== '' ? A.request.trim() : null
 const DOCS_OK = A.docs === undefined || (Array.isArray(A.docs) && A.docs.every(d => typeof d === 'string' && d.trim() !== ''))
 const DOCS = Array.isArray(A.docs) && DOCS_OK ? A.docs : []
-const STAGE = A.stage === undefined ? 'interview' : (['interview', 'design'].includes(A.stage) ? A.stage : null)
+const STAGE = A.stage === undefined ? 'interview' : (['interview', 'design', 'backlog'].includes(A.stage) ? A.stage : null)
 // Stage design: the saved answers, compacted by the skill. Ids are any
 // non-empty unique strings: decisions carry Q<n>, A<n> (an override), or D<n>
 // (a gate question); assumptions carry A<n> or Q<n> (past the cap).
@@ -127,10 +146,14 @@ const uniqueStrings = x => Array.isArray(x) && x.every(nonEmpty) && new Set(x).s
 const REQ_IDS = uniqueStrings(A.requirements) && A.requirements.length && A.requirements.every(r => /^R\d+$/.test(r)) ? A.requirements : null
 const DECISIONS = Array.isArray(A.decisions) && A.decisions.every(d => d && nonEmpty(d.id) && nonEmpty(d.answer)) && uniqueStrings(A.decisions.map(d => d.id)) ? A.decisions : null
 const ASSUMPTION_IDS = uniqueStrings(A.assumptions) ? A.assumptions : null
+// Stage backlog: the design run (run2.json) the slicer and the gate read, and
+// the design's knowledge ids, the only part of it the code checks.
+const DESIGN_PATH = typeof A.designPath === 'string' && A.designPath.startsWith('/') ? A.designPath : null
+const KNOWLEDGE_IDS = Array.isArray(A.knowledge) && (A.knowledge.length === 0 || uniqueStrings(A.knowledge)) && A.knowledge.every(k => OWNER_ID.test(k)) ? A.knowledge : null
 
 // ---------- ledger ----------
 const ledger = {
-  status: null,      // 'needs-human' | 'escalate' | 'design-ready'
+  status: null,      // 'needs-human' | 'escalate' | 'design-ready' | 'backlog-ready'
   reason: null,
   brief: null,       // the extractor's brief
   questions: [],     // what the skill asks, in rank order, recommended option first
@@ -139,8 +162,11 @@ const ledger = {
   design: null,      // stage design: the architect's latest design
   gate: null,        // stage design: the advisor's latest verdict
   designRounds: 0,   // stage design: architect calls so far
-  issues: [],        // stage design: what the last round left open, when it escalates
-  notes: [],         // stage design: gate findings not sent back to the architect, for the human ({round, n, issue, fix})
+  backlog: null,     // stage backlog: the latest backlog, in the backlog skill's format
+  owners: [],        // stage backlog: per design knowledge id, the slice that builds its owner and the slices that use it
+  backlogRounds: 0,  // stage backlog: slicer calls so far
+  issues: [],        // stages design and backlog: what the last round left open, when it escalates
+  notes: [],         // stages design and backlog: gate findings not sent back to the architect, for the human ({round, n, issue, fix})
   history: [],       // one entry per node run, in order
 }
 // shared
@@ -362,6 +388,118 @@ function designProblems(d) {
   return problems
 }
 
+// Stage backlog: the design run and the knowledge ids, after the design args.
+function backlogArgsProblem() {
+  if (!DESIGN_PATH) return 'args.designPath is required and must be an absolute path to the design run (run2.json)'
+  if (!KNOWLEDGE_IDS) return 'args.knowledge must be a list of the design\'s unique knowledge ids (K1, K2, ...), empty when it has none'
+  return null
+}
+
+// The slicer returns the slices; the code fills in what it must not get wrong.
+function assembleBacklog(out) {
+  return { version: 1, app: out.app, integrationBranch: `integration/${out.app}`, requirements: REQ_IDS, slices: list(out.slices) }
+}
+// Every design knowledge item, once: the slices that use it, and the first of
+// them building its owner (the knowledge-map skill: never ahead of its callers).
+function ownerProblems(out) {
+  const problems = []
+  const sliceNo = new Map(list(out.slices).map((s, i) => [s && s.id, i + 1]))
+  const seen = new Set()
+  for (const k of list(out.knowledge)) {
+    const id = k && k.id
+    if (!KNOWLEDGE_IDS.includes(id)) { problems.push(`knowledge names ${JSON.stringify(id)}, which is not a knowledge id of the design`); continue }
+    if (seen.has(id)) { problems.push(`knowledge ${id} is listed twice`); continue }
+    seen.add(id)
+    const users = list(k.used_by)
+    if (!users.length) { problems.push(`${id}: used_by is empty: name the slices that use it`); continue }
+    if (new Set(users).size !== users.length) problems.push(`${id} names a slice twice in used_by`)
+    const bad = users.filter(u => !sliceNo.has(u))
+    for (const u of bad) problems.push(`${id} is used by ${JSON.stringify(u)}, which is not a slice`)
+    if (bad.length) continue
+    const first = users.reduce((a, b) => (sliceNo.get(b) < sliceNo.get(a) ? b : a))
+    if (k.built_in !== first) problems.push(`${id}: built_in ${JSON.stringify(k.built_in)} must be ${first}, the first slice that uses it`)
+  }
+  for (const id of KNOWLEDGE_IDS) if (!seen.has(id)) problems.push(`knowledge ${id} of the design is in no slice`)
+  return problems
+}
+function backlogView(out) {
+  return { ...assembleBacklog(out), knowledge: list(out.knowledge) }
+}
+
+// shared (the owner is core/skills/backlog/backlog.mjs; a test fails if this copy drifts)
+function validateBacklog(backlog, requiredIds) {
+  const MAX_SLICES = 40
+  const MAX_CRITERIA = 8
+  const problems = []
+  const text = v => typeof v === 'string' && v.trim() !== ''
+  const arr = v => (Array.isArray(v) ? v : [])
+  const show = v => JSON.stringify(v)
+  if (!backlog || typeof backlog !== 'object' || Array.isArray(backlog)) return ['the backlog is not a JSON object']
+  if (backlog.version !== 1) problems.push(`version must be 1, got ${show(backlog.version)}`)
+  const app = backlog.app
+  if (typeof app !== 'string' || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(app)) problems.push(`app must be a lowercase slug like "reading-list", got ${show(app)}`)
+  else if (backlog.integrationBranch !== `integration/${app}`) problems.push(`integrationBranch must be "integration/${app}", got ${show(backlog.integrationBranch)}`)
+
+  const reqs = arr(backlog.requirements)
+  if (!reqs.length) problems.push('requirements must list the design\'s requirement ids (R1, R2, ...)')
+  const reqSet = new Set()
+  for (const r of reqs) {
+    if (typeof r !== 'string' || !/^R\d+$/.test(r)) problems.push(`${show(r)} is not a requirement id (R1, R2, ...)`)
+    else if (reqSet.has(r)) problems.push(`requirement ${r} is listed twice`)
+    reqSet.add(r)
+  }
+  if (Array.isArray(requiredIds)) {
+    for (const r of requiredIds) if (!reqSet.has(r)) problems.push(`design requirement ${r} is missing from requirements`)
+    for (const r of reqSet) if (!requiredIds.includes(r)) problems.push(`requirement ${show(r)} is not in the design`)
+  }
+
+  const slices = arr(backlog.slices)
+  if (!slices.length) problems.push('the backlog has no slices')
+  if (slices.length > MAX_SLICES) problems.push(`${slices.length} slices is more than ${MAX_SLICES}: split the app or merge slices`)
+  const covered = new Set()
+  slices.forEach((s, i) => {
+    const id = `S${i + 1}`
+    if (!s || typeof s !== 'object' || Array.isArray(s)) { problems.push(`slice ${i + 1} is not an object`); return }
+    if (s.id !== id) problems.push(`slice ${i + 1} must have id ${id} (ids run S1, S2, ... in build order), got ${show(s.id)}`)
+    if (!text(s.title)) problems.push(`${id}: title is empty`)
+    if (!text(s.goal)) problems.push(`${id}: goal is empty`)
+    // A slice's text is /dev's task text, and /dev lets task text override its
+    // no-ask rule, so no part of a slice may ask for that.
+    const asks = v => typeof v === 'string' && /stop[\s-]+and[\s-]+ask/i.test(v)
+    const askers = [['title', s.title], ['goal', s.goal]]
+      .concat(arr(s.acceptance).flatMap((c, k) => (c && typeof c === 'object' ? [[`AC${k + 1} criterion`, c.criterion], [`AC${k + 1} fails_when`, c.fails_when]] : [])))
+      .filter(([, v]) => asks(v)).map(([where]) => where)
+    if (askers.length) problems.push(`${id}: ${askers.join(', ')} says "stop and ask", which would make an unattended /dev wait for a human`)
+    const own = arr(s.requirements)
+    if (!Array.isArray(s.requirements)) problems.push(`${id}: requirements must be a list (it may be empty)`)
+    for (const r of own) {
+      if (!reqSet.has(r)) problems.push(`${id} names ${show(r)}, which is not in requirements`)
+      covered.add(r)
+    }
+    if (new Set(own).size !== own.length) problems.push(`${id} names a requirement twice`)
+    const acs = arr(s.acceptance)
+    if (!acs.length) problems.push(`${id}: acceptance is empty (at least one pass/fail criterion)`)
+    if (acs.length > MAX_CRITERIA) problems.push(`${id}: ${acs.length} criteria is more than ${MAX_CRITERIA}: split the slice`)
+    acs.forEach((a, k) => {
+      const acId = `${id}-AC${k + 1}`
+      if (!a || typeof a !== 'object') { problems.push(`${acId} is not an object`); return }
+      if (a.id !== acId) problems.push(`${id}: criterion ${k + 1} must have id ${acId}, got ${show(a.id)}`)
+      if (!text(a.criterion)) problems.push(`${acId}: criterion is empty`)
+      if (!text(a.fails_when)) problems.push(`${acId}: fails_when is empty (what observable result fails it)`)
+    })
+    const deps = arr(s.depends_on)
+    if (!Array.isArray(s.depends_on)) problems.push(`${id}: depends_on must be a list (it may be empty)`)
+    if (new Set(deps).size !== deps.length) problems.push(`${id} depends on a slice twice`)
+    for (const d of deps) {
+      const m = typeof d === 'string' ? /^S([1-9]\d*)$/.exec(d) : null
+      // Earlier-only dependencies make a cycle impossible.
+      if (!m || Number(m[1]) < 1 || Number(m[1]) > i) problems.push(`${id} depends on ${show(d)}: a slice may depend only on earlier slices (S1..S${i})`)
+    }
+  })
+  for (const r of reqSet) if (!covered.has(r)) problems.push(`requirement ${r} is in no slice`)
+  return problems
+}
+
 // The gate's questions name the decision or assumption each one challenges, so
 // the human's answer replaces that id instead of sitting next to it. Returns
 // { questions: [{ about: <id> | null, question }] } or { error }.
@@ -442,21 +580,53 @@ ${json(DECISIONS)}
 The architect's design:
 ${json(design)}
 
-Gate it following your "Gating a design" instructions. verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix and blocking true or false (empty when approving). questions: only when blocked, each one a question only the human can answer, starting with the decision or assumption id it challenges and a colon ("Q2: ..."), or "new: " when it challenges none.`
+Gate it following your "Gating a design" instructions. ${GATE_ANSWER}`
 }
+const GATE_ANSWER = 'verdict: approve, revise, or blocked. issues: numbered, each with the concrete fix and blocking true or false (empty when approving). questions: only when blocked, each one a question only the human can answer, starting with the decision or assumption id it challenges and a colon ("Q2: ..."), or "new: " when it challenges none.'
 
-function regatePrompt(design, checked) {
+// what: 'design' or 'backlog'; who: the agent that revised it.
+function regatePrompt(what, who, revised, checked) {
   return `${where}
 Interview state: ${STATE_PATH}. The human's decisions (binding):
 ${json(DECISIONS)}
 
-You sent the design back with these blocking issues:
+You sent the ${what} back with these blocking issues:
 ${checked.length ? checked.map(i => `#${i.n}: ${i.issue}${i.fix ? ` (fix: ${i.fix})` : ''}`).join('\n') : '(none: every issue was non-blocking)'}
 
-The architect's revised design:
-${json(design)}
+The ${who}'s revised ${what}:
+${json(revised)}
 
-Re-gate it: check only that each issue above is fixed and that its fix broke nothing. verdict: approve, revise, or blocked. A blocking issue must start with the issue it is about ("#2: still ...", "#2: the fix broke ...") or with the decision or assumption id the design now breaks ("Q2: ..."). Anything else you notice is blocking false: it goes to the human with the backlog, not back to the architect. questions: only when blocked, each starting with the decision or assumption id it challenges and a colon, or "new: ".`
+Re-gate it: check only that each issue above is fixed and that its fix broke nothing. verdict: approve, revise, or blocked. A blocking issue must start with the issue it is about ("#2: still ...", "#2: the fix broke ...") or with the decision or assumption id the ${what} now breaks ("Q2: ..."). Anything else you notice is blocking false: it goes to the human with the backlog, not back to the ${who}. questions: only when blocked, each starting with the decision or assumption id it challenges and a colon, or "new: ".`
+}
+
+function slicePrompt(prior, issues) {
+  return `${where}
+Cut the approved design into a backlog following your instructions. Read both in full first:
+- the interview state: ${STATE_PATH} (the brief, the human's decisions and assumptions, the preflight list);
+- the design run: ${DESIGN_PATH} (its "design" field is the approved design; its "notes" are the gate's open findings).
+
+Decisions are binding: the human made them, so never contradict one or slice around it:
+${json(DECISIONS)}
+Every requirement (${REQ_IDS.join(', ')}) is in at least one slice. Every knowledge item of the design (${KNOWLEDGE_IDS.length ? KNOWLEDGE_IDS.join(', ') : 'none'}) is in knowledge once, with the slices that use it in used_by and the first of them in built_in.${prior ? `
+
+Your previous backlog:
+${json(prior)}
+
+Fix every one of these issues:
+${issues.map(i => `${i.n}. ${i.issue}${i.fix ? ` (fix: ${i.fix})` : ''}`).join('\n')}` : ''}
+
+Fill the structured output. app is a lowercase slug (the integration branch is integration/<app>). Slice ids are S1, S2, ... in build order; criterion ids S<n>-AC1, S<n>-AC2, ...`
+}
+
+function backlogGatePrompt(out) {
+  return `${where}
+Interview state: ${STATE_PATH}. Design run: ${DESIGN_PATH} (the approved design is its "design" field). The human's decisions (binding):
+${json(DECISIONS)}
+
+The slicer's backlog:
+${json(backlogView(out))}
+
+Gate it following your "Gating a backlog" instructions. ${GATE_ANSWER}`
 }
 
 // A re-gate's blocking issue counts only when it opens with references and a
@@ -488,7 +658,55 @@ function note(round, issues) {
 
 // ---------- run ----------
 if (!REPO) return finish('escalate', 'args.repo is required and must be an absolute path')
-if (!STAGE) return finish('escalate', 'args.stage must be interview or design')
+if (!STAGE) return finish('escalate', 'args.stage must be interview, design, or backlog')
+
+if (STAGE === 'backlog') {
+  const bad = designArgsProblem() || backlogArgsProblem()
+  if (bad) return finish('escalate', bad)
+  log(`repo ${REPO}; backlog (${MODE}); ${REQ_IDS.length} requirement(s), ${KNOWLEDGE_IDS.length} knowledge item(s)`)
+  const keep = out => (out ? { backlog: assembleBacklog(out), owners: list(out.knowledge) } : {})
+  let out = null
+  let issues = null
+  let checked = null   // the blocking issues the last gate sent back; null until the first gate
+  for (;;) {
+    if (ledger.backlogRounds >= MAX_BACKLOG_ROUNDS) {
+      return finish('escalate', `backlog not approved after ${MAX_BACKLOG_ROUNDS} slicer round(s)`, { ...keep(out), issues })
+    }
+    ledger.backlogRounds += 1
+    const round = ledger.backlogRounds
+    const next = await runNode('slice', `backlog #${round}`, slicePrompt(out, issues), SLICES_SCHEMA)
+    if (!next) return finish('escalate', nodeFailure('slice', `in round ${round}`), keep(out))
+    out = next
+    const problems = [...validateBacklog(assembleBacklog(out), REQ_IDS), ...ownerProblems(out)]
+    ledger.history.push({ node: 'slice', round, slices: list(out.slices).length, problems })
+    if (problems.length) {
+      issues = problems.map((issue, i) => ({ n: i + 1, issue, fix: 'restructure the backlog so this holds', blocking: true }))
+      continue
+    }
+    const regate = checked !== null
+    const prompt = regate ? regatePrompt('backlog', 'slicer', backlogView(out), checked) : backlogGatePrompt(out)
+    const gate = await runNode('gate', `${regate ? 're-gate' : 'gate'}: backlog #${round}`, prompt, GATE_SCHEMA)
+    if (!gate) return finish('escalate', nodeFailure('gate', 'on the backlog'), keep(out))
+    ledger.gate = gate
+    const found = list(gate.issues).filter(i => i && typeof i === 'object')
+    const blocking = found.filter(i => i.blocking === true && (!regate || inScope(i, checked)))
+    if (regate || gate.verdict === 'approve') note(round, found.filter(i => !blocking.includes(i)))
+    ledger.history.push({ node: 'gate', round, scope: regate ? 're-gate' : 'full', verdict: gate.verdict, issues: found.length, blocking: blocking.length })
+    if (gate.verdict === 'blocked') {
+      if (!list(gate.questions).length) return finish('escalate', 'the advisor blocked the backlog without a question for the human', keep(out))
+      const asked = gateQuestions(gate.questions)
+      if (asked.error) return finish('escalate', asked.error, keep(out))
+      note(round, found)
+      return finish('needs-human', 'the advisor needs answers before this can be sliced', { ...keep(out), questions: asked.questions })
+    }
+    if (gate.verdict === 'revise' && !found.length) return finish('escalate', 'the advisor asked for a revision without naming an issue', keep(out))
+    // As in stage design: a re-gate revise with nothing in scope is an approval.
+    const settled = gate.verdict === 'approve' || regate
+    if (settled && !blocking.length) return finish('backlog-ready', `backlog approved in round ${round}`, keep(out))
+    issues = settled ? blocking : found
+    checked = issues.filter(i => i.blocking === true)
+  }
+}
 
 if (STAGE === 'design') {
   const bad = designArgsProblem()
@@ -513,7 +731,7 @@ if (STAGE === 'design') {
       continue
     }
     const regate = checked !== null
-    const prompt = regate ? regatePrompt(design, checked) : gatePrompt(design)
+    const prompt = regate ? regatePrompt('design', 'architect', design, checked) : gatePrompt(design)
     const gate = await runNode('gate', `${regate ? 're-gate' : 'gate'}: design #${round}`, prompt, GATE_SCHEMA)
     if (!gate) return finish('escalate', nodeFailure('gate', 'on the design'), { design })
     ledger.gate = gate
