@@ -190,6 +190,8 @@ rule graphs/blueprint/skills/blueprint/SKILL.md 'One AskUserQuestion, header `Ap
 rule graphs/dev/skills/dev/SKILL.md '`--unattended`: nobody is there. Never use AskUserQuestion, whatever the' 'an unattended /dev never waits for a human'
 rule graphs/dev/skills/dev/SKILL.md 'every subject above starts with `S<n>: `' 'the driver lands only commits made for its slice'
 rule core/skills/harness-review/SKILL.md 'The base is the branch your prompt names' 'a slice is reviewed alone, not with every slice before it'
+rule graphs/build/skills/build-app/SKILL.md 'It never merges, and' 'an unattended build ends in a PR for the human, never a merge or a deploy'
+rule graphs/build/skills/build-app/SKILL.md 'Launch it detached, so it survives this session' 'the build outlives the session that started it'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'decisions:s.decisions.map(d=>({id:d.id,answer:d.answer}))' 'design args come from one exact command, never paraphrased'
 rule graphs/blueprint/skills/blueprint/SKILL.md '"none" keeps every assumption' 'the optional last interview step says so (L0 finding)'
 rule graphs/blueprint/skills/blueprint/SKILL.md 'Each answer replaces what it challenges' 'a gate answer never sits next to the decision it overrides'

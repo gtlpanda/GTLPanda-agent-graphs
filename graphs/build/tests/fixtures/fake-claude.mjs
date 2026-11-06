@@ -8,6 +8,8 @@
 //   { limit: 'text' } | { error: 'text' }                an API failure, exit 1
 //   { hang: true }                                       runs until killed
 //   { ok: true }                                         a probe that succeeds
+//   { qa: 'done'|'escalate', commits: [...], reason }    the final QA session: commits, then
+//                                                        its report where the prompt says
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -27,6 +29,16 @@ if (!step) { result({ subtype: 'error_during_execution', is_error: true, result:
 if (step.hang) setInterval(() => {}, 1000)
 else if (step.limit || step.error) { result({ subtype: 'error_during_execution', is_error: true, result: step.limit || step.error }); process.exit(1) }
 else if (step.ok) result({})
+else if (step.qa) {
+  const prompt = process.argv[process.argv.indexOf('-p') + 1]
+  const report = /as JSON, to (\S+)\.\n/.exec(prompt)
+  for (const c of step.commits || []) {
+    for (const [p, text] of Object.entries(c.files || {})) { mkdirSync(dirname(join(process.cwd(), p)), { recursive: true }); writeFileSync(join(process.cwd(), p), text) }
+    git('add', '-A'); git('commit', '-q', '-m', c.subject)
+  }
+  if (report) writeFileSync(report[1], JSON.stringify({ status: step.qa, reason: step.reason || 'VERIFY: PASS and no HIGH/CRITICAL findings', touched: [] }))
+  result({})
+}
 else {
   const write = files => { for (const [p, text] of Object.entries(files || {})) { mkdirSync(dirname(join(process.cwd(), p)), { recursive: true }); writeFileSync(join(process.cwd(), p), text) } }
   for (const c of step.commits || []) { if (c.sh) execFileSync('bash', ['-c', c.sh], { cwd: process.cwd() }); write(c.files); git('add', '-A'); git('commit', '-q', '-m', c.subject) }

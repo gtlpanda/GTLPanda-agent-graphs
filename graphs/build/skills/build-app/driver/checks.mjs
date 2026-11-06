@@ -9,7 +9,8 @@ export const TEST_FILE = /(^|\/)(tests?|__tests__)\/|[._](test|spec)\.[a-z]+$|_t
 
 // Returns { problems: [text], testFiles: [this slice's test files] }. Landing
 // needs no problems.
-export function sliceChecks({ repo, integration, branch, sliceId, frozen, verifyCommand, verifyTimeoutMs = 40 * 60_000 }) {
+// allowEmpty: no commits is fine (the final QA pass may find nothing to fix).
+export function sliceChecks({ repo, integration, branch, sliceId, frozen, verifyCommand, allowEmpty = false, verifyTimeoutMs = 40 * 60_000 }) {
   const problems = []
   const head = git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])
   if (head.stdout.trim() !== branch) problems.push(`the session left the repo on ${JSON.stringify(head.stdout.trim())}, not ${branch}`)
@@ -17,7 +18,7 @@ export function sliceChecks({ repo, integration, branch, sliceId, frozen, verify
   if (dirty) problems.push(`uncommitted changes were left:\n${tail(dirty, 15)}`)
   if (!git(repo, ['merge-base', '--is-ancestor', integration, branch]).ok) problems.push(`${branch} does not build on ${integration}, so it cannot be fast-forwarded`)
   const subjects = git(repo, ['log', '--format=%s', `${integration}..${branch}`]).stdout.split('\n').filter(Boolean)
-  if (!subjects.length) problems.push(`no commits on ${branch}`)
+  if (!subjects.length && !allowEmpty) problems.push(`no commits on ${branch}`)
   const foreign = subjects.filter(s => !s.startsWith(`${sliceId}: `))
   if (foreign.length) problems.push(`commits that do not start with "${sliceId}: ": ${foreign.map(s => JSON.stringify(s)).join(', ')}`)
   // --no-renames: a renamed frozen test shows up under its old name too.
