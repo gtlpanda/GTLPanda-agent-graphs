@@ -687,7 +687,9 @@ Found while fixing it: `recordOutcome` stored non-text test files or questions, 
 **Also measured this session (outside the repo).** `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` in the user
 env made every workflow `agent()` run on that model, ignoring `model: 'haiku'`/`'fable'` pins;
 `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=0` alone did not fix it. Removing it restored Haiku 5.5 and Fable 5.1
-(modelUsage in headless probes). A headless `claude -p` runs a Workflow script to completion. Both
+(modelUsage in headless probes). A headless `claude -p` runs a Workflow script to completion
+(correction, entry 23: only within 10 minutes of its last turn, unless
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`; the probe took 16 s). Both
 feed the driver design.
 
 ## 19. /blueprint run 3: the backlog stage and the one approval (2026-11-05)
@@ -864,3 +866,17 @@ so the pins hold inside Workflow agents under the driver's settings (the open it
 
 **Stats.** 10 new tests (388 workflow tests passed, 0 failed), 14 mutations, all caught. 2 validate.sh
 rules.
+
+## 23. The headless background-wait ceiling (2026-11-06)
+
+**What changed.** The first stage of the live end-to-end run (PR 6) that ran longer than 10
+minutes, the design, was killed: a headless `claude -p` that starts a Workflow and ends its turn
+stops "background tasks still running 10m after the last turn", unless
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`. Every earlier headless run was shorter (the 16 s probe, the
+4.5-minute smoke slice), which hid it; a real `/dev` slice runs an hour or more, so every one would
+have died at 10 minutes. The driver now sets the ceiling to 0 in each session's env and settings; its
+own 6-hour session timeout stays the outer limit. Entry 18's "a headless `claude -p` runs a Workflow
+script to completion" is corrected in place.
+
+**Stats.** 2 assertions added to an existing test (388 workflow tests passed, 0 failed); the mutation
+that drops the env entry is caught.

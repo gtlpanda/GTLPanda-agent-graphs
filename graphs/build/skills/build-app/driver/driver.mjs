@@ -30,7 +30,7 @@ import {
 import { defaultBase, finalQaPrompt, qaReport, prBody, pushAndOpenPr } from './finish.mjs'
 import { parseResetTime, planLimitWait } from './limits.mjs'
 import { buildEnv, git, run } from './proc.mjs'
-import { sessionSettings, sliceArgs, runClaude, sessionVerdict, probeUntilAvailable, stopSessions, writeJson } from './session.mjs'
+import { sessionSettings, sliceArgs, runClaude, sessionVerdict, probeUntilAvailable, stopSessions, writeJson, NO_BG_CEILING } from './session.mjs'
 import { sliceChecks, devReport, outcomeOf, TEST_FILE } from './checks.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -200,7 +200,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
     const code = await runClaude({
       bin: cfg.bin, repo, logFile, timeoutMs: cfg.sessionTimeoutMs, pidFile: files.session,
       args: sliceArgs({ prompt: finalQaPrompt({ repo, base, reportFile: files.finalQa, configDir: CONFIG_DIR }), model: cfg.model, settingsFile: files.settings }),
-      env: buildEnv({ HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
+      env: buildEnv({ ...NO_BG_CEILING, HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
     })
     if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during the final QA; every slice stays landed`) }
     const report = qaReport(files.finalQa)
@@ -271,7 +271,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
       const code = await runClaude({
         bin: cfg.bin, repo, logFile, timeoutMs: cfg.sessionTimeoutMs, pidFile: files.session,
         args: sliceArgs({ prompt, model: cfg.model, settingsFile: files.settings }),
-        env: buildEnv({ HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
+        env: buildEnv({ ...NO_BG_CEILING, HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
       })
       if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during ${slice.id}; its work is kept on attempt/${attempt}`) }
 
