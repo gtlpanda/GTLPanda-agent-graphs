@@ -1,7 +1,7 @@
 export const meta = {
   name: 'dev-build',
   description: 'Plan, build, and accept a development task, then hand the branch to the QA graph: routes on structured plan, verify, and acceptance results',
-  whenToUse: 'Run by the /dev skill. args: {repo (required, absolute), task, base?, approval?: human|advisor, plan?, planApproved?, completed?, maxFixRounds?, knownStuckSigs?}',
+  whenToUse: 'Run by the /dev skill. args: {repo (required, absolute), task, base?, approval?: human|advisor, plan?, planApproved?, completed?, maxFixRounds?, knownStuckSigs?, requiredCriteria? (/dev --slice)}',
   phases: [
     { title: 'Plan', detail: 'planner writes acceptance criteria and components in build order', model: 'sonnet' },
     { title: 'Gate', detail: 'advisor approves, revises, or blocks the plan', model: 'fable' },
@@ -184,6 +184,13 @@ const APPROVAL = A.approval === 'advisor' ? 'advisor' : 'human'
 const GIVEN_PLAN = A.plan && typeof A.plan === 'object' && !Array.isArray(A.plan) ? JSON.parse(JSON.stringify(A.plan)) : null
 const PLAN_APPROVED = GIVEN_PLAN !== null && A.planApproved === true
 const COMPLETED = Array.isArray(A.completed) ? A.completed.filter(s => typeof s === 'string') : []
+// /dev --slice: the backlog slice's criteria. The plan carries each with its id
+// and criterion unchanged, so the acceptance audit proves the backlog's own
+// criteria, never a paraphrase. Absent means none.
+const REQUIRED = A.requiredCriteria === undefined ? [] : A.requiredCriteria
+const REQUIRED_OK = Array.isArray(REQUIRED) &&
+  REQUIRED.every(c => c && typeof c === 'object' && typeof c.id === 'string' && c.id.trim() !== '' && typeof c.criterion === 'string' && c.criterion.trim() !== '') &&
+  new Set(REQUIRED.map(c => c.id)).size === REQUIRED.length
 
 // The QA child gets exactly these keys, and only the ones the caller set.
 function qaArgs() {
@@ -290,6 +297,11 @@ function planProblems(plan) {
   if (new Set(accIds).size !== accIds.length || accIds.some(id => typeof id !== 'string' || !id)) problems.push('acceptance ids must be unique, non-empty strings')
   for (const a of acc) {
     if (!a || !['criterion', 'protects', 'fails_when'].every(k => typeof a[k] === 'string' && a[k].trim())) problems.push(`acceptance ${a && a.id}: criterion, protects, and fails_when must be non-empty`)
+  }
+  for (const r of REQUIRED) {
+    const a = acc.find(x => x && x.id === r.id)
+    if (!a) problems.push(`required criterion ${r.id} is missing: carry it in acceptance with its id and criterion unchanged`)
+    else if (a.criterion !== r.criterion) problems.push(`required criterion ${r.id} was reworded: its criterion must read exactly ${JSON.stringify(r.criterion)}`)
   }
   const seen = new Set()
   const creators = new Map()
@@ -403,6 +415,10 @@ function planPrompt(prior, issues) {
 Task:
 ${TASK || '(no task text; revise the plan below)'}
 
+${REQUIRED.length ? `
+Required acceptance criteria (from the backlog). Carry each one in acceptance with this id and this criterion, unchanged; add your own AC<n> for anything else the task needs:
+${json(REQUIRED)}
+` : ''}
 Write the plan following your instructions.${prior ? `
 
 Revise this plan:
@@ -411,7 +427,7 @@ ${json(prior)}
 Fix every one of these issues:
 ${json(issues)}` : ''}
 
-Fill the structured output. Acceptance ids are AC1, AC2, ...; component ids are C1, C2, ... in build order, and depends_on lists only earlier component ids. owners_used and owners_created hold ${MAP_FILE} ids per your knowledge-map skill, both empty when the repo has no ${MAP_FILE}. questions is empty unless the task is ambiguous in a way the code cannot settle.`
+Fill the structured output. Acceptance ids are AC1, AC2, ...${REQUIRED.length ? ' (plus the required ids above)' : ''}; component ids are C1, C2, ... in build order, and depends_on lists only earlier component ids. owners_used and owners_created hold ${MAP_FILE} ids per your knowledge-map skill, both empty when the repo has no ${MAP_FILE}. questions is empty unless the task is ambiguous in a way the code cannot settle.`
 }
 
 function gatePrompt(plan) {
@@ -555,6 +571,7 @@ function recordBuild(id, build) {
 if (!REPO) return finish('escalate', 'args.repo is required and must be an absolute path')
 if (INJECTED_PLAN !== null && RAW_ARGS.plan !== undefined) return finish('escalate', 'plan given twice: written into the run script and passed in args.plan; pass only one')
 if (!TASK && !GIVEN_PLAN) return finish('escalate', 'args.task is required unless args.plan is given')
+if (!REQUIRED_OK) return finish('escalate', 'args.requiredCriteria must be a list of {id, criterion} with unique, non-empty ids and criteria')
 if (GIVEN_PLAN) {
   const problems = planProblems(GIVEN_PLAN)
   if (problems.length) return finish('escalate', `args.plan is malformed: ${problems.join('; ')}`)

@@ -284,6 +284,56 @@ await test('missing repo, or neither task nor plan -> escalate before any agent 
   }
 })
 
+console.log('== dev-build: required criteria (/dev --slice)')
+const REQ = [{ id: 'S2-AC1', criterion: 'a saved book is listed', fails_when: 'the list is empty after saving' }]
+const withReq = (over = {}) => PLAN({ acceptance: [{ ...criterion('S2-AC1'), criterion: 'a saved book is listed' }, criterion('AC1')], ...over })
+await test('the planner gets the required criteria; a plan carrying them unchanged is approved', async () => {
+  const { result, calls } = await run(fn, {
+    planner: [p => {
+      assert.match(p, /Required acceptance criteria \(from the backlog\)\. Carry each one in acceptance with this id and this criterion, unchanged/)
+      assert.match(p, /"id": "S2-AC1"/)
+      assert.match(p, /Acceptance ids are AC1, AC2, \.\.\. \(plus the required ids above\)/)
+      return withReq()
+    }],
+    advisor: [approve],
+  }, { repo: '/tmp/fixture', task: 'slice S2', requiredCriteria: REQ })
+  assert.equal(result.status, 'plan-ready')
+  assert.equal(types(calls), 'planner,advisor')
+})
+await test('a plan that drops or rewords a required criterion goes back to the planner before any gate', async () => {
+  const cases = [
+    [PLAN(), /required criterion S2-AC1 is missing: carry it in acceptance with its id and criterion unchanged/],
+    [withReq({ acceptance: [{ ...criterion('S2-AC1'), criterion: 'saved books are listed' }] }), /required criterion S2-AC1 was reworded: its criterion must read exactly \\?"a saved book is listed\\?"/],
+  ]
+  for (const [bad, why] of cases) {
+    const { result, calls } = await run(fn, {
+      planner: [bad, p => { assert.match(p, why); return withReq() }],
+      advisor: [approve],
+    }, { repo: '/tmp/fixture', task: 'slice S2', requiredCriteria: REQ })
+    assert.equal(result.status, 'plan-ready', String(why))
+    assert.equal(types(calls), 'planner,planner,advisor')
+    assert.match(result.history.find(h => h.node === 'plan-check').problems.join('\n'), why)
+  }
+})
+await test('an approved plan from args is checked against the required criteria too', async () => {
+  const { result, calls } = await run(fn, {}, { repo: '/tmp/fixture', plan: PLAN(), planApproved: true, requiredCriteria: REQ })
+  assert.equal(result.status, 'escalate')
+  assert.match(result.reason, /args\.plan is malformed: required criterion S2-AC1 is missing/)
+  assert.equal(calls.length, 0)
+  const ok = await run(fn, { ...BUILD_OK(), 'acceptance-auditor': [met(['S2-AC1', 'AC1'])] }, { repo: '/tmp/fixture', plan: withReq(), planApproved: true, requiredCriteria: REQ })
+  assert.equal(ok.result.status, 'done', ok.result.reason)
+})
+await test('bad requiredCriteria -> escalate before any agent runs; absent means none', async () => {
+  for (const bad of ['S2-AC1', [{ id: 'S2-AC1' }], [{ id: '', criterion: 'x' }], [null], [REQ[0], REQ[0]], [{ id: 'S2-AC1', criterion: '  ' }], {}]) {
+    const { result, calls } = await run(fn, {}, { ...ARGS, requiredCriteria: bad })
+    assert.equal(result.status, 'escalate', JSON.stringify(bad))
+    assert.match(result.reason, /args\.requiredCriteria must be a list of \{id, criterion\}/)
+    assert.equal(calls.length, 0)
+  }
+  const { calls } = await run(fn, { planner: [p => { assert.doesNotMatch(p, /Required acceptance criteria/); return PLAN() }], advisor: [approve] }, { repo: '/tmp/fixture', task: 't', requiredCriteria: [] })
+  assert.equal(types(calls), 'planner,advisor')
+})
+
 console.log('== dev-build: knowledge-map owners')
 const MAP = 'docs/knowledge-map.json'
 const owning = (id, files, used, created, deps = []) => ({ ...component(id, files, deps), owners_used: used, owners_created: created })

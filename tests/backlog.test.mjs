@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { test, REPO } from '../scripts/workflow-harness.mjs'
 import {
-  validateBacklog, readLedger, writeLedger, emptyLedger, sliceState, nextSlice, blockedClosure,
+  validateBacklog, sliceTask, readLedger, writeLedger, emptyLedger, sliceState, nextSlice, blockedClosure,
   frozenFiles, recordOutcome, brake, unblock, resume, MAX_REPLANS, MAX_ESCALATED_SLICES,
 } from '../core/skills/backlog/backlog.mjs'
 
@@ -151,7 +151,7 @@ await test('check: PASS exits 0, FAIL lists each problem and exits 1, bad usage 
   for (const args of [[], ['check'], ['lint', good], ['check', good, 'extra']]) {
     r = cli(args)
     assert.equal(r.status, 2, JSON.stringify(args))
-    assert.match(r.stderr, /usage: backlog\.mjs check <path>/)
+    assert.match(r.stderr, /usage: backlog\.mjs check <backlog\.json> \| backlog\.mjs task <backlog\.json> <S<n>> \[ledger\.json\]/)
   }
 })
 await test('check: a missing or unparseable file is a FAIL with the reason, not a crash', () => {
@@ -353,4 +353,57 @@ await test('every remaining slice blocked stops the build; all done is not a bra
   assert.equal(brake(fan(), ask(emptyLedger(), 'S1')), null, 'S2 and S3 can still build')
 })
 
+
+console.log('== backlog: a slice as /dev\'s task')
+await test('sliceTask: the task names the slice, its goal, and every criterion verbatim, which come back as requiredCriteria', () => {
+  const b = variant(x => { x.slices[1].acceptance.push({ id: 'S2-AC2', criterion: 'a read book stays read', fails_when: 'a restart resets it' }) })
+  const t = sliceTask(b, 'S2')
+  assert.equal(t.slice, 'S2')
+  assert.equal(t.app, 'reading-list')
+  assert.equal(t.task, [
+    'Slice S2 of reading-list: Slice 2', '', 'Build part 2.', '',
+    'Requirements: R2. Built before it: S1.', '',
+    'Acceptance criteria. The plan carries each one with its id and criterion unchanged, and a test proves it:',
+    '- S2-AC1: criterion 1 of S2 (fails when: observable failure 1)',
+    '- S2-AC2: a read book stays read (fails when: a restart resets it)',
+  ].join('\n'))
+  assert.deepEqual(t.requiredCriteria, b.slices[1].acceptance)
+  assert.doesNotMatch(t.task, /stop[\s-]+and[\s-]+ask/i)
+  const scaffold = sliceTask(variant(x => { x.slices[0].requirements = []; x.slices[1].requirements = ['R1', 'R2'] }), 'S1')
+  assert.match(scaffold.task, /Requirements: none \(a scaffold slice\)\. Built before it: nothing\./)
+})
+await test('sliceTask: a re-planned or unblocked slice carries every earlier reason and answer, oldest first', () => {
+  let l = escalate(escalate(emptyLedger(), 'S1', 'verify failed: no db'), 'S1', 'acceptance S1-AC1 unmet')
+  l = recordOutcome(l, 'S1', { kind: 'needs-human', questions: ['S1: which db?'] })
+  l = unblock(l, 'S1', ['use SQLite'])
+  const t = sliceTask(BACKLOG(), 'S1', l).task
+  assert.match(t, /Earlier attempts at this slice stopped for these reasons; plan around them:\n- verify failed: no db\n- acceptance S1-AC1 unmet/)
+  assert.match(t, /The human answered questions about this slice; the answers are binding:\n- use SQLite$/)
+  assert.doesNotMatch(sliceTask(BACKLOG(), 'S2', l).task, /Earlier attempts|answered/, 'another slice\'s history stays out')
+})
+await test('sliceTask: an unknown slice or a backlog that fails its check throws', () => {
+  assert.throws(() => sliceTask(BACKLOG(), 'S9'), /"S9" is not a slice of the backlog/)
+  assert.throws(() => sliceTask(BACKLOG(), undefined), /is not a slice/)
+  assert.throws(() => sliceTask(variant(x => { x.app = 'Bad' }), 'S1'), /the backlog does not pass its check: app must be a lowercase slug/)
+})
+await test('task command: prints the JSON and exits 0; a bad slice, a broken ledger, or bad usage does not', () => {
+  const path = join(dir, 'task-backlog.json')
+  writeFileSync(path, JSON.stringify(BACKLOG()))
+  const ok = cli(['task', path, 'S2'])
+  assert.equal(ok.status, 0, ok.stderr)
+  assert.deepEqual(JSON.parse(ok.stdout), sliceTask(BACKLOG(), 'S2'))
+  const ledgerPath = join(dir, 'task-ledger.json')
+  writeLedger(ledgerPath, escalate(emptyLedger(), 'S2', 'no db'))
+  assert.match(JSON.parse(cli(['task', path, 'S2', ledgerPath]).stdout).task, /- no db$/)
+  assert.equal(cli(['task', path, 'S2', join(dir, 'no-ledger-yet.json')]).status, 0, 'a missing ledger is a first attempt')
+  writeFileSync(join(dir, 'bad-ledger.json'), '{')
+  const broken = cli(['task', path, 'S2', join(dir, 'bad-ledger.json')])
+  assert.equal(broken.status, 1)
+  assert.match(broken.stderr, /^backlog: .*bad-ledger\.json is not valid JSON/)
+  const unknown = cli(['task', path, 'S7'])
+  assert.equal(unknown.status, 1)
+  assert.match(unknown.stderr, /"S7" is not a slice/)
+  assert.equal(unknown.stdout, '')
+  for (const args of [['task', path], ['task', path, 'S1', 'l.json', 'extra']]) assert.equal(cli(args).status, 2, JSON.stringify(args))
+})
 rmSync(dir, { recursive: true, force: true })

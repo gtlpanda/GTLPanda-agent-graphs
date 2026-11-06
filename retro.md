@@ -726,3 +726,28 @@ backlog and the knowledge map were refused instead of replaced and merged.
 
 **Stats.** 31 new tests (326 passed, 0 failed), 25 mutations, all caught. 5 validate.sh rules, 3 of
 them checked to fail when their text is removed.
+
+## 20. /dev slice mode: --slice, --base, --unattended (2026-11-05)
+
+**What changed.** `/dev --slice S<n> --base integration/<app> --unattended` builds one backlog slice
+with nobody there, the way the `/build-app` driver will call it.
+- `backlog.mjs task <backlog> S<n> [ledger]` (`sliceTask`) turns the slice into the task text (goal,
+  requirements, every criterion with its id) plus every earlier reason and answer from the build
+  ledger, and prints the `requiredCriteria`. A missing ledger is a first attempt; a broken one fails.
+- `dev-build.js` takes `requiredCriteria`: a plan that drops one, or rewords its criterion, goes back
+  to the planner before any gate, and an approved plan in `args` that lacks one escalates. So the
+  acceptance audit proves the backlog's own criteria, not a paraphrase. The planner agent keeps the
+  slice's ids (`S2-AC1`) and numbers its own `AC1`, ...
+- `/dev`: `--base` replaces detection (and must exist); `--unattended` turns the dirty-tree question
+  and `needs-human` into reports and wins over task text; with `--slice`, every commit subject starts
+  with `S<n>: `. Installed paths go through `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` (also in
+  `/blueprint`), as `install.sh` does.
+- `harness-review` diffs against the base its prompt names (the QA graph already passes it), so a slice
+  on `integration/<app>` is reviewed alone instead of with every slice before it.
+
+**Bugs caught.** My own tests: the planner prompt shows issues as JSON, so a quoted criterion
+arrives escaped; the build fixture's auditor reported the wrong criterion ids. Both were test
+mistakes, not code.
+
+**Stats.** 9 new tests (334 passed, 0 failed), 9 mutations, all caught. 3 validate.sh rules, each
+checked to fail when its text is removed.

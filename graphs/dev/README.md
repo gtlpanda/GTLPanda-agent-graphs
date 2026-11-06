@@ -56,7 +56,10 @@ All routing reads schemas, never prose.
 **args:** `repo` (absolute, required), `task` (required unless `plan`), `base`,
 `approval` (`human` default | `advisor`), `plan` + `planApproved` (skip
 planning), `completed` (component ids already built; resume skips them),
-`maxFixRounds` and `knownStuckSigs` (passed through to the QA child).
+`maxFixRounds` and `knownStuckSigs` (passed through to the QA child),
+`requiredCriteria` (`/dev --slice`: `[{id, criterion, fails_when}]` from the backlog; the plan must carry
+each with its id and criterion unchanged, or it goes back to the planner, and an approved plan in
+`args` that lacks one escalates).
 
 **plan** (planner output, gated by the advisor):
 - `acceptance[]`: `{id: "AC1", criterion, protects, fails_when, no_claim}`.
@@ -142,6 +145,12 @@ Unattended by default: questions come before any code exists (dirty tree,
 4. On `needs-human`: ask the advisor's questions once, then re-plan with the answers.
 5. On `escalate`: report what is blocked and how to resume (`/dev --resume`
    re-runs with the saved plan and `completed`).
+
+Slice mode, for the `/build-app` driver: `/dev --slice S<n> --base integration/<app> --unattended`.
+`backlog.mjs task` turns the slice (plus every earlier reason and answer from the build ledger) into
+the task text and `requiredCriteria`; `--base` replaces detection, so the QA reviewer diffs this slice
+alone; `--unattended` turns every question (dirty tree, `needs-human`) into a report; and every
+commit subject starts with `S<n>: `.
 
 ## Changes to the QA graph
 

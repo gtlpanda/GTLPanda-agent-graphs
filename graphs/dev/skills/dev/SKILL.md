@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Build a development task end to end with the dev graph - plan (the advisor approves it), build tests-first, prove every acceptance criterion, then the QA graph - and commit the result, unattended after any up-front questions. Use when the user says "/dev <task>", "build this with the dev graph", or wants a feature planned, built, and QA'd. `--review` stops for your plan approval before the build; `--resume` continues a run that escalated.
+description: Build a development task end to end with the dev graph - plan (the advisor approves it), build tests-first, prove every acceptance criterion, then the QA graph - and commit the result, unattended after any up-front questions. Use when the user says "/dev <task>", "build this with the dev graph", or wants a feature planned, built, and QA'd. `--review` stops for your plan approval before the build; `--resume` continues a run that escalated; `--slice S<n>` builds one slice of the repo's backlog, and `--unattended` never asks (the /build-app driver uses both).
 ---
 
 # /dev
@@ -11,7 +11,16 @@ builds, accepts, and runs the QA graph; you own the branch, the saved state,
 Workflow tool for this task.
 
 Arguments: the task text, plus optional `--review` and `--resume`. `--auto` is
-accepted and means the default.
+accepted and means the default. Also:
+- `--base <branch>`: the base branch, instead of detecting it (section 1).
+- `--slice S<n>`: the task is slice `S<n>` of `docs/backlog.json` instead of
+  task text (section 1, step 7), and every commit subject starts with `S<n>: `.
+- `--unattended`: nobody is there. Never use AskUserQuestion, whatever the
+  task text says; every point below that would ask is a report instead
+  (section 5), and the run ends there. `--review` cannot be combined with it.
+
+Paths: `C="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"` is where `install.sh` linked
+PandaStack; every installed path below starts with it.
 
 ## When to ask
 
@@ -23,7 +32,8 @@ Questions come before any code exists, or not at all.
   record it in the report and the commit message. Plan `risks`, and the gate's
   last `issues` when `ledger.planSettled` is true, go in the report too.
 - Every other stop is a report (section 5), never a question.
-- Task text that says to stop and ask wins over this section; follow the task.
+- Task text that says to stop and ask wins over this section; follow the task,
+  except under `--unattended`, which wins over everything.
 
 ## 1. Preflight
 
@@ -31,8 +41,11 @@ Questions come before any code exists, or not at all.
 2. The working tree must be clean (`git status --porcelain` empty), except on
    `--resume`. The graph reports the files it touched, and you commit exactly
    those; unrelated changes would be swept in. If it is dirty, list the files
-   and ask whether to stash, commit, or stop.
-3. Base: `git symbolic-ref --short refs/remotes/origin/HEAD` with the `origin/`
+   and ask whether to stash, commit, or stop (`--unattended`: list them and
+   stop).
+3. Base: `--base <branch>` when given (`git rev-parse --verify -q "<branch>"`
+   must succeed, or stop and say so); otherwise
+   `git symbolic-ref --short refs/remotes/origin/HEAD` with the `origin/`
    prefix removed; if that fails, `main` if it exists, else `master`.
 4. Branch: if the current branch is the base, create
    `dev/<slug>` (slug: lowercase task words joined by `-`, at most 40 chars) and
@@ -41,23 +54,31 @@ Questions come before any code exists, or not at all.
    holds `task.txt`, `plan.json`, and `ledger.json`, inside `.git`, never committed.
 6. Known-stuck signatures: if `"$(git rev-parse --path-format=absolute --git-path harness-loop)/ledger.json"`
    exists and parses, use its `stuckSigs`; otherwise `[]`.
+7. `--slice S<n>`: `docs/backlog.json` must exist in `REPO`. Run
+   `node "$C/skills/backlog/backlog.mjs" task "$REPO/docs/backlog.json" S<n> "$(git rev-parse --path-format=absolute --git-path harness-build)/ledger.json" > "$D/slice.json"`
+   (a missing build ledger is a first attempt). A non-zero exit: report its
+   message and stop. The task text is `slice.json`'s `task`, and
+   `requiredCriteria` is its `requiredCriteria`, both copied exactly as
+   printed.
 
 ## 2. Run the graph
 
 Workflow tool with `name: "dev-build"` (if not found, `scriptPath` set to the
-absolute path of `~/.claude/workflows/dev-build.js`). Args:
+absolute path of `$C/workflows/dev-build.js`). Args:
 
-- New task: `{"repo": REPO, "task": <task text>, "base": BASE, "approval": "advisor" (or "human" with --review), "maxFixRounds": 3, "knownStuckSigs": [...]}`.
+- New task: `{"repo": REPO, "task": <task text>, "base": BASE, "approval": "advisor" (or "human" with --review), "maxFixRounds": 3, "knownStuckSigs": [...]}`,
+  plus `"requiredCriteria"` with `--slice`.
   Save the task text to `$D/task.txt` and delete any `$D/plan.json` from an
   earlier task, so `--resume` never builds a plan this task did not approve.
 - `--resume`: read `$D/ledger.json`, then run the approved plan (below) with
-  `{"repo", "base", "planApproved": true, "completed": <ledger.completed>, "maxFixRounds": 3, "knownStuckSigs": [...]}`.
+  `{"repo", "base", "planApproved": true, "completed": <ledger.completed>, "maxFixRounds": 3, "knownStuckSigs": [...]}`,
+  plus `"requiredCriteria"` with `--slice`.
   If `$D/plan.json` or `$D/ledger.json` is missing or does not parse, say so and stop.
 
 **Running an approved plan.** Never pass the plan in `args` and never retype
 it: a real plan is ~50 KB and workflow scripts cannot read files. Write it into
 a run script instead:
-`node ~/.claude/skills/workflow-state/run-script.mjs INJECTED_PLAN "$D/plan.json" ~/.claude/workflows/dev-build.js "$D/run.js"`
+`node "$C/skills/workflow-state/run-script.mjs" INJECTED_PLAN "$D/plan.json" "$C/workflows/dev-build.js" "$D/run.js"`
 (the shared `workflow-state` skill).
 Its output must start with `run-script: wrote <path>`; anything else, report it
 and stop. If node cannot find the script, it moved to the shared skill: tell
@@ -92,7 +113,10 @@ or **Stop**.
 
 ## 4. On `needs-human`
 
-Show `ledger.questions` and ask them, all in one AskUserQuestion. Append the
+`--unattended`: do not ask. The questions are in `$D/ledger.json`; report
+them (section 5) and stop.
+
+Otherwise show `ledger.questions` and ask them, all in one AskUserQuestion. Append the
 answers to the task text in `$D/task.txt` and run a new task with it (a fresh
 plan). No code exists yet, so this is still up front.
 
@@ -128,10 +152,13 @@ once the blocker is cleared.
    - QA fixes (`ledger.qa.fixed`) go in a final `QA fixes` commit when their
      files do not overlap the component commits; otherwise they ride in the
      single commit.
+   With `--slice S<n>`, every subject above starts with `S<n>: `
+   (`S2: C1: <title>`, `S2: QA fixes`): the driver lands only commits that do.
    Every entry in `ledger.keptChanges` goes in the commit body under
    "Kept by the advisor (not in the approved plan)", with its file:line,
    `serves`, and reason.
-4. Do not push unless the user asks; offer to.
+4. Do not push unless the user asks; offer to (`--unattended`: never push,
+   and the driver pushes nothing either until the whole backlog is built).
 5. If a PushNotification tool is available, send one line: done, criteria met
    (n/n), and the commit count.
 6. Test ratio, measured the same way every time so builds compare:

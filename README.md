@@ -66,9 +66,9 @@ and the backlog once, then leave. The work comes back as one PR to approve.
 
 Built so far: `/blueprint` run 1 (interview), run 2a (design behind the
 advisor gate), and run 3 (the backlog behind the same gate, and your one
-approval), plus `/dev`, `/loop`, `/release-pr`, and the backlog format and its
+approval), plus `/dev` (with a slice mode: one backlog slice, unattended, on
+`integration/<app>`), `/loop`, `/release-pr`, and the backlog format and its
 next-step rules (`backlog.mjs`). Next, in order:
-- `/dev` slice mode (a slice from the backlog, unattended, on `integration/<app>`);
 - `/build-app` (a driver that runs each slice in a fresh headless session);
 - research and spikes before the design;
 - a live end-to-end build of a toy reading-list app.

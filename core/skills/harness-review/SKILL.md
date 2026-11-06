@@ -11,9 +11,14 @@ at. No style nits, no "consider", no speculative hardening.
 
 ## 1. Get the diff
 
+The base is the branch your prompt names (`Base branch: <name>`), so a slice
+built on `integration/<app>` is reviewed alone, not with every slice before
+it. With none named, it is the default branch of origin.
+
 ```bash
+BASE="<the base branch your prompt names>"   # none named: BASE="$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo main)"
 git status --short
-git diff --merge-base "$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo main)" -- . ':!*.lock' ':!package-lock.json' ':!pnpm-lock.yaml'
+git diff --merge-base "$BASE" -- . ':!*.lock' ':!package-lock.json' ':!pnpm-lock.yaml'
 git diff HEAD   # uncommitted on top
 ```
 

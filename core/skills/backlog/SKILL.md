@@ -18,6 +18,16 @@ node ~/.claude/skills/backlog/backlog.mjs check docs/backlog.json
 
 It prints one line per problem, then `BACKLOG: PASS` or `BACKLOG: FAIL`.
 
+`/dev --slice S<n>` gets its task from the same file:
+
+```
+node ~/.claude/skills/backlog/backlog.mjs task docs/backlog.json S2 [ledger.json]
+```
+
+It prints `{slice, app, task, requiredCriteria}` as JSON: the task text (the
+slice's goal and every criterion, plus each earlier reason and answer from the
+build ledger) and the criteria the plan must carry unchanged.
+
 ## The format
 
 ```json

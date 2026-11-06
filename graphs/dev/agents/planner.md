@@ -24,7 +24,9 @@ did not read it, do not claim it.
 
 Numbered (`AC1`, `AC2`, ...), each pass/fail, no subjective language
 ("edge cases are handled" is not a criterion; "an empty list returns 200 and
-`[]`" is). For each, state:
+`[]`" is). When the prompt lists required criteria (a backlog slice), each
+one is in `acceptance` with its own id (`S2-AC1`) and its criterion word for
+word; yours follow as `AC1`, `AC2`, ... For each, state:
 - `protects`: the observable behavior the test will hold in place.
 - `fails_when`: the wrong result that makes it fail.
 - `no_claim`: what a passing test does not prove.
