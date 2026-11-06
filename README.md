@@ -32,11 +32,11 @@
 
 | Family | Graph | Run it with | What it does | Status |
 |--------|-------|-------------|--------------|--------|
-| build | [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once → architect designs, slicer cuts the backlog, advisor gates each → your one approval commits both on `integration/<app>`; research not built yet | interview and design live-run once each; backlog tested with mocked agents |
+| build | [`graphs/blueprint/`](graphs/blueprint/README.md) | `/blueprint <idea>` | extractor (brief from doc, repo, request) → questioner (ranked interview, preflight, assumptions) → you answer once → architect designs, slicer cuts the backlog, advisor gates each → your one approval commits both on `integration/<app>`; research not built yet | interview, design, and backlog live-run |
 | build | [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
 | build | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
 | build | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
-| build | [`graphs/build/`](graphs/build/README.md) | `/build-app` | the driver, detached: one fresh headless `/dev --slice` session per backlog slice, its own checks (commit prefix, clean tree, frozen tests, its own verify), fast-forward onto `integration/<app>`, usage-limit waits, the backlog brakes; then one QA pass over the whole branch, the push, and one PR for you | tested with a fake `claude`; one real slice via `scripts/smoke-build.sh` |
+| build | [`graphs/build/`](graphs/build/README.md) | `/build-app` | the driver, detached: one fresh headless `/dev --slice` session per backlog slice, its own checks (commit prefix, clean tree, frozen tests, its own verify), fast-forward onto `integration/<app>`, usage-limit waits, the backlog brakes; then one QA pass over the whole branch, the push, and one PR for you | live-run once end to end: a 7-slice CLI in 1 h 40 min (retro 24) |
 | marketing | [`graphs/seo/`](graphs/seo/README.md) | `seo-check.mjs check <dir> --site <url>` | so far only the check: a built site's title, description, canonical, Open Graph, and JSON-LD tags, duplicates across pages, the sitemaps (which decide the strict pages), and robots.txt, `SEO-CHECK: PASS\|FAIL`; the audit graph not built yet | check tested offline |
 
 ## The build-app loop
@@ -70,9 +70,10 @@ advisor gate), and run 3 (the backlog behind the same gate, and your one
 approval), plus `/dev` (with a slice mode: one backlog slice, unattended, on
 `integration/<app>`), `/loop`, `/release-pr`, and the backlog format and its
 next-step rules (`backlog.mjs`), and `/build-app` (the driver, the final QA pass, the PR).
-Next, in order:
-- research and spikes before the design;
-- a live end-to-end build of a toy reading-list app.
+The whole loop has run live once: a one-sentence request became a 7-slice CLI with 143
+passing tests in about 2 h 15 min and $57, with no human between the approval and the end
+(retro 24). Next: research and spikes before the design, and a look at the advisor's share
+of the cost (63% of that build).
 
 Families: **build** graphs change your code. **Marketing** graphs (SEO first) change what you
 own, like your site and content, and their fixes ship as code PRs. **Sales** graphs (research,

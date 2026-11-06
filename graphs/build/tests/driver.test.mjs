@@ -87,6 +87,9 @@ await test('every slice lands in order on the integration branch, each from a fr
   assert.equal(gitOut(root, 'branch', '--list', 'slice/*'), '', 'slice branches are deleted once landed')
   assert.equal(status(root).state, 'done')
   assert.equal(status(root).exitCode, 0)
+  // Four sessions at $0.01 each, every result line counted once though the log repeats it.
+  assert.equal(status(root).costUsd, 0.04)
+  assert.match(driverLog(root), /S1: landed \(exit 0, \$0\.01\)/)
 })
 await test('each session gets bypassPermissions, the injected settings, and a clean env without the parent\'s CLAUDE_CODE_*', () => {
   const root = repo({ ...BACKLOG, requirements: ['R1'], slices: [slice(1, [])] })
@@ -183,6 +186,7 @@ await test('running again resumes from the ledger: landed slices are not rebuilt
   assert.equal(code, 0)
   assert.equal(calls.length, 2)
   assert.match(calls[0].args.join(' '), /--slice S2/)
+  assert.equal(status(root).costUsd, 0.04, 'the total carries over from the earlier run (2 sessions there, 2 here)')
 })
 
 console.log('== build-app driver: limits and the API')

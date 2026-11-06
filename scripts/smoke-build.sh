@@ -85,17 +85,19 @@ const state = process.argv[2]
 const status = JSON.parse(fs.readFileSync(path.join(state, 'status.json'), 'utf8'))
 console.log(`smoke-build: ${status.state}: ${status.message}`)
 const logs = fs.readdirSync(path.join(state, 'logs')).filter(f => f.endsWith('.jsonl') && f !== 'probe.jsonl')
-let cost = 0
-const models = {}
+// A stream log repeats its result line, so each session counts once, by session_id.
+const sessions = new Map()
 for (const f of logs) {
   for (const line of fs.readFileSync(path.join(state, 'logs', f), 'utf8').split('\n')) {
     if (!line.includes('"type":"result"')) continue
-    try {
-      const r = JSON.parse(line)
-      cost += Number(r.total_cost_usd || 0)
-      for (const [m, u] of Object.entries(r.modelUsage || {})) models[m] = (models[m] || 0) + Number(u.costUSD || 0)
-    } catch {}
+    try { const r = JSON.parse(line); sessions.set(r.session_id || f, r) } catch {}
   }
+}
+let cost = 0
+const models = {}
+for (const r of sessions.values()) {
+  cost += Number(r.total_cost_usd || 0)
+  for (const [m, u] of Object.entries(r.modelUsage || {})) models[m] = (models[m] || 0) + Number(u.costUSD || 0)
 }
 console.log(`smoke-build: ${logs.length} session(s), $${cost.toFixed(2)}`)
 for (const [m, c] of Object.entries(models)) console.log(`smoke-build:   ${m}: $${c.toFixed(2)}`)

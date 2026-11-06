@@ -11,7 +11,9 @@ which launches the driver detached and reads its state.
 
 Status: **the driver and the skill** are tested against a fake `claude` and a
 fake `gh` over throwaway git repos. `scripts/smoke-build.sh` runs one real
-slice (opt-in, never in `scripts/test.sh`).
+slice (opt-in, never in `scripts/test.sh`). The first live end-to-end build
+(retro 24) landed all 7 slices of a reading-list CLI on their first attempt,
+then passed the final QA: 1 h 40 min and $44 for the build.
 
 ## Graph
 
@@ -66,7 +68,9 @@ only), and `unblock --repo <path> --app <slug> --slice S<n> --answer <text>...`.
 answers and a fresh start; both refuse while a driver runs. State lives in
 `$(git rev-parse --git-path harness-build)/<app>/`: `ledger.json`, `status.json`,
 `driver.pid`, and `logs/` (`driver.log` and one `S<n>-<time>.jsonl` per session).
-None of it is committed. `PANDASTACK_NOTIFY`, when set, is a command that gets
+None of it is committed. `status.json` carries `costUsd`, the total of every
+session of the app so far, and each landing or escalation line in `driver.log`
+names that session's cost. `PANDASTACK_NOTIFY`, when set, is a command that gets
 one line per landing, a slice that needs a human or gets stuck, a brake, and the
 end of a run. The pid files count only while their process's command line is
 still the driver's (or the session's), so a reused pid is never stopped or

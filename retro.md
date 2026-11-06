@@ -857,11 +857,12 @@ log; its bookkeeping now never crashes it, and live runs use the session scratch
 /tmp glob (tasks/lessons.md).
 
 Live smoke run, second attempt (`scripts/smoke-build.sh`, one real slice, `--no-pr`): **PASS** in 4.5
-minutes and $4.89 over 2 sessions. The slice session ran `dev-build`; its plan carried the backlog's
+minutes and $2.44 over 2 sessions (corrected in entry 24: first reported as $4.89, because each stream
+log repeats its result line and the script counted both). The slice session ran `dev-build`; its plan carried the backlog's
 `S1-AC1` and `S1-AC2` unchanged and added AC1 and AC2, and all four were met. The driver's own checks
 passed, and the slice landed. The final session ran `harness-repair` (check, review, QA: no findings) and
-wrote its report through the guard's one writable file. modelUsage: opus $2.28 (the orchestrators),
-sonnet $0.98, fable $1.62, haiku $0.01. Fable and Haiku appear only through the agents pinned to them,
+wrote its report through the guard's one writable file. modelUsage: opus $1.14 (the orchestrators),
+sonnet $0.49, fable $0.81, haiku under $0.01 (corrected in entry 24 from figures double-counted). Fable and Haiku appear only through the agents pinned to them,
 so the pins hold inside Workflow agents under the driver's settings (the open item from entry 21).
 
 **Stats.** 10 new tests (388 workflow tests passed, 0 failed), 14 mutations, all caught. 2 validate.sh
@@ -885,3 +886,54 @@ nothing.
 **Stats.** 3 assertions added to an existing test (388 workflow tests passed, 0 failed): the slice
 session's env and the final QA session's env, plus the settings. The mutation that drops the setting
 is caught.
+
+## 24. The first live end-to-end build: a reading-list CLI (2026-11-05)
+
+**What ran.** A one-sentence request ("a command-line reading list for one person: add a book, list
+all, mark one read, list what's left; Node, a local JSON file, no network, no accounts") went through
+`/blueprint` (interview, design, backlog, approval) and `/build-app` in a scratch repo, with the pass
+conditions written down first (`tasks/todo.md`). The agent stood in for the human: every interview
+answer was the recommended option, it kept every assumption, and it gave the one approval. Each
+blueprint stage ran in a clean headless session, because the orchestrating session still carried the
+old `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` and would have forced every agent onto Sonnet. No GitHub
+remote, so `--no-pr`.
+
+| Stage | Wall time | Cost | Result |
+|-------|-----------|------|--------|
+| Interview | 79 s | $0.61 | 8 questions, 9 assumptions, 3 preflight items |
+| Design, first attempt | 10 min | $3.42 | killed by the headless 10-minute ceiling (entry 23) |
+| Design | 9 min 40 s | $3.82 | approved in round 2: 5 modules, 14 failure modes, 0 departures, 2 notes |
+| Backlog | 10 min 40 s | $5.25 | approved in round 2 (the first gate sent back 3 blocking issues; the re-gate checked only those): 7 slices, 4 knowledge owners |
+| Build: 7 slices | 1 h 35 min | $41.74 | every slice landed on its first attempt: 8, 16, 11, 17, 16, 13, and 13 min |
+| Final QA | 4 min | $2.16 | `harness-repair` over the whole branch: VERIFY: PASS, no findings, nothing to fix |
+| **Total** | **about 2 h 15 min** | **about $57** | |
+
+The build's model spend was opus $6.95 (the orchestrators), sonnet $9.46, fable $27.48, and haiku
+$0.03. Fable is the advisor, which gates every plan and confirms every finding; it was 63% of the
+build. That makes it the first cost lever to look at.
+
+**Pre-registered conditions: all 7 pass.**
+- C1: backlog-ready in 2 slicer rounds, and `BACKLOG: PASS`.
+- C2: the approval commit holds exactly write-docs' 3 files.
+- C3: the ledger shows all 7 slices done, 0 escalations, 0 re-plans, no brake, and driver exit 0.
+- C4: every commit after the approval starts `S<n>: ` (7 of 7), and the 9 frozen test files on the
+  final branch equal their content at the commit that froze each one.
+- C5: the final QA status is done, with 0 fix rounds.
+- C6: fable and haiku appear in modelUsage.
+- C7: the app's own suite runs 143 tests, all passing, and `verify` passes. By hand, the CLI adds,
+  lists, and marks a book read; it rejects a duplicate with the existing id; marking a book read
+  twice succeeds with a note; an unknown id exits 1 and bad usage exits 2; a corrupt file is refused
+  and left untouched.
+
+Not exercised live (the fake-`claude` tests cover them): a planted frozen-test edit, a usage-limit
+wait, and the push and PR.
+
+**Bugs the live run found.**
+- The headless 10-minute background-wait ceiling would have killed every real slice. It is fixed
+  in #25 and measured: a 10 min 40 s and a 12 min 51 s headless run both completed with the ceiling
+  at 0.
+- Each stream log repeats its result line, so summing result lines doubles the cost. The smoke run
+  was $2.44, not the $4.89 entry 22 reported (corrected there and on #24), and `smoke-build.sh` now
+  counts each session once. The driver now logs each session's cost and keeps a running `costUsd` in
+  `status.json`, carried across runs. The fake `claude` repeats its result line the same way, so the
+  tests count once.

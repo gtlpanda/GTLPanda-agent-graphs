@@ -30,7 +30,7 @@ import {
 import { defaultBase, finalQaPrompt, qaReport, prBody, pushAndOpenPr } from './finish.mjs'
 import { parseResetTime, planLimitWait } from './limits.mjs'
 import { buildEnv, git, run } from './proc.mjs'
-import { sessionSettings, sliceArgs, runClaude, sessionVerdict, probeUntilAvailable, stopSessions, writeJson, NO_BG_CEILING } from './session.mjs'
+import { sessionSettings, sliceArgs, runClaude, sessionVerdict, probeUntilAvailable, stopSessions, writeJson, readResult, NO_BG_CEILING } from './session.mjs'
 import { sliceChecks, devReport, outcomeOf, TEST_FILE } from './checks.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -117,6 +117,15 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
   let before = {}
   try { before = JSON.parse(readFileSync(join(state, 'status.json'), 'utf8')) } catch { before = {} }
   const noPr = noPrFlag === null ? before.noPr === true : noPrFlag
+  // What every session of this app has cost so far, from each session's own
+  // result line (read once per session: a stream log repeats its result line).
+  let spent = Number.isFinite(Number(before.costUsd)) ? Number(before.costUsd) : 0
+  const charge = logFile => {
+    const r = readResult(logFile)
+    const c = r && Number.isFinite(Number(r.total_cost_usd)) ? Number(r.total_cost_usd) : 0
+    spent += c
+    return `$${c.toFixed(2)}`
+  }
   const files = {
     ledger: join(state, 'ledger.json'), status: join(state, 'status.json'), pid: join(state, 'driver.pid'),
     settings: join(state, 'session-settings.json'), guard: join(state, 'guard.json'), stopFailure: join(state, 'stop-failure.json'), session: join(state, 'session.pid'),
@@ -131,7 +140,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
     try { appendFileSync(files.driverLog, `${line}\n`) } catch (e) { console.error(`driver: cannot write ${files.driverLog}: ${e.code || e.message}`) }
   }
   const status = (fields) => {
-    try { writeJson(files.status, { app, integration, pid: process.pid, noPr, updatedAt: new Date().toISOString(), ...fields }) } catch (e) { console.error(`driver: cannot write ${files.status}: ${e.code || e.message}`) }
+    try { writeJson(files.status, { app, integration, pid: process.pid, noPr, costUsd: Math.round(spent * 100) / 100, updatedAt: new Date().toISOString(), ...fields }) } catch (e) { console.error(`driver: cannot write ${files.status}: ${e.code || e.message}`) }
   }
   const notify = message => {
     if (!cfg.notify) return
@@ -203,6 +212,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
       env: buildEnv({ ...NO_BG_CEILING, HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
     })
     if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during the final QA; every slice stays landed`) }
+    const qaCost = charge(logFile)
     const report = qaReport(files.finalQa)
     if (!report) {
       setAside(repo, branch, integration, attempt, log)
@@ -219,7 +229,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
     git(repo, ['branch', '-q', '-D', branch])
     const fixes = git(repo, ['log', '--format=%s', `${base}..${integration}`]).stdout.split('\n').filter(s => s.startsWith('final: ')).length
     const qaLine = `The QA graph ran once over the whole branch against \`${base}\`: ${report.reason || 'done'}${fixes ? ` (${fixes} fix commit${fixes > 1 ? 's' : ''})` : ' (nothing to fix)'}.`
-    log(qaLine)
+    log(`${qaLine} (${qaCost})`)
     if (noPr) return end(EXIT.done, 'done', `every slice landed on ${integration} and the final QA passed; --no-pr, so nothing was pushed`)
     let pr
     try {
@@ -275,6 +285,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
       })
       if (stopping) { setAside(repo, branch, integration, attempt, log); return end(EXIT.stopped, 'stopped', `stopped by request during ${slice.id}; its work is kept on attempt/${attempt}`) }
 
+      const cost = charge(logFile)
       const report = devReport(files.devLedger)
       const verdict = sessionVerdict(logFile, files.stopFailure)
       // A session that ended on the API, not on its own work, is not counted.
@@ -320,17 +331,17 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
         // A crash right here is repaired by reconcile() on the next run.
         writeLedger(files.ledger, ledger)
         git(repo, ['branch', '-q', '-D', branch])
-        log(`${slice.id}: landed (exit ${code}); froze ${outcome.frozen.length} test file(s)`)
+        log(`${slice.id}: landed (exit ${code}, ${cost}); froze ${outcome.frozen.length} test file(s)`)
         notify(`${slice.id} landed`)
       } else {
         setAside(repo, branch, integration, attempt, log)
         writeLedger(files.ledger, ledger)
         const s = sliceState(ledger, slice.id)
         if (outcome.kind === 'needs-human') {
-          log(`${slice.id}: needs a human (${outcome.questions.join(' | ')}); it and its dependents wait, the rest keep building`)
+          log(`${slice.id}: needs a human (${cost}; ${outcome.questions.join(' | ')}); it and its dependents wait, the rest keep building`)
           notify(`${slice.id} needs a human: ${outcome.questions.join(' | ')}`)
         } else {
-          log(`${slice.id}: escalated (exit ${code}): ${outcome.reason}${s.stuck ? '; stuck after its re-plan, blocked' : s.replan ? '; next attempt re-plans from scratch' : ''}`)
+          log(`${slice.id}: escalated (exit ${code}, ${cost}): ${outcome.reason}${s.stuck ? '; stuck after its re-plan, blocked' : s.replan ? '; next attempt re-plans from scratch' : ''}`)
           if (s.stuck) notify(`${slice.id} is stuck after its re-plan and blocked; it and its dependents wait`)
         }
       }
