@@ -1,7 +1,7 @@
 // guard.test.mjs — the /build-app guard rules, both hooks as processes, and the
 // session env and settings. Run by scripts/test-workflow.mjs.
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -10,22 +10,21 @@ import { test } from '../../../scripts/workflow-harness.mjs'
 import { decide, decideBash } from '../skills/build-app/driver/hooks/guard-rules.mjs'
 import { buildEnv } from '../skills/build-app/driver/proc.mjs'
 import { sessionSettings, readResult } from '../skills/build-app/driver/session.mjs'
+import { TEST_FILE } from '../skills/build-app/driver/checks.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const HOOKS = join(here, '..', 'skills', 'build-app', 'driver', 'hooks')
 
 console.log('== build-app guard: shell commands')
-await test('denied: push in any spelling, remote changes, history rewrites, branch deletes, clean, the integration branch, rm -rf of home or root', () => {
+await test('denied: push in the common spellings, remote changes, history rewrites, forced branch changes, clean, the integration branch, rm -rf of home or root', () => {
   for (const cmd of [
     'git push', 'git push origin main', 'git -C . push', 'git -C /repo push --force', 'git -c core.x=y push', '/usr/bin/git push',
     'npm test && git push', 'echo x; git push', 'true || git push', 'git status | git push',
     'git remote add evil https://x', 'git remote set-url origin x', 'git reset --hard HEAD~1', 'git reset --hard',
-    'git rebase -i main', 'git filter-branch', 'git update-ref refs/heads/main HEAD', 'git branch -D integration/toy', 'git branch -f main HEAD', 'git branch --delete x',
+    'git rebase -i main', 'git filter-branch', 'git update-ref refs/heads/main HEAD', 'git branch -D integration/toy', 'git branch -f main HEAD', 'git branch --force x HEAD',
     'git clean -fd', 'git clean -xdf', 'git checkout integration/toy', 'git switch integration/toy',
     'rm -rf /', 'rm -rf ~', 'rm -rf ~/', 'rm -fr $HOME', 'sudo rm -rf /',
-    // Fails closed: text that reads as a git push is denied even inside an echo.
-    'echo "git push is denied"',
-    'bash -c "git push"', "sh -c 'git push origin main'", 'echo $(git push)', 'xargs git push', 'env GIT_TRACE=1 git push', 'eval git push', 'echo `git push`',
+    'bash -c "git push"', 'git pu\\sh', 'git send-pack origin', '(git push)', 'git branch -d integration/toy', 'git reset --soft integration/toy', 'git merge integration/toy', "sh -c 'git push origin main'", 'echo $(git push)', 'xargs git push', 'env GIT_TRACE=1 git push', 'eval git push', 'echo `git push`',
   ]) assert.ok(decideBash(cmd), `should deny: ${cmd}`)
 })
 await test('allowed: everything a /dev slice does', () => {
@@ -33,7 +32,12 @@ await test('allowed: everything a /dev slice does', () => {
     'git status --porcelain', 'git diff --merge-base integration/toy', 'git log --oneline', 'git add -A', 'git commit -m "S1: C1: x"',
     'git rev-parse --path-format=absolute --git-path harness-build', 'git stash', 'git branch --show-current', 'git branch', 'git reset HEAD file',
     'npm test', 'node --test', 'rm -rf node_modules', 'rm -rf ./dist', 'rm file.txt', 'grep -r push src',
-    'git checkout -- src/a.js', 'git show integration/toy:docs/backlog.json',
+    'git checkout -- src/a.js', 'git show integration/toy:docs/backlog.json', 'echo "git push is denied"',
+    // Commit messages are data, whatever words they use (review of #23).
+    'git commit -m "S2: drop git rebase helper"', 'git commit -m "S2: C1: stop shelling out to git push in release script"',
+    "git commit -F - <<'EOF'\nS2: C1: x\n\nrun git push manually; git reset --hard is gone\nEOF",
+    'git commit -m "$(cat <<\'EOF\'\nS2: C1: x\n\nthen git push origin main\nEOF\n)"',
+    'git clean -nfd', 'git clean -fd --dry-run', 'git branch -d dev/old-branch', 'git branch --delete x', 'git log --grep="git push"',
     'bash -c "git status"', 'gitk', 'legit push', 'git commit -m "S1: C1: show a push notification"',
   ]) assert.equal(decideBash(cmd), null, `should allow: ${cmd}`)
 })
@@ -50,6 +54,25 @@ await test('an edit to a frozen test or inside .git is denied; any other edit is
     ['Edit', {}], ['Write', { file_path: '/r/.github/workflows/ci.yml' }], ['Grep', { pattern: 'x' }]]) {
     assert.equal(decide(tool, params, rules), null, `${tool} ${JSON.stringify(params)}`)
   }
+})
+
+await test('a symlinked repo path, or ../ in a file path, does not dodge the edit rules', () => {
+  const real = mkdtempSync(join(tmpdir(), 'guard-real-'))
+  mkdirSync(join(real, 'tests'))
+  writeFileSync(join(real, 'tests', 'S1.test.js'), 'x')
+  mkdirSync(join(real, '.git'))
+  const link = `${real}-link`
+  symlinkSync(real, link)
+  for (const [repo, file] of [[link, join(real, 'tests', 'S1.test.js')], [real, join(link, 'tests', 'S1.test.js')], [link, 'tests/../tests/S1.test.js']]) {
+    assert.match(decide('Edit', { file_path: file }, { repo, frozen: ['tests/S1.test.js'] }) || '', /frozen test/, `${repo} ${file}`)
+  }
+  assert.match(decide('Write', { file_path: join(real, '.git', 'hooks', 'new-hook') }, { repo: link, frozen: [] }) || '', /inside \.git/)
+})
+await test('the frozen-test rule is the same regex /dev counts tests by', () => {
+  const skill = readFileSync(join(here, '..', '..', 'dev', 'skills', 'dev', 'SKILL.md'), 'utf8')
+  const awk = skill.match(/if \(\$3 ~ \/(.+?)\/\) t \+= \$1/)
+  assert.ok(awk, 'the test ratio command in /dev SKILL.md')
+  assert.equal(TEST_FILE.source, awk[1])
 })
 
 console.log('== build-app guard: the hooks as processes')
@@ -81,8 +104,10 @@ await test('the stop-failure hook records the failure under the driver, and noth
 
 console.log('== build-app driver: session env and settings')
 await test('buildEnv drops the parent session\'s identity and settings env and keeps the rest', () => {
-  const env = buildEnv({ HARNESS_BUILD_ACTIVE: '1' }, { PATH: '/bin', HOME: '/h', CLAUDECODE: '1', CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL: 'sonnet', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_PID: '9', CLAUDE_EFFORT: 'high', CLAUDE_CONFIG_DIR: '/c', ANTHROPIC_API_KEY: 'k' })
-  assert.deepEqual(env, { PATH: '/bin', HOME: '/h', CLAUDE_CONFIG_DIR: '/c', ANTHROPIC_API_KEY: 'k', HARNESS_BUILD_ACTIVE: '1' })
+  const env = buildEnv({ HARNESS_BUILD_ACTIVE: '1' }, { PATH: '/bin', HOME: '/h', CLAUDECODE: '1', CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL: 'sonnet', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_PID: '9', CLAUDE_EFFORT: 'high', CLAUDE_CONFIG_DIR: '/c', ANTHROPIC_API_KEY: 'k',
+    CLAUDE_CODE_OAUTH_TOKEN: 't', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '1' })
+  // How an unattended box authenticates stays (review of #23); session identity and model settings go.
+  assert.deepEqual(env, { PATH: '/bin', HOME: '/h', CLAUDE_CONFIG_DIR: '/c', ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_OAUTH_TOKEN: 't', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_SKIP_BEDROCK_AUTH: '1', HARNESS_BUILD_ACTIVE: '1' })
 })
 await test('settings: the model env, both hooks, and the deny rules; readResult takes the last result line', () => {
   const s = sessionSettings('/hooks')

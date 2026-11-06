@@ -794,5 +794,29 @@ start dirty, and `/dev --unattended` stops on that (the driver now names them in
 3 of 18 mutants survived (a session that commits cleanly but leaves files behind, a `/dev`
 escalation with clean-looking commits, the guard's frozen list), each closed with a test.
 
-**Stats.** 34 new tests (16 end-to-end driver runs, 7 guard and session, 11 ported limits); 369 workflow
-tests passed, 0 failed. 22 mutations, all caught after the fixes.
+PR review (#23; 1 HIGH, 8 MEDIUM, 1 LOW, each reproduced by the reviewer, all fixed with tests):
+- HIGH: `git mv` of a frozen test passed the frozen check, since git's rename detection listed only the
+  new name (now `--no-renames`).
+- A relative or symlinked `--repo` switched off the guard's `.git` and frozen-test rules (the repo,
+  and every edited path, are now resolved to real paths).
+- A fourth overloaded-API failure in a row fell through into the checks and was counted as the slice's
+  escalation (now the build pauses, exit 7, uncounted).
+- After a killed driver, the next run reset `slice/S<n>` and orphaned its finished commits (now kept on
+  `attempt/S<n>-<time>-recovered`), and a session it started could still be running (now a
+  `session.pid` blocks a second one).
+- A crash between the fast-forward and the ledger write left a landed slice pending, which then
+  failed four times and braked (the ledger is now written first, and preflight records a slice whose
+  `S<n>: ` commits are already on integration).
+- A reused pid in `driver.pid` wedged the lock and let `stop` SIGTERM an unrelated process (a pid now
+  counts only while its command line is the driver's).
+- Stripping every `CLAUDE_CODE_*` would drop `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CODE_USE_BEDROCK`,
+  so an unattended box could not log in (auth and provider settings are kept).
+- The guard read any later word `git` as a command, so a commit message like "drop git rebase helper"
+  was denied; a real tokenizer now treats quotes, heredocs, and arguments as data and still checks
+  `bash -c`, `$(...)`, `eval`, and prefixes such as `xargs` and `env`. `git clean -n` and `git branch -d`
+  are allowed.
+- The test-file regex was a hand copy of `/dev`'s (now a test pins it to the SKILL.md command).
+- LOW: a slice that got stuck was not notified, and the README said "any spelling".
+
+**Stats.** 43 new tests (23 end-to-end driver runs, 9 guard and session, 11 ported limits); 378 workflow
+tests passed, 0 failed. 37 mutations, all caught after the fixes.

@@ -3,8 +3,9 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { git, run, tail } from './proc.mjs'
 
-// Test files, by the same rule /dev's test ratio uses (graphs/dev/skills/dev/SKILL.md).
-export const TEST_FILE = /(^|\/)(tests?|__tests__)\/|[._](test|spec)\.[a-z]+$|_test\.go$|(^|\/)test_[^/]*\.py$/
+// Test files, by the rule /dev's test ratio uses (graphs/dev/skills/dev/SKILL.md,
+// section 6); a test fails if the two drift.
+export const TEST_FILE = /(^|\/)(tests?|__tests__)\/|[._](test|spec)\.[a-z]+$|_test\.go$|(^|\/)test_[^\/]*\.py$/
 
 // Returns { problems: [text], testFiles: [this slice's test files] }. Landing
 // needs no problems.
@@ -19,7 +20,8 @@ export function sliceChecks({ repo, integration, branch, sliceId, frozen, verify
   if (!subjects.length) problems.push(`no commits on ${branch}`)
   const foreign = subjects.filter(s => !s.startsWith(`${sliceId}: `))
   if (foreign.length) problems.push(`commits that do not start with "${sliceId}: ": ${foreign.map(s => JSON.stringify(s)).join(', ')}`)
-  const changed = git(repo, ['diff', '--name-only', `${integration}...${branch}`]).stdout.split('\n').filter(Boolean)
+  // --no-renames: a renamed frozen test shows up under its old name too.
+  const changed = git(repo, ['diff', '--name-only', '--no-renames', `${integration}...${branch}`]).stdout.split('\n').filter(Boolean)
   const touchedFrozen = changed.filter(f => frozen.includes(f))
   if (touchedFrozen.length) problems.push(`frozen tests from earlier slices changed: ${touchedFrozen.join(', ')}`)
   if (!problems.length) {

@@ -2,7 +2,7 @@
 // reading its result. runClaude, readResult, and probeUntilAvailable follow the
 // autobuild kit's lib/loop.mjs; the settings are this driver's own.
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync, openSync, closeSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, openSync, closeSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildEnv } from './proc.mjs'
 import { classifyOutcome, parseResetTime, planLimitWait } from './limits.mjs'
@@ -48,17 +48,21 @@ export async function stopSessions(graceMs = 30_000) {
 
 // Starts `bin` and resolves its exit code (124 on timeout, 127 if it cannot start).
 // stdout goes to logFile (stream-json), stderr to logFile.stderr.
-export async function runClaude({ bin, repo, args, env, logFile, timeoutMs }) {
+// pidFile, when given, holds the session's pid while it runs, so a driver
+// started after a crash can tell an orphaned session is still at work.
+export async function runClaude({ bin, repo, args, env, logFile, timeoutMs, pidFile }) {
   const out = openSync(logFile, 'w')
   const err = openSync(`${logFile}.stderr`, 'w')
   try {
     return await new Promise(resolve => {
       const child = spawn(bin, args, { cwd: repo, env, stdio: ['ignore', out, err] })
       sessions.add(child)
+      if (pidFile && child.pid) writeFileSync(pidFile, String(child.pid))
       let timedOut = false
       const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 30_000).unref() }, timeoutMs)
-      child.on('close', code => { clearTimeout(timer); sessions.delete(child); resolve(timedOut ? 124 : (code ?? 1)) })
-      child.on('error', () => { clearTimeout(timer); sessions.delete(child); resolve(127) })
+      const done = code => { clearTimeout(timer); sessions.delete(child); if (pidFile) rmSync(pidFile, { force: true }); resolve(code) }
+      child.on('close', code => done(timedOut ? 124 : (code ?? 1)))
+      child.on('error', () => done(127))
     })
   } finally {
     closeSync(out)

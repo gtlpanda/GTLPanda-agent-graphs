@@ -7,10 +7,13 @@ import { spawnSync } from 'node:child_process'
 // a driver started from one would pass on, for example, an old
 // CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL that forces every workflow agent onto one
 // model (measured 2026-11-05). Nested sessions also misbehave on CLAUDECODE.
+// Kept: how this machine authenticates and which provider it uses, the standard
+// setup for an unattended box.
+const KEEP = /^CLAUDE_CODE_(OAUTH_TOKEN|USE_[A-Z]+|SKIP_[A-Z]+_AUTH|API_KEY_HELPER_TTL_MS|CLIENT_(CERT|KEY|KEY_PASSPHRASE))$/
 export function buildEnv(extra = {}, base = process.env) {
   const env = { ...base }
   for (const key of Object.keys(env)) {
-    if (/^(CLAUDECODE$|CLAUDE_CODE_|CLAUDE_PID$|CLAUDE_EFFORT$)/.test(key)) delete env[key]
+    if (/^(CLAUDECODE$|CLAUDE_CODE_|CLAUDE_PID$|CLAUDE_EFFORT$)/.test(key) && !KEEP.test(key)) delete env[key]
   }
   return Object.assign(env, extra)
 }

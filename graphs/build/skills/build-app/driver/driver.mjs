@@ -13,11 +13,12 @@
 // autobuild kit's lib/loop.mjs.
 //
 // Exit codes: 0 every slice landed   3 a brake (the reason is in status.json)
-//   6 preflight failed   8 a usage limit resets too far away (run again later)
+//   6 preflight failed   7 the API stayed overloaded (run again later)
+//   8 a usage limit resets too far away (run again later)
 //   9 billing or spend limit   10 auth problem   11 another driver runs for this app
 //   12 the repo is in a state the driver will not touch   130 stopped
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   validateBacklog, ledgerPath, readLedger, writeLedger, nextSlice, frozenFiles, recordOutcome, brake, sliceState,
@@ -25,11 +26,11 @@ import {
 import { parseResetTime, planLimitWait } from './limits.mjs'
 import { buildEnv, git, run } from './proc.mjs'
 import { sessionSettings, sliceArgs, runClaude, sessionVerdict, probeUntilAvailable, stopSessions, writeJson } from './session.mjs'
-import { sliceChecks, devReport, outcomeOf } from './checks.mjs'
+import { sliceChecks, devReport, outcomeOf, TEST_FILE } from './checks.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || join(process.env.HOME || '', '.claude')
-export const EXIT = { done: 0, brake: 3, preflight: 6, limitTooFar: 8, billing: 9, auth: 10, locked: 11, gitState: 12, stopped: 130 }
+export const EXIT = { done: 0, brake: 3, preflight: 6, apiDown: 7, limitTooFar: 8, billing: 9, auth: 10, locked: 11, gitState: 12, stopped: 130 }
 
 // Everything a test may change comes from the environment, with these defaults.
 function settingsFromEnv(env = process.env) {
@@ -69,14 +70,46 @@ function isAlive(pid) {
   try { process.kill(pid, 0); return true } catch { return false }
 }
 
-export async function runDriver({ repo, app }, cfg = settingsFromEnv()) {
+// A pid file outlives a SIGKILL or a reboot, and pids are reused: a live pid
+// counts only when its command line is still ours (Linux /proc; elsewhere,
+// alive is all we can tell).
+export function isOurs(pid, marker) {
+  if (!Number.isInteger(pid) || pid <= 0 || !isAlive(pid)) return false
+  const cmdline = `/proc/${pid}/cmdline`
+  if (!existsSync('/proc/self/cmdline')) return true
+  try { return readFileSync(cmdline, 'utf8').split('\0').some(a => a.includes(marker)) } catch { return false }
+}
+function readPid(file) {
+  return existsSync(file) ? Number(readFileSync(file, 'utf8').trim()) : 0
+}
+
+// After a crash: a pending slice whose `S<n>: ` commits are already on
+// integration landed before the ledger was written. Record it, with the test
+// files those commits touched, instead of building it again.
+function reconcile(repo, integration, backlog, ledger, log) {
+  const subjects = git(repo, ['log', '--format=%H %s', integration]).stdout.split('\n').filter(Boolean)
+  for (const sl of backlog.slices) {
+    if (sliceState(ledger, sl.id).status !== 'pending') continue
+    const shas = subjects.filter(l => l.slice(41).startsWith(`${sl.id}: `)).map(l => l.slice(0, 40))
+    if (!shas.length) continue
+    const files = shas.flatMap(sha => git(repo, ['show', '--name-only', '--no-renames', '--format=', sha]).stdout.split('\n').filter(Boolean))
+    const frozen = [...new Set(files)].filter(f => TEST_FILE.test(f) && existsSync(join(repo, f)))
+    ledger = recordOutcome(ledger, sl.id, { kind: 'landed', frozen })
+    log(`${sl.id}: already on ${integration} (the driver stopped before recording it); recorded as landed`)
+  }
+  return ledger
+}
+
+export async function runDriver({ repo: given, app }, cfg = settingsFromEnv()) {
+  // One real path: the guard compares file paths against it.
+  const repo = realpathSync(resolve(given))
   const integration = `integration/${app}`
   const state = stateDirOf(repo, app)
   const logs = join(state, 'logs')
   mkdirSync(logs, { recursive: true })
   const files = {
     ledger: join(state, 'ledger.json'), status: join(state, 'status.json'), pid: join(state, 'driver.pid'),
-    settings: join(state, 'session-settings.json'), guard: join(state, 'guard.json'), stopFailure: join(state, 'stop-failure.json'),
+    settings: join(state, 'session-settings.json'), guard: join(state, 'guard.json'), stopFailure: join(state, 'stop-failure.json'), session: join(state, 'session.pid'),
     driverLog: join(logs, 'driver.log'), probe: join(logs, 'probe.jsonl'),
     devLedger: join(git(repo, ['rev-parse', '--path-format=absolute', '--git-path', 'harness-dev']).stdout.trim(), 'ledger.json'),
   }
@@ -104,11 +137,11 @@ export async function runDriver({ repo, app }, cfg = settingsFromEnv()) {
     return code
   }
 
-  // One driver per app.
-  if (existsSync(files.pid)) {
-    const pid = Number(readFileSync(files.pid, 'utf8'))
-    if (pid !== process.pid && isAlive(pid)) { log(`another driver (pid ${pid}) is building ${app}`); return EXIT.locked }
-  }
+  // One driver per app, and no session left running by one that was killed.
+  const other = readPid(files.pid)
+  if (other !== process.pid && isOurs(other, 'driver.mjs')) { log(`another driver (pid ${other}) is building ${app}`); return EXIT.locked }
+  const orphan = readPid(files.session)
+  if (isOurs(orphan, cfg.bin)) { log(`a session an earlier driver started (pid ${orphan}) is still running in ${repo}; stop it first`); return EXIT.locked }
   writeFileSync(files.pid, String(process.pid))
   let stopping = false
   const onSignal = () => {
@@ -131,6 +164,8 @@ export async function runDriver({ repo, app }, cfg = settingsFromEnv()) {
     if (!run('bash', ['-c', `command -v ${JSON.stringify(cfg.bin)}`]).ok) return end(EXIT.preflight, 'failed', `preflight: ${cfg.bin} not found`)
     let ledger
     try { ledger = readLedger(files.ledger) } catch (e) { return end(EXIT.preflight, 'failed', `preflight: ${e.message}`) }
+    const reconciled = reconcile(repo, integration, backlog, ledger, log)
+    if (reconciled !== ledger) { ledger = reconciled; writeLedger(files.ledger, ledger) }
     writeJson(files.settings, sessionSettings(join(HERE, 'hooks')))
     log(`building ${app}: ${backlog.slices.length} slice(s), ${backlog.slices.filter(s => sliceState(ledger, s.id).status === 'done').length} already landed`)
 
@@ -143,19 +178,25 @@ export async function runDriver({ repo, app }, cfg = settingsFromEnv()) {
       const slice = nextSlice(backlog, ledger)
       if (!slice) return end(EXIT.done, 'done', `every slice landed on ${integration}`)
 
-      // A fresh branch from integration for every attempt.
+      // A fresh branch from integration for every attempt. One left by a driver
+      // that died mid-attempt is kept first, never reset.
       const branch = `slice/${slice.id}`
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
+      if (git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]).ok && git(repo, ['rev-list', '--count', `${integration}..${branch}`]).stdout.trim() !== '0') {
+        git(repo, ['branch', '-q', '-f', `attempt/${slice.id}-${stamp}-recovered`, branch])
+        log(`${slice.id}: kept the commits a stopped driver left on ${branch} as attempt/${slice.id}-${stamp}-recovered`)
+      }
       if (!git(repo, ['checkout', '-q', '-B', branch, integration]).ok) return end(EXIT.gitState, 'failed', `could not create ${branch} from ${integration}`)
       rmSync(files.devLedger, { force: true })
       rmSync(files.stopFailure, { force: true })
       writeJson(files.guard, { repo, frozen: frozenFiles(ledger) })
-      const attempt = `${slice.id}-${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}`
+      const attempt = `${slice.id}-${stamp}`
       const logFile = join(logs, `${attempt}.jsonl`)
       const prompt = `/dev --slice ${slice.id} --base ${integration} --unattended`
       status({ state: 'running', slice: slice.id, message: `building ${slice.id}: ${slice.title}`, log: logFile })
       log(`${slice.id}: ${slice.title} (${prompt})`)
       const code = await runClaude({
-        bin: cfg.bin, repo, logFile, timeoutMs: cfg.sessionTimeoutMs,
+        bin: cfg.bin, repo, logFile, timeoutMs: cfg.sessionTimeoutMs, pidFile: files.session,
         args: sliceArgs({ prompt, model: cfg.model, settingsFile: files.settings }),
         env: buildEnv({ HARNESS_BUILD_ACTIVE: '1', HARNESS_BUILD_GUARD: files.guard, HARNESS_BUILD_STOP_FAILURE: files.stopFailure }),
       })
@@ -168,7 +209,9 @@ export async function runDriver({ repo, app }, cfg = settingsFromEnv()) {
         setAside(repo, branch, integration, attempt, log)
         if (verdict.kind === 'billing') return end(EXIT.billing, 'failed', `spend or credit limit (${verdict.message}); the driver never spends past a limit`)
         if (verdict.kind === 'auth') return end(EXIT.auth, 'failed', `authentication problem (${verdict.message}); log in again, then resume`)
-        if (verdict.kind === 'transient' && transient < cfg.maxTransientRetries) {
+        if (verdict.kind === 'transient') {
+          // An outage is never the slice's failure: past the retries, pause uncounted.
+          if (transient >= cfg.maxTransientRetries) return end(EXIT.apiDown, 'paused', `the API stayed overloaded after ${cfg.maxTransientRetries} retries (${verdict.message}); run /build-app resume later`)
           transient += 1
           log(`${slice.id}: API overloaded or server error (${verdict.message}); waiting ${cfg.transientWaitMinutes} min, retry ${transient}/${cfg.maxTransientRetries}, not counted`)
           await sleepMs(cfg.transientWaitMinutes * 60_000)
@@ -201,8 +244,9 @@ export async function runDriver({ repo, app }, cfg = settingsFromEnv()) {
       if (outcome.kind === 'landed') {
         const landed = git(repo, ['checkout', '-q', integration]).ok && git(repo, ['merge', '-q', '--ff-only', branch]).ok
         if (!landed) return end(EXIT.gitState, 'failed', `${slice.id} passed its checks but could not be fast-forwarded onto ${integration}; nothing was recorded`)
-        git(repo, ['branch', '-q', '-D', branch])
+        // A crash right here is repaired by reconcile() on the next run.
         writeLedger(files.ledger, ledger)
+        git(repo, ['branch', '-q', '-D', branch])
         log(`${slice.id}: landed (exit ${code}); froze ${outcome.frozen.length} test file(s)`)
         notify(`${slice.id} landed`)
       } else {
@@ -214,6 +258,7 @@ export async function runDriver({ repo, app }, cfg = settingsFromEnv()) {
           notify(`${slice.id} needs a human: ${outcome.questions.join(' | ')}`)
         } else {
           log(`${slice.id}: escalated (exit ${code}): ${outcome.reason}${s.stuck ? '; stuck after its re-plan, blocked' : s.replan ? '; next attempt re-plans from scratch' : ''}`)
+          if (s.stuck) notify(`${slice.id} is stuck after its re-plan and blocked; it and its dependents wait`)
         }
       }
     }
@@ -266,9 +311,8 @@ export async function main(argv) {
     console.log(existsSync(file) ? readFileSync(file, 'utf8').trim() : JSON.stringify({ app: a.app, state: 'never run' }))
     return 0
   }
-  const pidFile = join(state, 'driver.pid')
-  const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : 0
-  if (!pid || !isAlive(pid)) { console.log(`no driver is running for ${a.app}`); return 0 }
+  const pid = readPid(join(state, 'driver.pid'))
+  if (!isOurs(pid, 'driver.mjs')) { console.log(`no driver is running for ${a.app}`); return 0 }
   process.kill(pid, 'SIGTERM')
   console.log(`asked the driver (pid ${pid}) to stop; it ends the running session first`)
   return 0

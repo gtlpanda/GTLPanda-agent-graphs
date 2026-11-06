@@ -4,6 +4,7 @@
 // and acts it out in the repo (its cwd):
 //   { dev: 'done'|'escalate'|'needs-human', commits: [{ subject, files: {path: text} }],
 //     dirty: {path: text}, questions: [..], reason }   a /dev session and its ledger
+//     (a commit may also carry sh: a shell command run before it, e.g. a git mv)
 //   { limit: 'text' } | { error: 'text' }                an API failure, exit 1
 //   { hang: true }                                       runs until killed
 //   { ok: true }                                         a probe that succeeds
@@ -28,7 +29,7 @@ else if (step.limit || step.error) { result({ subtype: 'error_during_execution',
 else if (step.ok) result({})
 else {
   const write = files => { for (const [p, text] of Object.entries(files || {})) { mkdirSync(dirname(join(process.cwd(), p)), { recursive: true }); writeFileSync(join(process.cwd(), p), text) } }
-  for (const c of step.commits || []) { write(c.files); git('add', '-A'); git('commit', '-q', '-m', c.subject) }
+  for (const c of step.commits || []) { if (c.sh) execFileSync('bash', ['-c', c.sh], { cwd: process.cwd() }); write(c.files); git('add', '-A'); git('commit', '-q', '-m', c.subject) }
   write(step.dirty)
   const devDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'harness-dev'], { encoding: 'utf8' }).trim()
   mkdirSync(devDir, { recursive: true })
