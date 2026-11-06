@@ -758,3 +758,41 @@ out `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`); the retro's test count was one too h
 
 **Stats.** 9 new tests (335 passed, 0 failed), 12 mutations, all caught. 3 validate.sh rules, each
 checked to fail when its text is removed.
+
+## 21. The /build-app driver (2026-11-05)
+
+**What changed.** `graphs/build/` is the build graph; so far it holds the driver,
+`skills/build-app/driver/driver.mjs run|status|stop --repo <path> --app <slug>`. Per slice it runs a
+fresh headless `claude -p "/dev --slice S<n> --base integration/<app> --unattended"` on
+`slice/S<n>`, fresh from `integration/<app>`. It then lands the slice by fast-forward only when `/dev`
+reports done AND the driver's own checks pass: the session left the repo on its branch with a clean
+tree, the branch builds on integration, every commit starts `S<n>: `, no frozen test changed, and
+the driver's own verify ends `VERIFY: PASS`. The ledger (`.git/harness-build/<app>/`) and every
+next-step rule and brake come from `backlog.mjs`. A failed attempt is kept on `attempt/S<n>-<time>`
+(uncommitted work is committed there), never discarded. Usage limits wait for the reset or probe
+and retry the same slice uncounted; billing and auth stop; an overloaded API is retried three times.
+`stop` ends the running session (SIGTERM, then SIGKILL) and also cuts short an hours-long limit
+wait. `PANDASTACK_NOTIFY` gets one line per landing, block, brake, and stop.
+
+**Measured first (probe, ~$0.02).** Under `--permission-mode bypassPermissions` in headless
+`claude -p`, a PreToolUse hook deny blocked a Bash call in the main session and in an Agent-tool
+subagent, and a `permissions.deny` rule from `--settings` blocked one too. So the guard hook is the
+boundary, and the deny rules are a second layer (they match text only: `git -C . push` slips past
+`Bash(git push *)`). Workflow-tool agents were not probed directly; the smoke run must confirm them.
+
+**Ported.** `limits.mjs` verbatim from the user's autobuild kit (header lines aside), with its 11
+tests. `buildEnv`, the stop-failure hook, the pid lock, the probe, and the SIGTERM-then-SIGKILL stop
+follow the kit. Not copied: `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, and the kit's denies of Skill
+and Workflow (`/dev` needs both).
+
+**Bugs caught before review.** Reading the guard: `bash -c "git push"` and `$(git push)` slipped
+through, because the quote stuck to `"git` (words are now stripped of quotes, `$(`, and backticks, and
+every `git` in a command is checked; it fails closed, so even an echo of "git push" is denied). A
+stop during an hours-long usage-limit wait, or during probing, would not take effect until the wait
+ended (waits now end on a stop). A verify that leaves untracked files would make the next slice
+start dirty, and `/dev --unattended` stops on that (the driver now names them instead). Mutation run:
+3 of 18 mutants survived (a session that commits cleanly but leaves files behind, a `/dev`
+escalation with clean-looking commits, the guard's frozen list), each closed with a test.
+
+**Stats.** 34 new tests (16 end-to-end driver runs, 7 guard and session, 11 ported limits); 369 workflow
+tests passed, 0 failed. 22 mutations, all caught after the fixes.
