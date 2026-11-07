@@ -260,7 +260,17 @@ ledger.
 
     A `.git` redirected at the repo, or at the user's own worktree, or a fix dir
     symlinked to it, once let commit and revert act on the user's branch and
-    files (found in review, twice).
+    files (found in review, twice). The admin directory must also be the fix
+    worktree's own (`fix`, `fix1`, ...). HEAD must be detached (propose) or
+    exactly `bughunt/<key>` (fix), and commit moves that explicit ref, never a
+    symbolic HEAD that points elsewhere.
+  - **What these checks are for.** They stop `evidence.mjs` from being turned
+    against the user's work by the PR's content, or by an agent that wanders.
+    They are not a sandbox against a deliberately malicious agent: the agents
+    run with your user's file access and could run `git` on your repo
+    themselves. Agents are limited by their instructions, and under
+    `/build-app` by the guard hook. Run `/bughunt` only where you would run
+    the agents.
   - **The guards judge the staged tree, never `git status`.** Skip-worktree
     flags once hid edits from status that the commit would have kept.
   - **Every export uses a private index and `checkout-index`, never
@@ -278,7 +288,7 @@ ledger.
     environment.
   - Git calls inside the fix worktree also get the sandbox environment.
 - **Running code from the change.** Only `evidence.mjs` does it:
-  - **Where:** in a fresh `git archive` export of each commit, so the repo,
+  - **Where:** in a fresh `checkout-index` export of each commit, so the repo,
     its worktrees, and the user's checkout are never touched. The repo's
     `node_modules` are linked in when present.
   - **Environment:** only an allowlist of variables a toolchain needs (`PATH`,

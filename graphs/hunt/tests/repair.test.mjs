@@ -53,6 +53,7 @@ sh(repo, 'config', 'core.fsmonitor', '.githooks/fsmon')
 const STATE = dirname(spawnSync('node', [INTAKE, repo], { encoding: 'utf8' }).stdout.split('\n')[0])
 const HEAD = sh(repo, 'rev-parse', 'HEAD')
 const FIX = join(STATE, 'fix')
+const BRANCH = `bughunt/${JSON.parse(readFileSync(join(STATE, 'intake.json'), 'utf8')).key}`   // as /bughunt --fix names it
 const reproduce = (id, file, text) => {
   put(join(STATE, 'repro', id, 'repro.json'), JSON.stringify({ test_file: file }))
   put(join(STATE, 'repro', id, 'files', file), text)
@@ -86,7 +87,7 @@ await test('a worktree of another repo at <state>/fix -> FIX: ERROR', () => {
   assert.equal(lastLine(r.stdout), 'FIX: ERROR F1')
   assert.match(r.stdout, /is not the linked worktree of .* it claims to be/)
 })
-sh(repo, 'worktree', 'add', '-q', '-b', 'bughunt/test', FIX, HEAD)
+sh(repo, 'worktree', 'add', '-q', '-b', BRANCH, FIX, HEAD)
 await test('a .git redirected at the repo itself is refused: commit and revert can never reach the user\'s branch', () => {
   const linkFile = readFileSync(join(FIX, '.git'), 'utf8')
   writeFileSync(join(FIX, '.git'), `gitdir: ${join(repo, '.git')}\n`)
@@ -120,6 +121,29 @@ await test('a .git pointed at the user\'s own linked worktree, or a fix dir that
   assert.equal(sh(mine, 'status', '--porcelain'), 'A  wip.txt', 'the user\'s staged work is untouched')
   sh(repo, 'worktree', 'remove', '--force', mine)
   sh(repo, 'branch', '-q', '-D', 'mywork')
+})
+
+await test('a HEAD pointed at the branch under review, or another admin dir with its back-pointer forged, is refused', () => {
+  const admin = sh(FIX, 'rev-parse', '--absolute-git-dir')
+  const headFile = join(admin, 'HEAD')
+  const saved = readFileSync(headFile, 'utf8')
+  writeFileSync(headFile, 'ref: refs/heads/feature\n')
+  appendFileSync(join(FIX, 'src/double.mjs'), '// x\n')
+  const viaHead = ['fix', 'commit', 'revert'].map(cmd => lastLine(ev(cmd, STATE, 'F1').stdout))
+  writeFileSync(headFile, saved)
+  reset()
+  assert.deepEqual(viaHead, ['FIX: ERROR F1', 'COMMIT: FAIL F1', 'REVERT: FAIL F1'])
+  assert.equal(sh(repo, 'rev-parse', 'feature'), HEAD)
+  // The analysis tree's admin dir, with its gitdir rewritten to point back at the fix worktree.
+  const treeAdmin = sh(join(STATE, 'tree'), 'rev-parse', '--absolute-git-dir')
+  const savedGitdir = readFileSync(join(treeAdmin, 'gitdir'), 'utf8')
+  const linkFile = readFileSync(join(FIX, '.git'), 'utf8')
+  writeFileSync(join(treeAdmin, 'gitdir'), `${join(FIX, '.git')}\n`)
+  writeFileSync(join(FIX, '.git'), `gitdir: ${treeAdmin}\n`)
+  const viaSwap = lastLine(ev('revert', STATE, 'F1').stdout)
+  writeFileSync(join(FIX, '.git'), linkFile)
+  writeFileSync(join(treeAdmin, 'gitdir'), savedGitdir)
+  assert.equal(viaSwap, 'REVERT: FAIL F1')
 })
 
 console.log('== repair: the fix check')
@@ -240,7 +264,7 @@ await test('commit commits exactly the checked tree, runs no hook, and never mov
   const m = lastLine(c.stdout).match(/^COMMIT: DONE F1 ([0-9a-f]{40})$/)
   assert.ok(m, c.stdout)
   assert.equal(sh(FIX, 'rev-parse', 'HEAD'), m[1])
-  assert.equal(sh(FIX, 'rev-parse', 'bughunt/test'), m[1], 'the fix branch moved')
+  assert.equal(sh(FIX, 'rev-parse', BRANCH), m[1], 'the fix branch moved')
   assert.equal(sh(FIX, 'rev-parse', `${m[1]}^{tree}`), record('F1').fix.tree)
   assert.equal(sh(FIX, 'status', '--porcelain'), '')
   assert.deepEqual(sh(FIX, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort(), ['src/sum.mjs', 'tests/bughunt-f1.test.mjs'])
@@ -322,7 +346,7 @@ await test('recheck re-proves a fix from its commit while it is kept, and takes 
     failure_scenario: { trigger: 't', path: 'p', observable: 'o' }, expected_behavior: 'e', actual_behavior: 'a', evidence: [{ file: 'src/sum.mjs', line: 1, quote: 'x' }], source_agent: 'hunter:logic',
   }
   const f = mergeFindings([], [cand], HEAD).findings[0]
-  Object.assign(f, { verification_status: 'reproduced', reproduction_artifact: { written: true, test_file: 'tests/bughunt-f1.test.mjs' }, fix_status: 'verified', fix_artifact: { commit: fixCommit, branch: 'bughunt/test' } })
+  Object.assign(f, { verification_status: 'reproduced', reproduction_artifact: { written: true, test_file: 'tests/bughunt-f1.test.mjs' }, fix_status: 'verified', fix_artifact: { commit: fixCommit, branch: BRANCH } })
   const ledgerFile = join(STATE, 'ledger.json')
   writeLedger(ledgerFile, { ...emptyLedger(JSON.parse(readFileSync(join(STATE, 'intake.json'), 'utf8')).key), findings: [f] })
   let r = ev('recheck', STATE)
@@ -330,9 +354,9 @@ await test('recheck re-proves a fix from its commit while it is kept, and takes 
   assert.equal(readLedger(ledgerFile, 'x').findings[0].fix_status, 'verified')
   // The human clears the worktree and the branch: the commit still exists, but nothing keeps it.
   sh(repo, 'worktree', 'remove', '--force', FIX)
-  sh(repo, 'branch', '-q', '-D', 'bughunt/test')
+  sh(repo, 'branch', '-q', '-D', BRANCH)
   r = ev('recheck', STATE)
-  assert.match(r.stdout, /RECHECK F1 fix [0-9a-f]{7}: FAIL \(the fix commit [0-9a-f]{7} is no longer on the fix worktree or bughunt\/test\)/)
+  assert.match(r.stdout, /RECHECK F1 fix [0-9a-f]{7}: FAIL \(the fix commit [0-9a-f]{7} is no longer on the fix worktree or bughunt\/feature-[0-9a-f]{6}\)/)
   assert.equal(readLedger(ledgerFile, 'x').findings[0].fix_status, 'rejected')
 })
 await test('no git call in intake, repro, fix, adversarial, commit, revert, or recheck ran the PR\'s hooks or fsmonitor', () => {

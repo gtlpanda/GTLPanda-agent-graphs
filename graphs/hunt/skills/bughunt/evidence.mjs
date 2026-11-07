@@ -12,7 +12,8 @@
 // It never takes a command from anyone: the runner is chosen here from the
 // test's language and the repo's own test setup, and called with an argument
 // list, never as shell text. Each arm runs in a fresh export of its commit
-// (git archive, so the repo itself is never touched), with only an allowlist
+// (a private index and checkout-index, so the repo itself is never touched,
+// and no export attribute applies), with only an allowlist
 // of the environment, a timeout, and, where unshare works, no network and its
 // own PID namespace (see isolation()).
 // It writes <state dir>/evidence/F<n>.json and prints lines ending with
@@ -35,7 +36,7 @@
 // fsmonitor, in the sandbox environment.
 // Exit 0 when it ran, 1 on an error it could not run past, 2 on usage.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, lstatSync, symlinkSync, realpathSync, openSync, closeSync } from 'node:fs'
-import { join, dirname, extname, normalize, relative } from 'node:path'
+import { join, dirname, extname, normalize, relative, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -422,12 +423,19 @@ function fixWorktree(stateDir, intake) {
   try {
     const admin = realpathSync(gitDir)
     const owner = readFileSync(join(admin, 'gitdir'), 'utf8').trim()
-    inside = admin.startsWith(`${realpathSync(repoCommon)}/worktrees/`) && realpathSync(top) === realpathSync(dir) && realpathSync(owner) === realpathSync(join(dir, '.git'))
+    // git names a linked worktree's admin dir after the worktree's directory: fix, fix1, ...
+    inside = admin.startsWith(`${realpathSync(repoCommon)}/worktrees/`) && /^fix[0-9]*$/.test(basename(admin)) && realpathSync(top) === realpathSync(dir) && realpathSync(owner) === realpathSync(join(dir, '.git'))
   } catch { inside = false }
   if (!inside) return { error: `${dir} is not the linked worktree of ${intake.repo} it claims to be` }
+  // HEAD is detached (propose) or exactly the fix branch (fix): never a branch
+  // under review, which commit would otherwise move (found in review).
+  const branchRef = `refs/heads/bughunt/${intake.key}`
+  const sym = wgit(dir, ['symbolic-ref', '-q', 'HEAD'])
+  const ref = sym.ok ? sym.stdout.trim() : null
+  if (ref !== null && ref !== branchRef) return { error: `the fix worktree's HEAD is ${ref}; it must be detached or ${branchRef}` }
   const head = wgit(dir, ['rev-parse', 'HEAD']).stdout.trim()
   if (!wgit(dir, ['merge-base', '--is-ancestor', intake.target.head, head]).ok) return { error: `the fix worktree's commit ${head.slice(0, 7)} does not descend from the head under review` }
-  return { dir, head }
+  return { dir, head, ref }
 }
 
 // Every path the staged tree changes against HEAD: exactly what would be
@@ -673,7 +681,8 @@ export function commit(stateDir, id) {
     const made = wgit(wt.dir, ['commit-tree', checked.tree, '-p', wt.head, '-m', msg], who)
     if (!made.ok) return out('FAIL', `git commit-tree failed: ${made.out.trim()}`)
     const sha = made.stdout.trim()
-    const moved = wgit(wt.dir, ['update-ref', '-m', `bughunt: fix ${id}`, 'HEAD', sha, wt.head])
+    // The explicit ref fixWorktree pinned, or a detached HEAD: never through a symref.
+    const moved = wt.ref ? wgit(wt.dir, ['update-ref', '-m', `bughunt: fix ${id}`, wt.ref, sha, wt.head]) : wgit(wt.dir, ['update-ref', '--no-deref', '-m', `bughunt: fix ${id}`, 'HEAD', sha, wt.head])
     const synced = moved.ok && wgit(wt.dir, ['reset', '-q']).ok
     if (!synced) return out('FAIL', `could not move the fix worktree to ${sha.slice(0, 7)}: ${moved.out.trim()}`)
     return out('DONE', 'committed in the fix worktree', sha)

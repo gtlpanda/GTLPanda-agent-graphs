@@ -1234,7 +1234,19 @@ A focused re-review of the fix commit (c511594) found four more holes and reprod
 - **MEDIUM:** revert left an untracked nested repo behind, which would be committed next. Revert
   now rebuilds the index, restores every file, uses `clean -ffdqx`, and verifies before saying DONE.
 
-Six mutations, one per new guard: 6 of 6 caught. The fixes added 12 tests, for 549 workflow tests and 0 failed.
+Six mutations, one per new guard: 6 of 6 caught.
+
+One more adversarial pass, by static reading, found that a repairer could write
+`ref: refs/heads/<the PR branch>` into its own admin `HEAD`, so `commit` would advance the user's
+branch. A variant swapped admin dirs. Now HEAD must be detached or exactly `bughunt/<key>`, the
+admin dir must be the fix worktree's own (`fix`, `fix1`, ...), and commit moves that explicit ref.
+Both pins have tests, and 2 of 2 mutations are caught.
+
+That pass also confirmed the honest limit, now written in the graph README. These checks stop
+`evidence.mjs` from being turned against the user's work by the PR's content or by a wandering
+agent. They are not a sandbox against a deliberately malicious agent, which runs with the user's
+file access and could run `git` itself. Agents are bounded by instructions, and under `/build-app`
+by the guard hook. The fixes added 12 tests, for 549 workflow tests and 0 failed.
 
 **Stats.**
 - 31 new tests (537 workflow tests, 0 failed):
