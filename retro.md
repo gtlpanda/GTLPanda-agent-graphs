@@ -1152,3 +1152,47 @@ sandbox, and `reconcile`; 24 were caught at first. The two survivors were real t
 - The suite is 506 workflow tests, 0 failed.
 - 3 new agents, 6 new validate.sh rules, and an advisor section.
 - The workflow test harness gained a real `pipeline()`.
+
+## 27. /bughunt, part 3: proven repairs and independent fix verification (2026-11-06)
+
+**What changed.** `/bughunt --propose` and `--fix` share the graph with discover mode and add a
+repair stage. Each reproduced finding (plus any the human names with `--approve`) is repaired in
+`<state>/fix`, one at a time, most severe first. That worktree is a separate checkout: detached for
+propose, branch `bughunt/<key>` for fix. The skill makes it and never removes it.
+- **The repairer** (Sonnet) investigates the root cause first, then makes the smallest change. It
+  never touches the reproduction test, never edits or deletes an existing test, and never commits.
+- **`evidence.mjs fix`** proves the repair:
+  - **Scope:** it rejects an empty change, an edited existing or reproduction test, and more than 8
+    source files.
+  - **Three arms:** the reproduction passes on a copy of the worktree, and fails with its marker at
+    the worktree's last commit. A test that passes both ways cannot tell a fix from no fix.
+  - **The suite:** the repo's own suite (the verify skill) must be no worse than without the repair.
+  - **On PASS,** the reproduction joins the change, and the worktree state is fingerprinted.
+- **Propose mode** commits there; the fix stays `proposed` because no one independent reviewed it.
+- **Fix mode** adds the verifier:
+  - an independent fix verifier (Sonnet, never shown the repairer's reasoning) reviews the change
+    and writes up to 5 adversarial tests;
+  - `evidence.mjs adversarial` runs them against the fingerprinted state;
+  - only an accept plus a PASS lets `evidence.mjs commit` commit it, and it is marked `verified`.
+- **Failed attempts.** A failed attempt is reverted, and the next one gets the reasons as fenced
+  feedback. After `maxRepairAttempts` (default 2) the finding is `unresolved`. A fix check that
+  cannot run stops all repair.
+- **Recheck.** It re-proves every committed repair from its commit (passes there, fails at its
+  parent), and `findings.mjs reconcileFix` takes back one that does not hold.
+
+**Bugs caught before review.** The mutation run turned up one real test gap: no test had a
+reproduction that already passes without the repair, so dropping the discrimination check went
+unseen. A test now covers it. 22 of 22 mutations are caught, across the repair guards in
+`evidence.mjs` and the repair routing.
+
+**Stats.**
+- 31 new tests (537 workflow tests, 0 failed):
+  - 17 repair tests that run real `npm test` suites through the verify skill in a throwaway project
+    (a non-fix, edited tests, a suite broken by the repair, a correct fix, adversarial passes and
+    failures, a worktree changed after the check, commit, revert, a suite that already failed, and
+    a recheck that keeps one fix and takes back another);
+  - 12 routing tests (propose versus fix, a rejection then a success, attempts used up, a check
+    that cannot run, the adversarial gate, a missing verifier, approvals, re-runs, the exact
+    commands);
+  - 2 findings tests.
+- 2 new agents, 6 new or updated validate.sh rules.

@@ -13,8 +13,14 @@ the change calls for. Then:
   head and at the merge-base, in a sandbox.
 - The session re-runs every reproduction before the report.
 
-It never edits the branch under review. Still planned:
-- the propose and fix modes;
+`--propose` and `--fix` then repair each reproduced bug in an isolated
+worktree, one at a time:
+- A repair is kept only when the reproduction passes with it, fails without
+  it, and the repo's suite is no worse.
+- `--fix` also has an independent verifier review it and write adversarial
+  tests that must pass.
+
+No mode ever touches the branch under review, merges, or pushes. Still planned:
 - wiring into `/build-app` and `/loop`;
 - the live benchmark.
 
@@ -31,6 +37,12 @@ impact (impact-mapper) → route = intake signals ∪ impact picks, capped at ma
     runner runs `evidence.mjs repro` → the gate reads the script's own last line
 the session: findings.mjs save → evidence.mjs recheck (re-runs every reproduction, corrects the
 ledger to the runs) → findings.mjs report
+  → mode propose | fix: per reproduced (or --approve'd) finding, most severe first, in <state>/fix:
+    repairer → runner: evidence.mjs fix (three-arm + suite) → FAIL: revert, feedback, retry
+      propose: PASS → evidence.mjs commit → proposed
+      fix:     PASS → fix-verifier (blind) → runner: evidence.mjs adversarial
+               accept + PASS → evidence.mjs commit → verified; else revert, feedback, retry
+    attempts used up (maxRepairAttempts, default 2) → revert → unresolved
 impact returns nothing → route on the intake signals alone
 a hunter returns nothing → its lens is not_covered, and the disposition becomes manual review
 ```
@@ -43,7 +55,9 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
 | Skeptic | `agents/skeptic.md` | sonnet | high | once per candidate |
 | Referee | `core/agents/advisor.md` (shared), "Refereeing a finding" | fable | high | once per run, only when something is contested |
 | Reproducer | `agents/reproducer.md` | sonnet | high | once per confirmed finding, up to maxRepros |
-| Runner | `agents/runner.md` | haiku | high | once per written reproduction |
+| Runner | `agents/runner.md` | haiku | high | once per written reproduction, and per repair command |
+| Repairer | `agents/repairer.md` | sonnet | high | per repair attempt (propose, fix) |
+| Fix verifier | `agents/fix-verifier.md` | sonnet | high | per repair that passed its check (fix only) |
 
 ## Routing
 
@@ -129,6 +143,44 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
 - **A new head clears what belonged to the old one.** A re-found finding loses
   its reproduction, test results, and fix, and drops back under the confidence
   cap.
+- **Repair (propose, fix)** runs one finding at a time, most severe first, all
+  in `<state>/fix`.
+  - **Which findings:** only `reproduced` ones, plus confirmed ones the human
+    names with `--approve`.
+  - **The repairer** must find the root cause before changing anything. It
+    makes the smallest change, never touches the reproduction test, never
+    edits or deletes an existing test, and never commits.
+  - **`evidence.mjs fix`** rejects the following:
+    - a repair that changed nothing;
+    - one that edits an existing test or the reproduction;
+    - one that changes more than 8 source files;
+    - one whose reproduction still fails with it, or still passes without it
+      (it cannot tell a fix from no fix);
+    - one where the suite gets worse.
+
+    A suite that already failed without the repair, at the same steps, is
+    tolerated, and the report says a regression inside those steps cannot be
+    told apart.
+  - **The fingerprint.** On PASS, the reproduction test joins the change, and
+    the worktree's exact state is fingerprinted.
+  - **Propose mode** commits after the fix check. The fix stays `proposed`,
+    because nobody independent reviewed it.
+  - **Fix mode** goes on:
+    - the fix verifier reviews the change without the repairer's reasoning (is
+      the root cause gone, are callers intact, any unrelated change, any new
+      boundary failure) and writes up to 5 adversarial tests;
+    - `evidence.mjs adversarial` runs them against the checked state;
+    - only an accept plus a PASS commits the repair and marks it `verified`.
+  - **A failed attempt is reverted** (`evidence.mjs revert`). The next attempt
+    gets the reasons as fenced feedback. When attempts run out, the finding is
+    `unresolved`, with the last reason.
+  - **A fix check that cannot run** (no worktree) stops all repair.
+  - **Commits only what was checked.** `evidence.mjs commit` refuses a
+    worktree whose fingerprint changed after the check, so an agent cannot
+    slip a change in.
+  - **Rechecked from the commit.** `recheck` re-proves each committed repair
+    from its commit: the reproduction passes at the commit and fails at its
+    parent. One that does not hold goes back to `rejected`.
 - **The disposition is computed** (`findings.mjs disposition`), never chosen by a model.
   - **changes requested:** an open confirmed or reproduced bug above LOW.
   - **manual review:** an unsettled HIGH or CRITICAL finding, a lens not fully covered, or a run that stopped early. A stopped run never replaces the saved findings.
@@ -158,6 +210,8 @@ ledger.
 | `repro/F<n>/` | each reproduction: `repro.json` and `files/<test_file>` |
 | `evidence/F<n>.json` | what `evidence.mjs` ran and saw: each arm's commit, exit code, marker, and output tail, plus the verdict |
 | `work/F<n>/` | the exports a run uses, removed when it ends |
+| `fix/` | the fix worktree (propose, fix): detached in propose mode, branch `bughunt/<key>` in fix mode. Made by `/bughunt`, never removed by it |
+| `repro/F<n>/adversarial/` | the fix verifier's adversarial tests: `adversarial.json` and `files/` |
 
 ## Permissions and trust
 
@@ -167,6 +221,11 @@ ledger.
   - The reproducer writes only `repro/F<n>/`. `evidence.mjs` voids the run if
     the analysis tree changed.
   - The runner runs one fixed command.
+  - The repairer writes only the fix worktree, and never commits.
+  - The fix verifier writes only its adversarial directory. The worktree is
+    fingerprinted, and a change voids the check.
+  - Every commit is `evidence.mjs commit`, in the fix worktree, of the
+    fingerprinted state.
 - **Running code from the change.** Only `evidence.mjs` does it:
   - **Where:** in a fresh `git archive` export of each commit, so the repo,
     its worktrees, and the user's checkout are never touched. The repo's

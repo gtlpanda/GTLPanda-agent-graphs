@@ -1,13 +1,15 @@
 export const meta = {
   name: 'bughunt-flow',
-  description: 'PR bug discovery graph: impact map, specialist hunters chosen by the change, a blind skeptic per finding, a referee for the contested ones, and a reproduction test run by evidence.mjs',
-  whenToUse: 'Run by /bughunt after intake.mjs, from a run script that carries {intake, prior} (workflow-state run-script.mjs, seam INJECTED_INPUT). args: {repo, tree, configDir, stateDir (all absolute), mode: "discover", maxHunters?, maxFindings?, maxRepros?, evidenceTimeoutMs?}',
+  description: 'PR bug discovery and repair graph: impact map, specialist hunters chosen by the change, a blind skeptic per finding, a referee for the contested ones, a reproduction test run by evidence.mjs, then (propose, fix) a root-cause repair proven by evidence.mjs and, in fix mode, an independent fix verifier',
+  whenToUse: 'Run by /bughunt after intake.mjs, from a run script that carries {intake, prior} (workflow-state run-script.mjs, seam INJECTED_INPUT). args: {repo, tree, configDir, stateDir (all absolute), mode: "discover" | "propose" | "fix", fixBranch?, approve?: [F<n>], maxHunters?, maxFindings?, maxRepros?, maxRepairAttempts?, evidenceTimeoutMs?}',
   phases: [
     { title: 'Impact', detail: 'impact-mapper maps callers, contracts, tests, protections, and which lenses apply', model: 'sonnet' },
     { title: 'Hunt', detail: 'one hunter per routed lens, in parallel; findings merged and deduplicated in code', model: 'sonnet' },
     { title: 'Verify', detail: 'one skeptic per candidate, in parallel, seeing only the structured claim', model: 'sonnet' },
     { title: 'Referee', detail: 'the advisor settles what the skeptic could not, and any blocking finding it refuted', model: 'fable' },
     { title: 'Reproduce', detail: 'a reproducer writes a failing test; a runner runs evidence.mjs and the gate reads its last line', model: 'sonnet' },
+    { title: 'Repair', detail: 'propose and fix modes: a repairer fixes each reproduced finding in the fix worktree, one at a time; evidence.mjs fix proves it', model: 'sonnet' },
+    { title: 'Verify fix', detail: 'fix mode: an independent verifier reviews the change and writes adversarial tests; evidence.mjs runs them, then commits', model: 'sonnet' },
   ],
 }
 
@@ -32,6 +34,15 @@ export const meta = {
 //         REPRODUCED --> reproduced; PREEXISTING --> preexisting; NOT_REPRODUCED --> not_reproduced;
 //         ERROR, no test, or no EVIDENCE line --> stays confirmed, static evidence only
 //
+//   mode propose | fix, per reproduced (or approved) finding, most severe first, one at a time in
+//   <state dir>/fix, up to maxRepairAttempts:
+//     repairer --> runner: evidence.mjs fix (reproduction passes with it, fails without it, suite
+//     no worse) --FAIL--> revert, feedback, next attempt
+//     propose: --PASS--> commit in the fix worktree; fix_status stays proposed (no verifier)
+//     fix:     --PASS--> fix-verifier (blind to the repairer) --> runner: evidence.mjs adversarial
+//              accept + PASS --> commit --> verified; otherwise revert, feedback, next attempt
+//     attempts used up --> revert --> unresolved
+//
 // /bughunt re-runs every reproduction itself (evidence.mjs recheck) before the
 // report, so the runner's transcription is never the final word. This script
 // has no filesystem access; /bughunt persists the returned ledger.
@@ -45,6 +56,8 @@ const NODES = {
   referee:   { agentType: 'advisor',       model: 'fable',  effort: 'high', phase: 'Referee' },
   reproduce: { agentType: 'reproducer',    model: 'sonnet', effort: 'high', phase: 'Reproduce' },
   run:       { agentType: 'runner',        model: 'haiku',  effort: 'high', phase: 'Reproduce' },
+  repair:    { agentType: 'repairer',      model: 'sonnet', effort: 'high', phase: 'Repair' },
+  fixverify: { agentType: 'fix-verifier',  model: 'sonnet', effort: 'high', phase: 'Verify fix' },
 }
 // The token in each lens reference (core/skills/bug-lenses/lenses/<lens>.md). A
 // hunter that returns another token never read its lens; the tests fail if
@@ -61,7 +74,16 @@ const DEFAULT_MAX_REPROS = 8
 // The skeptic refutes on its own only above this, and never a blocking finding:
 // missing a real bug costs about twice a false alarm.
 const REFUTE_BAR = 67
-const EVIDENCE_VERDICTS = ['REPRODUCED', 'PREEXISTING', 'NOT_REPRODUCED', 'ERROR']
+const MODES = ['discover', 'propose', 'fix']
+const DEFAULT_MAX_REPAIR_ATTEMPTS = 2
+// What each evidence.mjs command may end with.
+const GATES = {
+  repro: ['REPRODUCED', 'PREEXISTING', 'NOT_REPRODUCED', 'ERROR'],
+  fix: ['PASS', 'FAIL', 'ERROR'],
+  adversarial: ['PASS', 'FAIL', 'ERROR'],
+  commit: ['DONE', 'FAIL'],
+  revert: ['DONE', 'FAIL'],
+}
 
 // ---- shared: copied verbatim into graphs/hunt/workflows/bughunt-flow.js (workflow scripts cannot import) ----
 const SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
@@ -248,6 +270,16 @@ const REFEREE_SCHEMA = obj({
 })
 const REPRO_SCHEMA = obj({ written: BOOL, test_file: STR, how_it_fails: STR, reason: STR })
 const RUN_SCHEMA = obj({ output: STR, exit_code: { type: 'integer' } })
+const REPAIR_SCHEMA = obj({ root_cause: STR, why_it_exists: STR, files_changed: STRS, interfaces_changed: BOOL, summary: STR })
+const FIXVERIFY_SCHEMA = obj({
+  verdict: { type: 'string', enum: ['accept', 'reject'] },
+  root_cause_addressed: BOOL,
+  callers_preserved: BOOL,
+  unrelated_changes: STRS,
+  problems: STRS,
+  adversarial_tests: STRS,
+  remaining_risks: STRS,
+})
 const HUNT_SCHEMA = obj({
   lens_token: STR,
   coverage: { type: 'array', items: obj({ area: STR, status: { type: 'string', enum: ['finding', 'clean', 'not_relevant', 'not_covered'] }, note: STR }) },
@@ -276,6 +308,9 @@ const MAX_HUNTERS = Math.min(posInt(A.maxHunters, DEFAULT_MAX_HUNTERS), LENS_ORD
 const MAX_FINDINGS = posInt(A.maxFindings, DEFAULT_MAX_FINDINGS)
 const MAX_REPROS = posInt(A.maxRepros, DEFAULT_MAX_REPROS)
 const EVIDENCE_TIMEOUT = Number.isInteger(A.evidenceTimeoutMs) && A.evidenceTimeoutMs > 0 ? A.evidenceTimeoutMs : null
+const MAX_REPAIR_ATTEMPTS = posInt(A.maxRepairAttempts, DEFAULT_MAX_REPAIR_ATTEMPTS)
+const APPROVE = new Set(Array.isArray(A.approve) ? A.approve.filter(x => typeof x === 'string') : [])
+const FIX_BRANCH = typeof A.fixBranch === 'string' && A.fixBranch ? A.fixBranch : null
 
 // ---------- ledger ----------
 const ledger = {
@@ -414,8 +449,9 @@ Return one verdict per finding_id: ${contested.map(c => c.f.finding_id).join(', 
 
 // A path in a shell command, single-quoted: a repo under "/home/First Last/" works.
 const shq = p => `'${String(p).replace(/'/g, `'\\''`)}'`
-function evidenceCommand(id) {
-  return `node ${shq(`${CONFIG}/skills/bughunt/evidence.mjs`)} repro ${shq(STATE)} ${id}${EVIDENCE_TIMEOUT ? ` --timeout-ms ${EVIDENCE_TIMEOUT}` : ''}`
+function evidenceCommand(id, kind = 'repro') {
+  const timed = ['repro', 'fix', 'adversarial'].includes(kind) && EVIDENCE_TIMEOUT ? ` --timeout-ms ${EVIDENCE_TIMEOUT}` : ''
+  return `node ${shq(`${CONFIG}/skills/bughunt/evidence.mjs`)} ${kind} ${shq(STATE)} ${id}${timed}`
 }
 
 function reproPrompt(f) {
@@ -437,18 +473,75 @@ Check your test with exactly this command, at most 3 times: ${evidenceCommand(id
 Fill the structured output: written (false when it cannot be reproduced in an automated test, with the reason), test_file, how_it_fails (one line), reason.`
 }
 
-function runPrompt(f) {
+function runPrompt(f, kind = 'repro') {
   return `Run exactly this command, once, and copy its full output verbatim into output:
-${evidenceCommand(f.finding_id)}`
+${evidenceCommand(f.finding_id, kind)}`
+}
+
+function repairPrompt(f, feedback, attempt) {
+  const id = f.finding_id
+  const ra = f.reproduction_artifact
+  return `${scope()}
+
+Repair this finding in the fix worktree, following your instructions. Attempt ${attempt} of ${MAX_REPAIR_ATTEMPTS}.
+Fix worktree (work only here; never commit): ${shq(`${STATE}/fix`)}
+${fenced('claim', json(claimOf(f)))}
+${ra && ra.written ? `The reproduction test (read it; never edit it; it joins your change when checked): ${shq(ra.path)}
+It will live in the repo at ${ra.test_file}. It fails now with ${markerOf(id)} and must pass with your repair.` : 'This finding was approved for repair without a reproduction test: your repair is checked against the suite and reviewed only.'}
+${ledger.impact ? `Protections the change must keep (from the impact map; verify them):
+${fenced('impact-map-notes', json(ledger.impact.protections))}` : ''}
+${feedback ? `Earlier attempts were rejected. Address this specifically:
+${fenced('rejection-feedback', feedback)}` : ''}
+Check your repair with exactly this command, at most twice: ${evidenceCommand(id, 'fix')}
+
+Fill the structured output: root_cause (one or two sentences), why_it_exists, files_changed (repo-relative), interfaces_changed, summary.`
+}
+
+function fixVerifyPrompt(f) {
+  const id = f.finding_id
+  const ra = f.reproduction_artifact
+  return `${scope()}
+
+Review the uncommitted repair for this finding in the fix worktree, following your instructions. The repairer's reasoning is withheld on purpose.
+Fix worktree (read only; it is fingerprinted): ${shq(`${STATE}/fix`)}
+${fenced('claim', json(claimOf(f)))}
+${ra && ra.written ? `The reproduction test: ${shq(ra.path)} (in the repo at ${ra.test_file}).` : 'No reproduction test: the finding was approved for repair without one.'}
+${ledger.impact ? `Protections the change must keep:
+${fenced('impact-map-notes', json(ledger.impact.protections))}` : ''}
+Your adversarial directory (write only here): ${shq(`${STATE}/repro/${id}/adversarial`)}
+  - adversarial.json   {"test_files": ["<repo-relative path>", ...]}, at most 5
+  - files/<test_file>  each test; it must pass on a correct repair
+
+Fill the structured output: verdict (accept or reject), root_cause_addressed, callers_preserved, unrelated_changes, problems (each actionable, with file:line), adversarial_tests (the paths you wrote), remaining_risks.`
 }
 const markerOf = id => `BUGHUNT-${id}`
+
+// Reads the last line of an evidence.mjs command's transcribed output:
+// `<KIND>: <VERDICT> F<n>[ <commit>]`, with its reason from `<KIND> F<n>: ...`.
+// Anything else is no verdict.
+function gateOf(kind, id, run) {
+  if (!run) return { verdict: null, reason: 'the runner returned nothing' }
+  const lines = String(run.output).split('\n').map(l => l.trim()).filter(Boolean)
+  const last = lines.length ? lines[lines.length - 1] : ''
+  const word = kind === 'repro' ? 'EVIDENCE' : kind.toUpperCase()
+  const m = last.match(/^([A-Z]+): ([A-Z_]+) (F[0-9]+)(?: ([0-9a-f]{40}))?$/)
+  if (!m || m[1] !== word || m[3] !== id || !GATES[kind].includes(m[2])) return { verdict: null, reason: `the runner output did not end with the ${word} line for this finding` }
+  const said = lines.find(l => l.startsWith(`${word} ${id}: `))
+  return { verdict: m[2], reason: said ? said.slice(`${word} ${id}: `.length) : '', commit: m[4] || null }
+}
+async function runEvidence(f, kind) {
+  const run = await runNode('run', `${kind}: ${f.finding_id}`, runPrompt(f, kind), RUN_SCHEMA)
+  const g = gateOf(kind, f.finding_id, run)
+  ledger.history.push({ node: 'run', kind, finding: f.finding_id, verdict: g.verdict })
+  return g
+}
 
 // ---------- graph ----------
 if (!REPO || !TREE || !CONFIG || !STATE) return finish('escalate', 'args.repo, args.tree, args.configDir, and args.stateDir are required absolute paths')
 if (!T || typeof T.head !== 'string' || typeof T.mergeBase !== 'string' || !Array.isArray(IN.files)) {
   return finish('escalate', 'args.intake must be the intake.json that intake.mjs wrote')
 }
-if (MODE !== 'discover') return finish('escalate', `mode "${MODE}" is not built yet; only discover runs so far`)
+if (!MODES.includes(MODE)) return finish('escalate', `mode "${MODE}" is not one of ${MODES.join(', ')}`)
 log(`${T.label}: ${IN.files.length} changed file(s); ${PRIOR.length} earlier finding(s)`)
 
 // ----- impact -----
@@ -606,7 +699,7 @@ if (toRepro.length) {
   const outcomes = await pipeline(
     toRepro,
     f => runNode('reproduce', `reproduce: ${f.finding_id}`, reproPrompt(f), REPRO_SCHEMA),
-    (r, f) => (r && r.written ? runNode('run', `run: ${f.finding_id}`, runPrompt(f), RUN_SCHEMA).then(out => ({ r, out })) : { r, out: null }),
+    (r, f) => (r && r.written ? runNode('run', `run: ${f.finding_id}`, runPrompt(f), RUN_SCHEMA).then(out => ({ r, out, ran: true })) : { r, out: null, ran: false }),
   )
   toRepro.forEach((f, i) => {
     const o = outcomes[i]
@@ -615,25 +708,87 @@ if (toRepro.length) {
     if (!o.r.written) { f.reproduction_artifact = { written: false, reason: o.r.reason || 'no reason given' }; return }
     const art = { written: true, test_file: o.r.test_file, path: `${STATE}/repro/${id}/files/${o.r.test_file}`, how_it_fails: o.r.how_it_fails, verdict: null, reason: '' }
     f.reproduction_artifact = art
-    if (!o.out) { art.reason = 'the runner returned nothing'; return }
-    const lines = String(o.out.output).split('\n').map(l => l.trim()).filter(Boolean)
-    const last = lines.length ? lines[lines.length - 1] : ''
-    const m = last.match(/^EVIDENCE: ([A-Z_]+) (F[0-9]+)$/)
-    if (!m || m[2] !== id || !EVIDENCE_VERDICTS.includes(m[1])) { art.reason = 'the runner output did not end with an EVIDENCE line for this finding'; return }
-    art.verdict = m[1]
-    const said = lines.find(l => l.startsWith(`EVIDENCE ${id}: `))
-    art.reason = said ? said.slice(`EVIDENCE ${id}: `.length) : ''
-    ledger.history.push({ node: 'run', finding: id, verdict: m[1] })
-    if (m[1] === 'REPRODUCED') {
+    const g = gateOf('repro', id, o.out)
+    if (!g.verdict) { art.reason = g.reason; return }
+    art.verdict = g.verdict
+    art.reason = g.reason
+    ledger.history.push({ node: 'run', kind: 'repro', finding: id, verdict: g.verdict })
+    if (g.verdict === 'REPRODUCED') {
       transition(f, 'verification_status', 'reproduced', `evidence.mjs: ${art.reason}`)
       f.confidence = Math.max(f.confidence, REPRODUCED_CONFIDENCE)
-    } else if (m[1] === 'PREEXISTING') {
+    } else if (g.verdict === 'PREEXISTING') {
       transition(f, 'verification_status', 'preexisting', `evidence.mjs: ${art.reason}`)
-    } else if (m[1] === 'NOT_REPRODUCED') {
+    } else if (g.verdict === 'NOT_REPRODUCED') {
       transition(f, 'verification_status', 'not_reproduced', `evidence.mjs: ${art.reason}`)
     }
   })
 }
 
+// ----- repair (propose, fix) -----
+let repairStopped = null
+if (MODE !== 'discover') {
+  const targets = ledger.findings
+    .filter(f => !f.stale && ['none', 'proposed', 'rejected'].includes(f.fix_status))
+    .filter(f => f.verification_status === 'reproduced' || (APPROVE.has(f.finding_id) && ['confirmed', 'not_reproduced'].includes(f.verification_status)))
+    .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || b.confidence - a.confidence)
+  for (const id of APPROVE) if (!targets.some(f => f.finding_id === id)) log(`approve: ${id} is not a live confirmed, unreproduced finding with a fix still to do; skipped`)
+  if (!targets.length) log('nothing to repair: no reproduced or approved finding is open')
+  for (const f of targets) {
+    phase('Repair')
+    const stop = await repairOne(f)
+    if (stop) { repairStopped = stop; log(`repair stopped: ${stop}`); break }
+  }
+}
+
+// One finding, attempt by attempt. Returns a reason to stop all repair (the
+// fix worktree is unusable), or null.
+async function repairOne(f) {
+  const id = f.finding_id
+  let feedback = null
+  for (let attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS; attempt += 1) {
+    if (f.fix_status !== 'proposed') transition(f, 'fix_status', 'proposed', `repair attempt ${attempt}`)
+    const rejectAttempt = async why => {
+      feedback = why
+      transition(f, 'fix_status', 'rejected', `attempt ${attempt}: ${why}`)
+      await runEvidence(f, 'revert')
+    }
+    const rep = await runNode('repair', `repair: ${id} #${attempt}`, repairPrompt(f, feedback, attempt), REPAIR_SCHEMA)
+    if (!rep) { await rejectAttempt('the repairer returned nothing'); continue }
+    f.root_cause = rep.root_cause
+    const checked = await runEvidence(f, 'fix')
+    if (checked.verdict === 'ERROR') {
+      transition(f, 'fix_status', 'rejected', `attempt ${attempt}: ${checked.reason}`)
+      transition(f, 'fix_status', 'unresolved', 'the fix check could not run')
+      f.fix_artifact = { mode: MODE, branch: FIX_BRANCH, commit: null, attempts: attempt, last_feedback: checked.reason }
+      return checked.reason
+    }
+    if (checked.verdict !== 'PASS') { await rejectAttempt(`the fix check failed: ${checked.reason}`); continue }
+    if (MODE === 'propose') {
+      const c = await runEvidence(f, 'commit')
+      if (c.verdict !== 'DONE') { await rejectAttempt(`the commit failed: ${c.reason}`); continue }
+      f.fix_artifact = { mode: MODE, branch: null, commit: c.commit, attempts: attempt, check: checked.reason }
+      return null
+    }
+    phase('Verify fix')
+    const v = await runNode('fixverify', `verify fix: ${id} #${attempt}`, fixVerifyPrompt(f), FIXVERIFY_SCHEMA)
+    if (!v) { await rejectAttempt('the fix verifier returned nothing, and no repair is accepted unreviewed'); continue }
+    const adv = await runEvidence(f, 'adversarial')
+    if (v.verdict === 'accept' && adv.verdict === 'PASS') {
+      const c = await runEvidence(f, 'commit')
+      if (c.verdict !== 'DONE') { await rejectAttempt(`the commit failed: ${c.reason}`); continue }
+      transition(f, 'fix_status', 'verified', `attempt ${attempt}: the check passed, the verifier accepted, ${adv.reason}`)
+      f.fix_artifact = { mode: MODE, branch: FIX_BRANCH, commit: c.commit, attempts: attempt, check: checked.reason, adversarial: adv.reason, remaining_risks: v.remaining_risks }
+      return null
+    }
+    const why = [...v.problems, ...(v.unrelated_changes.length ? [`unrelated changes: ${v.unrelated_changes.join('; ')}`] : []), ...(adv.verdict !== 'PASS' ? [`adversarial tests: ${adv.reason}`] : [])]
+    await rejectAttempt(why.length ? why.join('; ') : 'the verifier rejected it without a reason')
+  }
+  transition(f, 'fix_status', 'unresolved', `no repair passed in ${MAX_REPAIR_ATTEMPTS} attempt(s)`)
+  f.fix_artifact = { mode: MODE, branch: FIX_BRANCH, commit: null, attempts: MAX_REPAIR_ATTEMPTS, last_feedback: feedback }
+  return null
+}
+
 const count = st => ledger.findings.filter(f => !f.stale && f.verification_status === st).length
-return finish('done', `${added.length} new finding(s) across ${lenses.length} lens(es): ${count('reproduced')} reproduced, ${count('confirmed')} confirmed without a reproduction, ${count('contested')} contested, ${count('not_reproduced')} not reproduced, ${count('preexisting')} pre-existing, ${count('refuted')} refuted`)
+const fixes = st => ledger.findings.filter(f => !f.stale && f.fix_status === st).length
+const repairNote = MODE === 'discover' ? '' : `; repair (${MODE}): ${fixes('verified')} verified, ${fixes('proposed')} proposed, ${fixes('unresolved')} unresolved${repairStopped ? `, stopped: ${repairStopped}` : ''}`
+return finish('done', `${added.length} new finding(s) across ${lenses.length} lens(es): ${count('reproduced')} reproduced, ${count('confirmed')} confirmed without a reproduction, ${count('contested')} contested, ${count('not_reproduced')} not reproduced, ${count('preexisting')} pre-existing, ${count('refuted')} refuted${repairNote}`)

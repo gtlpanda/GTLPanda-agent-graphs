@@ -123,7 +123,7 @@ await test('missing paths, a missing intake, or a mode not built yet escalate wi
     [{ ...ARGS(), stateDir: undefined }, /required absolute paths/],
     [{ ...ARGS(), intake: null }, /must be the intake\.json/],
     [{ ...ARGS(), intake: { target: { head: HEAD } } }, /must be the intake\.json/],
-    [{ ...ARGS(), mode: 'fix' }, /mode "fix" is not built yet/],
+    [{ ...ARGS(), mode: 'repair-everything' }, /mode "repair-everything" is not one of discover, propose, fix/],
     [null, /required absolute paths/],
   ]) {
     const { result, calls } = await run(fn, {}, args)
@@ -134,7 +134,7 @@ await test('missing paths, a missing intake, or a mode not built yet escalate wi
 })
 await test('an escalation hands back the earlier findings untouched, never an empty list', async () => {
   const prior = (await go({ 'impact-mapper': [IMPACT()], hunter: huntersBy({ logic: HUNT('logic', [CAND()]), regression: HUNT('regression'), security: HUNT('security') }) }, ARGS())).result.findings
-  const { result } = await run(fn, {}, { ...ARGS({ prior }), mode: 'fix' })
+  const { result } = await run(fn, {}, { ...ARGS({ prior }), mode: 'bogus' })
   assert.equal(result.status, 'escalate')
   assert.deepEqual(result.findings, prior)
 })
@@ -347,7 +347,7 @@ await test('the runner gate reads only the last line: wrong id, garbage, or no l
   for (const out of [RAN('REPRODUCED', 'F2'), { output: 'All good, reproduced!', exit_code: 0 }, { output: 'EVIDENCE: REPRODUCED F1\nextra line', exit_code: 0 }, { output: 'EVIDENCE: MAYBE F1', exit_code: 0 }]) {
     const { result } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [out] }, ARGS())
     assert.equal(f1(result).verification_status, 'confirmed', out.output)
-    assert.match(f1(result).reproduction_artifact.reason, /did not end with an EVIDENCE line/)
+    assert.match(f1(result).reproduction_artifact.reason, /did not end with the EVIDENCE line/)
   }
 })
 await test('PREEXISTING, NOT_REPRODUCED, and ERROR map to their statuses; ERROR keeps static evidence only', async () => {
@@ -396,4 +396,123 @@ await test('paths with spaces and quotes are single-quoted in every command an a
   assert.equal(p, "node '/home/First Last/.claude/skills/bughunt/evidence.mjs' repro '/home/First O'\\''Last/repo/.git/bughunt/pr-7' F1")
   const argv = require_('child_process').spawnSync('sh', ['-c', `printf '%s\\n' ${p.slice('node '.length)}`], { encoding: 'utf8' }).stdout.trim().split('\n')
   assert.deepEqual(argv, ['/home/First Last/.claude/skills/bughunt/evidence.mjs', 'repro', "/home/First O'Last/repo/.git/bughunt/pr-7", 'F1'], 'a shell splits it into exactly these arguments')
+})
+
+console.log('== bughunt-flow: repair (propose, fix)')
+// A reproduced F1, then the repair stage. The runner answers by the kind in its
+// label ("fix: F1", "commit: F1", ...); the reproduction run is "run: F1".
+const SHA = 'f'.repeat(40)
+const RUNNER = byKind => {
+  const queues = Object.fromEntries(Object.entries(byKind).map(([k, v]) => [k, [...v]]))
+  const n = Object.values(byKind).reduce((a, v) => a + v.length, 0)
+  return Array.from({ length: n }, () => (p, opts) => {
+    const kind = opts.label.startsWith('run: ') ? 'repro' : opts.label.split(':')[0]
+    const q = queues[kind]
+    assert.ok(q && q.length, `unexpected runner call: ${opts.label}`)
+    const [verdict, reason = 'why', extra = ''] = q.shift()
+    const word = kind === 'repro' ? 'EVIDENCE' : kind.toUpperCase()
+    return { output: `${word} F1: ${reason}\n${word}: ${verdict} F1${extra ? ` ${extra}` : ''}`, exit_code: 0 }
+  })
+}
+const REP = (extra = {}) => ({ root_cause: 'sum subtracts instead of adding', why_it_exists: 'a typo', files_changed: ['src/cart.js'], interfaces_changed: false, summary: 's', ...extra })
+const ACCEPT = (extra = {}) => ({ verdict: 'accept', root_cause_addressed: true, callers_preserved: true, unrelated_changes: [], problems: [], adversarial_tests: [], remaining_risks: [], ...extra })
+const REJECT = problems => ACCEPT({ verdict: 'reject', problems })
+const REPRODUCED = (more = {}) => ({ ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], ...more })
+
+await test('propose: a repair that passes its check is committed in the fix worktree and stays proposed; no verifier', async () => {
+  const { result, calls } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS', 'the suite passes']], commit: [['DONE', 'committed', SHA]] }), repairer: [REP()] }), ARGS({ mode: 'propose' }))
+  assert.equal(f1(result).fix_status, 'proposed')
+  assert.equal(f1(result).root_cause, 'sum subtracts instead of adding')
+  assert.deepEqual(f1(result).fix_artifact, { mode: 'propose', branch: null, commit: SHA, attempts: 1, check: 'the suite passes' })
+  assert.ok(!calls.some(c => c.agentType === 'fix-verifier'))
+  assert.match(result.reason, /repair \(propose\): 0 verified, 1 proposed, 0 unresolved/)
+})
+await test('fix: check passes, the verifier accepts, adversarial tests pass -> committed and verified on the fix branch', async () => {
+  const { result, calls } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS']], adversarial: [['PASS', '2 adversarial test(s) pass']], commit: [['DONE', 'c', SHA]] }), repairer: [REP()], 'fix-verifier': [ACCEPT({ remaining_risks: ['none seen'] })] }), ARGS({ mode: 'fix', fixBranch: 'bughunt/pr-7' }))
+  assert.equal(f1(result).fix_status, 'verified')
+  assert.equal(f1(result).fix_artifact.commit, SHA)
+  assert.equal(f1(result).fix_artifact.branch, 'bughunt/pr-7')
+  assert.deepEqual(f1(result).history.filter(h => h.field === 'fix_status').map(h => h.to), ['proposed', 'verified'])
+  assert.deepEqual(calls.filter(c => c.agentType === 'runner').map(c => c.label), ['run: F1', 'fix: F1', 'adversarial: F1', 'commit: F1'])
+})
+await test('fix: the verifier rejects, the attempt is reverted, and the next repair gets its feedback', async () => {
+  const { result, calls } = await run(fn, REPRODUCED({
+    runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS'], ['PASS']], adversarial: [['PASS'], ['PASS']], revert: [['DONE']], commit: [['DONE', 'c', SHA]] }),
+    repairer: [REP(), REP()], 'fix-verifier': [REJECT(['src/cart.js:11 special-cases the test input 2']), ACCEPT()],
+  }), ARGS({ mode: 'fix' }))
+  assert.equal(f1(result).fix_status, 'verified')
+  assert.equal(f1(result).fix_artifact.attempts, 2)
+  const second = calls.filter(c => c.agentType === 'repairer')[1].prompt
+  assert.match(second, /Attempt 2 of 2/)
+  assert.match(second, /<rejection-feedback>\nsrc\/cart\.js:11 special-cases the test input 2\n<\/rejection-feedback>/)
+  assert.deepEqual(f1(result).history.filter(h => h.field === 'fix_status').map(h => h.to), ['proposed', 'rejected', 'proposed', 'verified'])
+})
+await test('attempts used up: each failed attempt is reverted, then the finding is unresolved with the last reason', async () => {
+  const { result, calls } = await run(fn, REPRODUCED({
+    runner: RUNNER({ repro: [['REPRODUCED']], fix: [['FAIL', 'still fails'], ['FAIL', 'breaks the suite: npm test']], revert: [['DONE'], ['DONE']] }),
+    repairer: [REP(), REP()],
+  }), ARGS({ mode: 'fix' }))
+  assert.equal(f1(result).fix_status, 'unresolved')
+  assert.deepEqual(f1(result).fix_artifact, { mode: 'fix', branch: null, commit: null, attempts: 2, last_feedback: 'the fix check failed: breaks the suite: npm test' })
+  assert.equal(calls.filter(c => c.label === 'revert: F1').length, 2)
+  assert.deepEqual(f1(result).history.filter(h => h.field === 'fix_status').map(h => h.to), ['proposed', 'rejected', 'proposed', 'rejected', 'unresolved'])
+})
+await test('a fix check that cannot run (no worktree) stops all repair: that finding is unresolved, the next is never tried', async () => {
+  const two = [CAND({ severity: 'CRITICAL' }), CAND({ file_path: 'b.js', title: 'second bug' })]
+  const runner = RUNNER({ repro: [['REPRODUCED'], ['REPRODUCED']], fix: [['ERROR', 'no fix worktree at /x/fix']] })
+  const { result, calls } = await run(fn, { ...ONE(two), skeptic: [SKEP('confirmed'), SKEP('confirmed')], reproducer: [WROTE(), WROTE()], runner, repairer: [REP()] }, ARGS({ mode: 'fix' }))
+  assert.equal(calls.filter(c => c.agentType === 'repairer').length, 1)
+  assert.equal(result.findings[0].fix_status, 'unresolved')
+  assert.equal(result.findings[1].fix_status, 'none')
+  assert.match(result.reason, /stopped: no fix worktree/)
+})
+await test('the verifier accepts but an adversarial test fails: rejected; a verifier that returns nothing never accepts', async () => {
+  let { result } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS'], ['PASS']], adversarial: [['FAIL', 'tests/adv.test.js fails against the repair']], revert: [['DONE'], ['DONE']] }), repairer: [REP(), REP()], 'fix-verifier': [ACCEPT(), { throws: 'down' }] }), ARGS({ mode: 'fix' }))
+  assert.equal(f1(result).fix_status, 'unresolved')
+  const rejections = f1(result).history.filter(h => h.to === 'rejected').map(h => h.why)
+  assert.match(rejections[0], /adversarial tests: tests\/adv\.test\.js fails/)
+  assert.match(rejections[1], /no repair is accepted unreviewed/)
+})
+await test('a repairer that returns nothing, or a commit that fails, is a rejected attempt', async () => {
+  const { result } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS']], commit: [['FAIL', 'the worktree changed after the fix check']], revert: [['DONE'], ['DONE']] }), repairer: [{ throws: 'x' }, REP()] }), ARGS({ mode: 'propose' }))
+  const why = f1(result).history.filter(h => h.to === 'rejected').map(h => h.why)
+  assert.match(why[0], /the repairer returned nothing/)
+  assert.match(why[1], /the commit failed: the worktree changed after the fix check/)
+  assert.equal(f1(result).fix_status, 'unresolved')
+})
+await test('discover mode never repairs', async () => {
+  const { calls } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']] }) }), ARGS())
+  assert.ok(!calls.some(c => ['repairer', 'fix-verifier'].includes(c.agentType)))
+})
+await test('only reproduced findings are repaired, unless the human approved a confirmed one by id', async () => {
+  const unrepro = () => ({ ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [{ written: false, test_file: '', how_it_fails: '', reason: 'needs a browser' }] })
+  let { calls } = await run(fn, unrepro(), ARGS({ mode: 'propose' }))
+  assert.ok(!calls.some(c => c.agentType === 'repairer'))
+  ;({ calls } = await run(fn, { ...unrepro(), repairer: [REP()], runner: RUNNER({ fix: [['PASS']], commit: [['DONE', 'c', SHA]] }) }, ARGS({ mode: 'propose', approve: ['F1'] })))
+  assert.match(calls.find(c => c.agentType === 'repairer').prompt, /approved for repair without a reproduction test/)
+})
+await test('a re-run skips a finding already verified', async () => {
+  const first = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS']], adversarial: [['PASS']], commit: [['DONE', 'c', SHA]] }), repairer: [REP()], 'fix-verifier': [ACCEPT()] }), ARGS({ mode: 'fix' }))
+  const { calls } = await run(fn, ONE(), ARGS({ mode: 'fix', prior: first.result.findings }))
+  assert.ok(!calls.some(c => ['repairer', 'runner'].includes(c.agentType)))
+})
+await test('the repair commands are fixed in code and quoted; prompts carry the worktree, the reproduction, and fenced feedback', async () => {
+  const { calls } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS']], adversarial: [['PASS']], commit: [['DONE', 'c', SHA]] }), repairer: [REP()], 'fix-verifier': [ACCEPT()] }), ARGS({ mode: 'fix', evidenceTimeoutMs: 9000 }))
+  const cmd = label => calls.find(c => c.label === label).prompt.split('\n')[1]
+  assert.equal(cmd('fix: F1'), "node '/home/u/.claude/skills/bughunt/evidence.mjs' fix '/tmp/repo/.git/bughunt/pr-7' F1 --timeout-ms 9000")
+  assert.equal(cmd('commit: F1'), "node '/home/u/.claude/skills/bughunt/evidence.mjs' commit '/tmp/repo/.git/bughunt/pr-7' F1")
+  const rp = calls.find(c => c.agentType === 'repairer').prompt
+  assert.match(rp, /Fix worktree \(work only here; never commit\): '\/tmp\/repo\/\.git\/bughunt\/pr-7\/fix'/)
+  assert.match(rp, /'\/tmp\/repo\/\.git\/bughunt\/pr-7\/repro\/F1\/files\/tests\/bughunt-f1\.test\.js'/)
+  const vp = calls.find(c => c.agentType === 'fix-verifier').prompt
+  assert.doesNotMatch(vp, /sum subtracts instead of adding/, 'the verifier never sees the repairer\'s root cause')
+  assert.match(vp, /'\/tmp\/repo\/\.git\/bughunt\/pr-7\/repro\/F1\/adversarial'/)
+})
+await test('repair nodes pin their model and effort to the agent files', async () => {
+  const { calls } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS']], adversarial: [['PASS']], commit: [['DONE', 'c', SHA]] }), repairer: [REP()], 'fix-verifier': [ACCEPT()] }), ARGS({ mode: 'fix' }))
+  for (const c of calls.filter(c => ['repairer', 'fix-verifier'].includes(c.agentType))) {
+    assert.equal(c.model, agentField(c.agentType, 'model'), `${c.agentType}: model drift`)
+    assert.equal(c.effort, agentField(c.agentType, 'effort'), `${c.agentType}: effort drift`)
+    assert.ok(c.schema && c.schema.type === 'object')
+  }
 })
