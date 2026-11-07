@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync,
 import { join, dirname, extname, normalize, relative } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
 import { git } from '../../../build/skills/build-app/driver/proc.mjs'
 import { TEST_FILE } from '../../../build/skills/build-app/driver/checks.mjs'
 import { readLedger, writeLedger, reconcile } from '../../../../core/skills/findings/findings.mjs'
@@ -89,6 +90,15 @@ export function testFileProblems(testFile) {
   return p
 }
 
+// Whether a tool is installed, asked where no code under review can answer: from
+// an empty temp directory, in Python's isolated mode (-I: no current directory
+// or user site on the path), with the sandbox environment and a short limit. A
+// probe run inside the export once imported a pytest.py the PR committed, with
+// the full environment and no sandbox (found in review, 2026-11-06).
+function toolInstalled(cmd, args) {
+  return spawnSync(cmd, args, { stdio: 'ignore', cwd: tmpdir(), env: sandboxEnv(), timeout: 20_000, killSignal: 'SIGKILL' }).status === 0
+}
+
 // The package a JavaScript test belongs to: the nearest directory above it
 // with a package.json ('.' for the root). A monorepo has several.
 export function packageDirOf(testFile, dir) {
@@ -114,11 +124,11 @@ export function runnerFor(testFile, dir) {
     return { argv: [process.execPath, '--test', rel], cwd: root }
   }
   if (ext === '.py') {
-    if (spawnSync('python3', ['-c', 'import pytest'], { stdio: 'ignore', cwd: dir }).status !== 0) return { error: 'pytest is not installed for python3' }
+    if (!toolInstalled('python3', ['-I', '-c', 'import pytest'])) return { error: 'pytest is not installed for python3' }
     return { argv: ['python3', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', testFile], cwd: dir }
   }
   if (testFile.endsWith('_test.go')) {
-    if (spawnSync('go', ['version'], { stdio: 'ignore' }).status !== 0) return { error: 'go is not installed' }
+    if (!toolInstalled('go', ['version'])) return { error: 'go is not installed' }
     return { argv: ['go', 'test', `./${dirname(testFile)}`], cwd: dir }
   }
   return { error: `no runner for ${ext || 'files without an extension'}` }

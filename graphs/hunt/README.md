@@ -188,6 +188,10 @@ ledger.
   - **What is not isolated:** the test can still read and write files your user
     can, including the repo's linked `node_modules`. Run `/bughunt` only on
     changes you are willing to execute locally.
+  - **Tool probes never run the change's code.** "Is pytest installed?" is
+    asked from an empty temp directory, with `python3 -I`, the sandbox
+    environment, and a time limit. A probe inside the export once imported a
+    `pytest.py` the PR had committed.
   - **What the test may never decide:** the reproducer names only a test path.
     The path is checked:
     - repo-relative;

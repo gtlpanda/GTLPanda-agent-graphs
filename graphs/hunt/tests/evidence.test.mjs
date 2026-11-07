@@ -185,6 +185,20 @@ await test('a file the commit has where the test\'s directory should be is an ER
 })
 // (A grandchild that inherits the test's stdout keeps node --test itself waiting
 // on that pipe; that ends as a timeout ERROR, and the namespace still kills it.)
+await test('checking whether pytest is installed never runs a pytest.py the change committed, and never with secrets', () => {
+  const trap = mkdtempSync(join(tmpdir(), 'trap-'))
+  sh(repo, 'checkout', '-q', '-b', 'with-trap')
+  put(join(repo, 'pytest.py'), `import os\nopen(${JSON.stringify(join(trap, 'ran'))}, 'a').write(os.environ.get('TRAP_SECRET_TOKEN', 'none') + '\\n')\nraise SystemExit(0)\n`)
+  sh(repo, 'add', 'pytest.py')
+  sh(repo, 'commit', '-qm', 'trap')
+  const st = dirname(spawnSync('node', [INTAKE, repo], { encoding: 'utf8' }).stdout.split('\n')[0])
+  put(join(st, 'repro', 'F1', 'repro.json'), JSON.stringify({ test_file: 'tests/test_bughunt_f1.py' }))
+  put(join(st, 'repro', 'F1', 'files', 'tests/test_bughunt_f1.py'), "def test_x():\n    assert False, 'BUGHUNT-F1'\n")
+  ev(['repro', st, 'F1'], { TRAP_SECRET_TOKEN: 'hunter2' })
+  sh(repo, 'checkout', '-q', 'feature')
+  const ran = existsSync(join(trap, 'ran')) ? readFileSync(join(trap, 'ran'), 'utf8') : ''
+  assert.doesNotMatch(ran, /hunter2/, 'the committed pytest.py ran with the real environment')
+})
 await test('anything that throws during a run is an ERROR verdict with an evidence file, never a crash', () => {
   repro('F16', 'tests/bughunt-f16.test.mjs', TEST("  assert.fail('BUGHUNT-F16')"))
   const work = join(STATE, 'work')

@@ -1121,6 +1121,14 @@ distinct issues. All are fixed and tested:
 A third mutation run over the fixes: 17 of 17 caught, after one more test that forces a throw inside
 a run.
 
+A focused re-review of the fix commit confirmed seven of its eight fixes and found one new HIGH,
+which it reproduced. The pytest probe added for the missing-tool fix ran
+`python3 -c 'import pytest'` inside the export, with the full environment and no sandbox. A PR that
+committed its own `pytest.py` therefore had that file executed with the real credentials, outside
+every isolation the run itself had. Probes now run from an empty temp directory, in Python's
+isolated mode (`-I`), with the sandbox environment and a 20-second limit. A test commits a trap
+`pytest.py` and checks the secret never reaches it; with the old probe back, that test fails.
+
 My own mistake while running it: a cleanup step's `pkill -f <name>` matched the shell that carried
 that name in its command line and killed it. That orphaned one mutation run, which then raced a
 second one and left three mutations in `evidence.mjs`. A site-by-site check found all three, and I
@@ -1135,12 +1143,12 @@ sandbox, and `reconcile`; 24 were caught at first. The two survivors were real t
 26 of 26 are caught now.
 
 **Stats.**
-- 45 new tests:
-  - 23 evidence tests that run real `node --test` processes in throwaway repos (every verdict, a
+- 46 new tests:
+  - 24 evidence tests that run real `node --test` processes in throwaway repos (every verdict, a
     timeout, bad paths, symlinks, a modified tree, a forced throw, secrets, the network, loopback,
     no orphans, the repo untouched, recheck);
   - 19 routing tests;
   - 3 reconcile and report tests.
-- The suite is 505 workflow tests, 0 failed.
+- The suite is 506 workflow tests, 0 failed.
 - 3 new agents, 6 new validate.sh rules, and an advisor section.
 - The workflow test harness gained a real `pipeline()`.
