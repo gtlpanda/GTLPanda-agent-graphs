@@ -80,7 +80,7 @@ export function totals(rows) {
     recall: truthBugs ? Math.round((found / truthBugs) * 1000) / 1000 : null,
     clean_cases: clean.length, clean_cases_with_false_positives: clean.filter(r => r.false_positives > 0).length,
     reproduced: sum('reproduced'), refuted: sum('refuted'), fixes_verified: sum('fixes_verified'),
-    cost_usd: cost, cost_per_true_bug: cost !== null && tp ? Math.round((cost / tp) * 100) / 100 : null,
+    cost_usd: cost, cost_per_true_bug: cost !== null && found ? Math.round((cost / found) * 100) / 100 : null,
     seconds: sum('seconds'),
   }
 }

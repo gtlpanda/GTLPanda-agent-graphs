@@ -1324,3 +1324,68 @@ distinct issues. All are fixed:
   - "Nothing to review" (the PR merged by hand) braked forever; it now skips the hunt.
 
 A mutation run over the fixes caught 7 of 7. 6 new tests, for 569 workflow tests and 0 failed.
+
+## 29. /bughunt, part 5: the benchmark and two live runs (2026-11-07)
+
+**What changed.**
+- `graphs/hunt/bench/make-fixtures.mjs` builds 10 small Node repos, each a base on `main` and a
+  change on `pr` with an `npm test` suite and a truth file: 6 planted bugs, 1 misleading change
+  that is correct, and 3 clean changes.
+- `bench/run-bench.mjs` runs one fresh headless `/bughunt` per case (and `--fix` on the ones
+  named), then scores each ledger against its truth. `scripts/bench-bughunt.sh` is the opt-in
+  wrapper.
+- An offline test checks every fixture (its suite passes at the base, its truth points at real
+  lines) and the runner's scoring against a fake `claude`.
+- I set the pass conditions before any live run (`tasks/todo.md`). Before the run I used
+  `install.sh --skip=settings.json,CLAUDE.md` to link the new entries; it would otherwise have
+  replaced the user's own settings and CLAUDE.md.
+
+**The first single-case run** (`boundary-discount`, $1.05) found the planted bug and confirmed it,
+then called it pre-existing. The reproduction also failed at the merge-base, which had no discount
+at all, so the test failed there because the feature did not exist yet. Now "fails at both" means
+pre-existing only when the change left the finding's lines alone (`touchedByChange`, from intake's
+hunks).
+
+**The first full run** ($13.09, 53 minutes) found every planted bug, and surfaced three more
+defects:
+- **A repair committed without its proof.** That boundary fix skipped the three-arm proof: the
+  evidence record still said PREEXISTING, which `reproFor` did not trust. I had introduced this
+  with the pre-existing fix an hour earlier. The verifier and an adversarial test had checked the
+  fix (and it was right), but it was not proven the way a reproduced finding must be.
+- **Duplicates.** One path traversal was filed three times by three lenses.
+- **An idle session.** One session waited on a 30-minute ScheduleWakeup for a hunt that finished in
+  3 minutes.
+
+The scoring also had a bug of my own: totals counted matching reports as bugs found (recall 1.375).
+All four are fixed and tested, and 3 of 3 mutations are caught.
+
+**The second full run, on the fixed code:**
+
+| Measure | Result |
+|---|---|
+| Planted bugs found | 8 of 8, each reproduced by a real failing test |
+| False positives on the 4 bug-free changes | 0 |
+| Precision against the truth files | 0.75 (9 of 12). The other 3 are each a PR that rewrote its own test to hide the bug: real defects, absent from my truth files, never hallucinated. I left the truth files as they were set before the run |
+| Duplicate reports | 1 |
+| Recheck | agreed every time, 0 corrections |
+| Fix mode | `boundary-discount`: fixed, verified, committed on `bughunt/<key>`. `logic-off-by-one`: unresolved, because the PR's own test asserts the buggy result and a repair may never edit an existing test. `pr` was untouched in both |
+| Cost | $12.01 for 12 runs, $1.50 per true bug found |
+| Time | 22.6 minutes |
+
+**The pre-registered conditions all pass:**
+- C1: every case produced a ledger with a finished run.
+- C2: measured, as above.
+- C3: reproductions ran, and recheck agreed.
+- C4: one fix was verified and committed, and one was unresolved with its reason; nothing was ever
+  committed on `pr`.
+
+**Limits, stated as they are.**
+- The fixtures are tiny and self-authored, so this shows the graph working end to end, not its
+  accuracy on real code.
+- The 5-line match window can count a nearby distinct bug as a hit.
+- A fix is blocked whenever the PR's test asserts the bug.
+
+**Stats.**
+- 19 new tests: 15 offline benchmark tests, plus 4 for the fixes.
+- Live spend for this part: $26.15 over 25 runs.
+- The suite is 588 workflow tests, 0 failed.
