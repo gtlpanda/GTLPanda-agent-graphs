@@ -251,10 +251,24 @@ ledger.
     fingerprinted, and a change voids the check.
   - Every commit is `evidence.mjs commit`, in the fix worktree, of the checked
     tree.
-  - The fix worktree is checked every time. Its `.git` must be a plain
-    linked-worktree file pointing into this repo's `worktrees/`. A `.git`
-    redirected at the repo itself once let commit and revert act on the user's
-    branch (found in review).
+  - The fix worktree is checked every time:
+    - `<state>/fix` must be a real directory, not a symlink;
+    - its `.git` must be a plain linked-worktree file pointing into this repo's
+      `worktrees/`;
+    - git's own record of which worktree owns that admin directory
+      (`<admin>/gitdir`) must name this exact `.git`.
+
+    A `.git` redirected at the repo, or at the user's own worktree, or a fix dir
+    symlinked to it, once let commit and revert act on the user's branch and
+    files (found in review, twice).
+  - **The guards judge the staged tree, never `git status`.** Skip-worktree
+    flags once hid edits from status that the commit would have kept.
+  - **Every export uses a private index and `checkout-index`, never
+    `git archive`.** Archive honors a tree's own `export-ignore`, which once hid
+    a broken test from the check while the commit kept it.
+  - **`revert` rebuilds the index from HEAD** and restores every file. It
+    removes untracked and ignored files and nested repos (`clean -ffdqx`), and
+    says DONE only once the worktree stages to exactly HEAD's tree.
 - **No git call runs the PR's hooks or fsmonitor.** Every git call in `intake`
   and `evidence.mjs` runs with `core.hooksPath=/dev/null` and
   `core.fsmonitor=false`. Both are settings a repo may give with a relative

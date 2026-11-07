@@ -41,7 +41,6 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { git as rawGit } from '../../../build/skills/build-app/driver/proc.mjs'
 import { TEST_FILE } from '../../../build/skills/build-app/driver/checks.mjs'
-import { createHash } from 'node:crypto'
 import { readLedger, writeLedger, reconcile, reconcileFix } from '../../../../core/skills/findings/findings.mjs'
 
 export const VERDICTS = ['REPRODUCED', 'PREEXISTING', 'NOT_REPRODUCED', 'ERROR']
@@ -160,16 +159,25 @@ export function runnerFor(testFile, dir) {
   return { error: `no runner for ${ext || 'files without an extension'}` }
 }
 
-// A fresh copy of `sha` in `dir`, from git archive: the repo is never touched,
-// so any number of these can run at once.
+// A fresh copy of the commit or tree `sha` in `dir`, every file exactly as git
+// stores it: read into a private index and checked out with checkout-index.
+// Not git archive, which honors the tree's own export-ignore and export-subst,
+// so a .gitattributes in a repair once hid a broken test from the check while
+// the commit kept it (found in review). The repo itself is never touched, so
+// any number of these can run at once.
 function exportTree(repo, sha, dir) {
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
-  const tar = spawnSync('git', ['-C', repo, 'archive', '--format=tar', sha], { maxBuffer: 1024 * 1024 * 1024 })
-  if (tar.status !== 0) return `git archive ${sha} failed: ${String(tar.stderr).trim()}`
-  const x = spawnSync('tar', ['-x', '-C', dir], { input: tar.stdout, maxBuffer: 64 * 1024 * 1024 })
-  if (x.status !== 0) return `unpacking ${sha} failed: ${String(x.stderr).trim()}`
-  return null
+  const index = { GIT_INDEX_FILE: join(dir, '..', `.index-${process.pid}-${relative(join(dir, '..'), dir).replace(/[^A-Za-z0-9]/g, '_')}`) }
+  try {
+    const read = spawnSync('git', ['-C', repo, ...SAFE_GIT, 'read-tree', sha], { encoding: 'utf8', env: { ...process.env, ...index } })
+    if (read.status !== 0) return `reading ${sha} failed: ${String(read.stderr).trim()}`
+    const out = spawnSync('git', ['-C', repo, ...SAFE_GIT, 'checkout-index', '-a', '-f', `--prefix=${dir}/`], { encoding: 'utf8', env: { ...process.env, ...index }, maxBuffer: 64 * 1024 * 1024 })
+    if (out.status !== 0) return `checking out ${sha} failed: ${String(out.stderr).trim()}`
+    return null
+  } finally {
+    rmSync(index.GIT_INDEX_FILE, { force: true })
+  }
 }
 
 // Installed dependencies are not in git: link the repo's own, at the root and
@@ -392,14 +400,18 @@ function wgit(dir, args, extraEnv = {}) {
   return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`, stdout: r.stdout || '' }
 }
 
-// The fix worktree, checked: <state dir>/fix must be a linked worktree of this
-// repo (its .git a plain file pointing into the repo's worktrees/), whose last
-// commit descends from the head under review. A .git redirected at the repo
-// itself once made commit and revert act on the user's branch (found in
-// review). Returns {dir, head} or {error}.
+// The fix worktree, checked: <state dir>/fix must be a real directory (not a
+// symlink) holding a linked worktree of this repo, and git's own record of
+// which worktree owns its admin dir (<admin dir>/gitdir) must name this exact
+// .git. Without that last check a repairer could point .git at the user's own
+// worktree's admin dir, or at the repo, and commit and revert acted on the
+// user's branch and files (found in review, twice). Its last commit must
+// descend from the head under review. Returns {dir, head} or {error}.
 function fixWorktree(stateDir, intake) {
   const dir = join(stateDir, 'fix')
-  if (!existsSync(dir)) return { error: `no fix worktree at ${dir}; /bughunt --propose or --fix makes it` }
+  let st
+  try { st = lstatSync(dir) } catch { return { error: `no fix worktree at ${dir}; /bughunt --propose or --fix makes it` } }
+  if (!st.isDirectory()) return { error: `${dir} must be a directory, not a symlink` }
   let dotgit
   try { dotgit = lstatSync(join(dir, '.git')) } catch { return { error: `${dir} is not a git worktree` } }
   if (!dotgit.isFile()) return { error: `${dir}/.git must be a linked worktree's .git file` }
@@ -407,20 +419,29 @@ function fixWorktree(stateDir, intake) {
   const gitDir = wgit(dir, ['rev-parse', '--absolute-git-dir']).stdout.trim()
   const top = wgit(dir, ['rev-parse', '--show-toplevel']).stdout.trim()
   let inside = false
-  try { inside = realpathSync(gitDir).startsWith(`${realpathSync(repoCommon)}/worktrees/`) && realpathSync(top) === realpathSync(dir) } catch { inside = false }
-  if (!inside) return { error: `${dir} is not a linked worktree of ${intake.repo}` }
+  try {
+    const admin = realpathSync(gitDir)
+    const owner = readFileSync(join(admin, 'gitdir'), 'utf8').trim()
+    inside = admin.startsWith(`${realpathSync(repoCommon)}/worktrees/`) && realpathSync(top) === realpathSync(dir) && realpathSync(owner) === realpathSync(join(dir, '.git'))
+  } catch { inside = false }
+  if (!inside) return { error: `${dir} is not the linked worktree of ${intake.repo} it claims to be` }
   const head = wgit(dir, ['rev-parse', 'HEAD']).stdout.trim()
   if (!wgit(dir, ['merge-base', '--is-ancestor', intake.target.head, head]).ok) return { error: `the fix worktree's commit ${head.slice(0, 7)} does not descend from the head under review` }
   return { dir, head }
 }
 
-// Every path the worktree changed since its last commit, untracked included.
-// No rename detection: a rename is a delete plus an add, so a test "moved" away
-// is seen as deleted. [{status, path}].
-function changesOf(dir) {
-  const r = wgit(dir, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames'])
-  if (!r.ok) throw new Error(`git status failed in ${dir}`)
-  return r.stdout.split('\0').filter(Boolean).map(e => ({ status: e.slice(0, 2), path: e.slice(3) }))
+// Every path the staged tree changes against HEAD: exactly what would be
+// checked and committed. Never git status, which reads the worktree's own index
+// (skip-worktree or assume-unchanged hid edits from every guard; found in
+// review). No rename detection: a rename is a delete plus an add, so a test
+// "moved" away is seen as deleted. [{status, path}].
+function changesOf(dir, tree) {
+  const r = wgit(dir, ['diff-tree', '-r', '--no-renames', '-z', '--name-status', 'HEAD', tree])
+  if (!r.ok) throw new Error(`git diff-tree failed in ${dir}`)
+  const parts = r.stdout.split('\0').filter(Boolean)
+  const out = []
+  for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i], path: parts[i + 1] })
+  return out
 }
 
 // The tree the repair would commit: HEAD plus every change, ignored files
@@ -515,7 +536,10 @@ export function fix(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS, suiteTimeout
   const proof = reproFor(stateDir, id)
   if (proof.error) return out('BLOCKED', proof.error)
   const repro = proof.repro || null
-  const changes = changesOf(wt.dir)
+  const work = join(stateDir, 'work', `${id}-fix`)
+  rmSync(work, { recursive: true, force: true })
+  let changes
+  try { changes = changesOf(wt.dir, stagedTree(wt.dir, work)) } catch (e) { return out('ERROR', `staging the repair failed: ${e.message}`) }
   if (!changes.length) return out('FAIL', 'the repair changed nothing')
   // A fix may add tests and suite files; it never edits or deletes one that
   // exists, which is how a counterfeit fix makes a suite pass.
@@ -539,12 +563,10 @@ export function fix(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS, suiteTimeout
     mkdirSync(dirname(join(wt.dir, repro.testFile)), { recursive: true })
     writeFileSync(join(wt.dir, repro.testFile), repro.text)
   }
-  const work = join(stateDir, 'work', `${id}-fix`)
-  rmSync(work, { recursive: true, force: true })
   const runs = []
   try {
     const tree = stagedTree(wt.dir, work)
-    const files = changesOf(wt.dir).map(c => c.path)
+    const files = changesOf(wt.dir, tree).map(c => c.path)
     const marker = markerFor(id)
     const armTime = () => Math.min(timeoutMs, time.left())
     if (repro) {
@@ -662,15 +684,26 @@ export function commit(stateDir, id) {
   }
 }
 
-// Puts the fix worktree back to its last commit, ignored files included,
-// dropping a failed repair.
+// Puts the fix worktree back to its last commit, dropping a failed repair: the
+// index rebuilt from HEAD (no skip-worktree or assume-unchanged left), every
+// file restored, every untracked or ignored file and nested repo removed. DONE
+// only once the worktree stages to exactly HEAD's tree.
 export function revert(stateDir, id) {
   const intake = readIntake(stateDir)
   const wt = fixWorktree(stateDir, intake)
   if (wt.error) return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', wt.error) }
-  const reset = wgit(wt.dir, ['reset', '-q', '--hard', 'HEAD'])
-  const clean = wgit(wt.dir, ['clean', '-fdqx'])
-  if (!reset.ok || !clean.ok) return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', `${reset.out}${clean.out}`.trim()) }
+  const steps = [['read-tree', 'HEAD'], ['checkout-index', '-a', '-f'], ['clean', '-ffdqx']].map(a => wgit(wt.dir, a))
+  const failed = steps.find(x => !x.ok)
+  if (failed) return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', failed.out.trim()) }
+  const work = join(stateDir, 'work', `${id}-revert`)
+  try {
+    const left = changesOf(wt.dir, stagedTree(wt.dir, work))
+    if (left.length) return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', `the worktree still differs from its last commit: ${left.map(c => c.path).join(', ')}`) }
+  } catch (e) {
+    return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', e.message) }
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
   return { verdict: 'DONE', lines: report('REVERT', id, 'DONE', `the fix worktree is back at ${wt.head.slice(0, 7)}`) }
 }
 

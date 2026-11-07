@@ -1218,7 +1218,23 @@ to 15 distinct issues. All are fixed and tested.
   never be retried.
 
 A mutation run over the fixes caught 18 of 18, including removing the hook and fsmonitor flags (a
-trap test catches each). The fixes added 12 tests, for 549 workflow tests and 0 failed.
+trap test catches each).
+
+A focused re-review of the fix commit (c511594) found four more holes and reproduced each:
+- **CRITICAL:** the worktree check still accepted a `.git` pointed at another linked worktree's
+  admin dir, or a fix dir symlinked to the user's worktree. Commit then moved the user's branch,
+  and revert wiped their uncommitted files. Now the fix dir must not be a symlink, and git's own
+  back-pointer (`<admin>/gitdir`) must name this exact `.git`.
+- **HIGH:** `update-index --skip-worktree` hid edits (a neutered test script) from `git status`,
+  which the guards read, while the staged tree kept them. The guards now judge the diff between
+  HEAD and the staged tree.
+- **HIGH:** exports used `git archive`, which honors a tree's `export-ignore`, so a repair's
+  `.gitattributes` hid a broken test from the check. Exports now use a private index plus
+  `checkout-index`.
+- **MEDIUM:** revert left an untracked nested repo behind, which would be committed next. Revert
+  now rebuilds the index, restores every file, uses `clean -ffdqx`, and verifies before saying DONE.
+
+Six mutations, one per new guard: 6 of 6 caught. The fixes added 12 tests, for 549 workflow tests and 0 failed.
 
 **Stats.**
 - 31 new tests (537 workflow tests, 0 failed):
