@@ -5,14 +5,18 @@ one change introduced. It finds bugs, not style. A finding must name its
 trigger, the code path that mishandles it, and the wrong result someone sees,
 with evidence quoted from the code. A finding that cannot do this is dropped.
 
-Status: **discover mode, read-only**. It maps the impact, runs the specialist
-hunters the change calls for, merges their findings under stable ids, and
-reports. Nothing here verifies or reproduces a finding yet, so every finding is
-an unverified candidate, and the report says so. Still planned:
-- the skeptic and referee (adversarial verification);
-- reproduction as a failing test;
+Status: **discover mode**. It maps the impact and runs the specialist hunters
+the change calls for. Then:
+- A blind skeptic challenges every finding, and the advisor referees the ones
+  it cannot settle.
+- Each confirmed finding gets a failing test that `evidence.mjs` runs at the
+  head and at the merge-base, in a sandbox.
+- The session re-runs every reproduction before the report.
+
+It never edits the branch under review. Still planned:
 - the propose and fix modes;
-- wiring into `/build-app` and `/loop`.
+- wiring into `/build-app` and `/loop`;
+- the live benchmark.
 
 ```
 intake.mjs (the session, deterministic) → the commits, files, hunks, routing signals, analysis worktree
@@ -20,7 +24,13 @@ impact (impact-mapper) → route = intake signals ∪ impact picks, capped at ma
   → hunt × lens (hunter, in parallel)
   → merge in code: drop candidates without a trigger, path, observable, or evidence, or under
     confidence 60; drop every finding of a hunter that never read its lens; dedupe against this run
-    and the ledger's earlier findings → done
+    and the ledger's earlier findings
+  → skeptic × candidate (in parallel; it sees the claim, never the hunter's reasoning)
+  → referee (the advisor, one batched call) for every contested finding
+  → reproduce × confirmed (pipeline, capped at maxRepros): reproducer writes a test →
+    runner runs `evidence.mjs repro` → the gate reads the script's own last line
+the session: findings.mjs save → evidence.mjs recheck (re-runs every reproduction, corrects the
+ledger to the runs) → findings.mjs report
 impact returns nothing → route on the intake signals alone
 a hunter returns nothing → its lens is not_covered, and the disposition becomes manual review
 ```
@@ -30,6 +40,10 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
 | Orchestrator | the `/bughunt` session | opus | high | intake, save, report |
 | Impact mapper | `agents/impact-mapper.md` | sonnet | high | once per run |
 | Hunter | `agents/hunter.md`, preloads `bug-lenses` | sonnet | high | once per routed lens |
+| Skeptic | `agents/skeptic.md` | sonnet | high | once per candidate |
+| Referee | `core/agents/advisor.md` (shared), "Refereeing a finding" | fable | high | once per run, only when something is contested |
+| Reproducer | `agents/reproducer.md` | sonnet | high | once per confirmed finding, up to maxRepros |
+| Runner | `agents/runner.md` | haiku | high | once per written reproduction |
 
 ## Routing
 
@@ -60,6 +74,48 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
   - On a new head, a re-found finding moves to the new lines and goes back to
     candidate; a finding nobody re-found goes stale.
   - `maxFindings` (default 25) keeps the most severe new findings and logs the rest.
+- **The skeptic sees the claim, never the hunter's reasoning.** The claim is
+  the frozen fields: file, lines, trigger, path, observable, expected and
+  actual, and the quotes. It routes each finding:
+  - **confirmed:** it names an execution path, and it does not say the bug
+    predates the change;
+  - **refuted:** it refutes above 67 on a finding below HIGH, or names another
+    live finding as the same bug (refuted as its duplicate, with the other
+    gaining the source);
+  - **contested:** everything else, including a confident refute of a HIGH or
+    CRITICAL finding (one Sonnet never drops a blocking bug) and a skeptic that
+    returned nothing.
+- **The referee** gets every contested finding in one call, with the hunter's
+  reasoning and the skeptic's.
+  - `real=false` refutes it.
+  - `real=true`, or no verdict for it, confirms it: a missed bug costs more,
+    and the test settles it.
+  - It can set the severity, and mark a finding pre-existing.
+  - A referee that returns nothing leaves them contested.
+- **Reproduction** runs on the most severe confirmed findings, up to
+  `maxRepros` (default 8, the rest logged).
+  - The reproducer writes `repro/F<n>/repro.json` (`{"test_file": ...}`) and
+    `repro/F<n>/files/<test_file>`. That is a new test file whose failing
+    assertion carries `BUGHUNT-F<n>`.
+  - The runner runs `evidence.mjs repro <state dir> F<n>`. The command is fixed
+    in code, never chosen by an agent.
+  - The gate reads only the last line, `EVIDENCE: <verdict> F<n>`. Then
+    REPRODUCED gives reproduced (confidence at least 90), PREEXISTING gives
+    pre-existing, and NOT_REPRODUCED gives not reproduced.
+  - ERROR, no test written, or no EVIDENCE line keeps the finding confirmed,
+    and the report says it has static evidence only.
+- **`evidence.mjs` decides from the runs**, at the head and at the merge-base:
+  - **REPRODUCED:** the head fails with the marker, and the merge-base passes or
+    fails without the marker (the code under test is new).
+  - **PREEXISTING:** both arms fail with the marker.
+  - **NOT_REPRODUCED:** the head passes, or fails without the marker (another
+    reason).
+  - **ERROR:** a timeout, a test that cannot run, a bad path, a symlinked test,
+    or an analysis tree the reproducer modified.
+- **The session re-runs every reproduction** (`evidence.mjs recheck`) and
+  corrects the ledger to what the runs show (`findings.mjs reconcile`). The
+  runner's transcription is never the final word. `test_results` come only
+  from these runs.
 - **The disposition is computed** (`findings.mjs disposition`), never chosen by a model.
   - **changes requested:** an open confirmed or reproduced bug above LOW.
   - **manual review:** an unsettled HIGH or CRITICAL finding, a lens not fully covered, or a run that stopped early. A stopped run never replaces the saved findings.
@@ -86,12 +142,33 @@ ledger.
 | `input.json` and `run.js` | the run's input, written into a copy of the workflow by `workflow-state/run-script.mjs`, so nothing big is retyped |
 | `result.json` | the workflow's returned ledger |
 | `ledger.json` | the findings across runs (`findings.mjs`) |
+| `repro/F<n>/` | each reproduction: `repro.json` and `files/<test_file>` |
+| `evidence/F<n>.json` | what `evidence.mjs` ran and saw: each arm's commit, exit code, marker, and output tail, plus the verdict |
+| `work/F<n>/` | the exports a run uses, removed when it ends |
 
 ## Permissions and trust
 
-- **Read-only by instruction.** The impact mapper and the hunters are read-only
-  by their instructions, not by their tool list. They have Bash so they can run
-  `git diff`, `git show`, and `git grep`, as the reviewer does.
+- **Read-only by instruction.** The impact mapper, hunters, and skeptic are
+  read-only by their instructions, not by their tool list. They have Bash so
+  they can run `git diff`, `git show`, and `git grep`, as the reviewer does.
+  - The reproducer writes only `repro/F<n>/`. `evidence.mjs` voids the run if
+    the analysis tree changed.
+  - The runner runs one fixed command.
+- **Running code from the change.** Only `evidence.mjs` does it:
+  - **Where:** in a fresh `git archive` export of each commit, so the repo,
+    its worktrees, and the user's checkout are never touched. The repo's
+    `node_modules` are linked in when present.
+  - **Environment:** credentials are stripped. That means anything named like
+    a token, secret, key, password, credential, or session, and every `AWS_`,
+    `GH_`, `GITHUB_`, `ANTHROPIC_`, `CLAUDE_`, `NPM_`, and `SSH_` variable,
+    Claude's own sign-in included.
+  - **Network:** blocked with `unshare -rn` where that works (measured on WSL2:
+    it does).
+  - **Time:** under GNU `timeout -s KILL`, which kills the whole process group.
+    Killing only the runner left a `node --test` child spinning forever
+    (measured).
+  - **What is not isolated:** the test can still read files your user can
+    read. Run `/bughunt` only on changes you are willing to execute locally.
 - **What `/bughunt` never does:** edit the branch under review, commit, push,
   or comment.
 - **Untrusted text.** The PR title and description, branch names, the code,

@@ -19,6 +19,7 @@ const BLOCKING = ['CRITICAL', 'HIGH']
 const LENSES = ['logic', 'contract', 'concurrency', 'security', 'errors', 'regression']
 const CONFIDENCE_FLOOR = 60   // a candidate below this is dropped before anyone spends a call on it
 const UNREPRODUCED_CAP = 79   // no finding claims more until a test reproduces it
+const REPRODUCED_CONFIDENCE = 90   // a reproduced finding claims at least this
 const NEAR_LINES = 5          // two reports this close in one file can be the same bug
 // Allowed status moves. A new head sends every finding that was not refuted
 // back to 'candidate' (mergeFindings), outside this table.
@@ -97,7 +98,7 @@ function nextFindingId(findings) {
 // verified again, unless it was refuted. Known findings at another head that
 // nothing re-found are marked stale. Returns { findings, added, merged }.
 function mergeFindings(known, candidates, head) {
-  const findings = known.map(f => ({ ...f, sources: [...(f.sources || [])] }))
+  const findings = known.map(f => ({ ...f, sources: [...(f.sources || [])], history: [...(f.history || [])] }))
   const added = []
   const merged = []
   const seenThisRun = new Set()
@@ -153,7 +154,7 @@ function transition(f, field, to, why) {
 // ---- end shared ----
 
 export {
-  SEVERITIES, BLOCKING, LENSES, CONFIDENCE_FLOOR, UNREPRODUCED_CAP, MOVES,
+  SEVERITIES, BLOCKING, LENSES, CONFIDENCE_FLOOR, UNREPRODUCED_CAP, REPRODUCED_CONFIDENCE, MOVES,
   candidateProblems, sameFinding, mergeFindings, transition,
 }
 
@@ -234,6 +235,41 @@ export function saveRun(ledger, intake, result, at) {
   }
   next.runs = [...(ledger.runs || []), run].slice(-MAX_RUNS)
   return next
+}
+
+// ---------- evidence ----------
+
+// What a reproduction verdict from evidence.mjs means for a finding. ERROR
+// means the evidence is gone, so the finding falls back to confirmed (static
+// evidence only).
+const FROM_EVIDENCE = { REPRODUCED: 'reproduced', PREEXISTING: 'preexisting', NOT_REPRODUCED: 'not_reproduced', ERROR: 'confirmed' }
+const REPRO_STATUSES = ['confirmed', 'reproduced', 'preexisting', 'not_reproduced']
+
+// The ledger corrected to what the runs show. `evidence` is {F<n>: {verdict,
+// reason, runs}} from evidence.mjs. Execution outranks every agent here: a
+// status that disagrees with the runs is moved to match them (outside the
+// MOVES table, and recorded in history), test_results are replaced by the runs,
+// and confidence follows (at least 90 when reproduced, at most 79 otherwise).
+// Findings the skeptic or referee settled (refuted, contested) are never
+// touched. Returns {ledger, corrected: [{finding_id, from, to}]}.
+export function reconcile(ledger, evidence) {
+  const corrected = []
+  const findings = ledger.findings.map(f => {
+    const e = evidence[f.finding_id]
+    if (!e || !REPRO_STATUSES.includes(f.verification_status)) return f
+    const g = { ...f, history: [...f.history] }
+    g.test_results = (e.runs || []).map(r => ({ kind: r.kind || 'repro', arm: r.arm, sha: r.sha, exit: r.exit, timedOut: !!r.timedOut, marker: !!r.marker, error: r.error || null }))
+    g.reproduction_artifact = { ...(f.reproduction_artifact || {}), verdict: e.verdict, reason: e.reason }
+    const to = FROM_EVIDENCE[e.verdict]
+    if (to && to !== f.verification_status) {
+      g.history.push({ field: 'verification_status', from: f.verification_status, to, why: `evidence recheck: ${e.reason}` })
+      g.verification_status = to
+      corrected.push({ finding_id: f.finding_id, from: f.verification_status, to })
+    }
+    g.confidence = g.verification_status === 'reproduced' ? Math.max(g.confidence, REPRODUCED_CONFIDENCE) : Math.min(g.confidence, UNREPRODUCED_CAP)
+    return g
+  })
+  return { ledger: { ...ledger, findings }, corrected }
 }
 
 // ---------- grounding ----------
@@ -340,6 +376,10 @@ export function renderReport(ledger, evidence = {}) {
     L.push('', `### ${f.finding_id} [${f.severity}] ${f.title}`, '')
     L.push(`- **Where:** \`${f.file_path}:${f.line_range[0]}${f.line_range[1] !== f.line_range[0] ? `-${f.line_range[1]}` : ''}\` (${f.bug_category}; found by ${f.sources.join(', ')}; confidence ${f.confidence})`)
     L.push(`- **Status:** ${f.verification_status}; fix ${f.fix_status}`)
+    const ra = f.reproduction_artifact
+    if (ra && ra.verdict) L.push(`- **Reproduction:** ${ra.verdict}: ${ra.reason}${ra.test_file ? ` (\`${ra.test_file}\`)` : ''}`)
+    else if (ra && ra.written === false) L.push(`- **Reproduction:** no test written: ${ra.reason}. Static evidence only.`)
+    else if (['confirmed', 'contested', 'candidate'].includes(f.verification_status)) L.push('- **Reproduction:** not attempted. Static evidence only.')
     L.push(`- **Trigger:** ${f.failure_scenario.trigger}`)
     L.push(`- **Path:** ${f.failure_scenario.path}`)
     L.push(`- **Observable:** ${f.failure_scenario.observable}`)

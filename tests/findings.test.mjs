@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { test, REPO } from '../scripts/workflow-harness.mjs'
 import {
   candidateProblems, mergeFindings, transition, sameFinding, disposition, metrics, renderReport, ledgerProblems,
-  emptyLedger, readLedger, writeLedger, saveRun, missingEvidence, readEvidence, UNREPRODUCED_CAP,
+  emptyLedger, readLedger, writeLedger, saveRun, missingEvidence, readEvidence, reconcile, UNREPRODUCED_CAP,
 } from '../core/skills/findings/findings.mjs'
 
 const SCRIPT = join(REPO, 'core', 'skills', 'findings', 'findings.mjs')
@@ -185,6 +185,33 @@ await test('confirmed and unverified findings are in separate sections; test run
   assert.doesNotMatch(md, /CLAIMED/, 'a test result the run claimed never reaches the report')
   assert.match(md, /Disposition: \*\*changes requested\*\* \(F1\)/)
   assert.match(md, /Commits: aaaaaaa\.\.bbbbbbb/)
+})
+
+console.log('== findings: reconcile')
+await test('reconcile moves a status to what the runs show, fills test_results from the runs, and sets confidence', () => {
+  const run = (arm, exit, marker) => ({ kind: 'repro', arm, sha: H1, exit, timedOut: false, marker, error: null, tail: 'long output' })
+  const l = ledgerWith([
+    F('not_reproduced', 'HIGH', { confidence: 60, test_results: [{ exit: 0, verdict: 'CLAIMED BY AN AGENT' }] }),
+    F('reproduced', 'HIGH', { finding_id: 'F2', confidence: 95 }),
+    F('refuted', 'HIGH', { finding_id: 'F3' }),
+    F('confirmed', 'HIGH', { finding_id: 'F4', confidence: 70 }),
+  ])
+  const { ledger, corrected } = reconcile(l, {
+    F1: { verdict: 'REPRODUCED', reason: 'r1', runs: [run('head', 1, true), run('merge-base', 0, false)] },
+    F2: { verdict: 'ERROR', reason: 'timed out', runs: [] },
+    F3: { verdict: 'REPRODUCED', reason: 'r3', runs: [] },
+    F4: { verdict: 'REPRODUCED', reason: 'r4', runs: [run('head', 1, true)] },
+  })
+  const [a, b, c, d] = ledger.findings
+  assert.deepEqual(corrected, [{ finding_id: 'F1', from: 'not_reproduced', to: 'reproduced' }, { finding_id: 'F2', from: 'reproduced', to: 'confirmed' }, { finding_id: 'F4', from: 'confirmed', to: 'reproduced' }])
+  assert.equal(a.confidence, 90)
+  assert.deepEqual(a.test_results, [{ kind: 'repro', arm: 'head', sha: H1, exit: 1, timedOut: false, marker: true, error: null }, { kind: 'repro', arm: 'merge-base', sha: H1, exit: 0, timedOut: false, marker: false, error: null }])
+  assert.equal(b.verification_status, 'confirmed', 'evidence that is gone takes the claim back to static evidence')
+  assert.equal(b.confidence, 79)
+  assert.equal(c.verification_status, 'refuted', 'what the skeptic or referee settled is never touched')
+  assert.equal(d.reproduction_artifact.verdict, 'REPRODUCED')
+  assert.equal(a.history.at(-1).why, 'evidence recheck: r1')
+  assert.equal(l.findings[0].verification_status, 'not_reproduced', 'the input ledger is not mutated')
 })
 
 console.log('== findings: grounding')

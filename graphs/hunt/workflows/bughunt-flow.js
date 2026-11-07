@@ -1,10 +1,13 @@
 export const meta = {
   name: 'bughunt-flow',
-  description: 'PR bug discovery graph: impact map, specialist hunters chosen by the change, findings merged under stable ids',
-  whenToUse: 'Run by /bughunt after intake.mjs, from a run script that carries {intake, prior} (workflow-state run-script.mjs, seam INJECTED_INPUT). args: {repo, tree, configDir (all absolute), mode: "discover", maxHunters?, maxFindings?}',
+  description: 'PR bug discovery graph: impact map, specialist hunters chosen by the change, a blind skeptic per finding, a referee for the contested ones, and a reproduction test run by evidence.mjs',
+  whenToUse: 'Run by /bughunt after intake.mjs, from a run script that carries {intake, prior} (workflow-state run-script.mjs, seam INJECTED_INPUT). args: {repo, tree, configDir, stateDir (all absolute), mode: "discover", maxHunters?, maxFindings?, maxRepros?, evidenceTimeoutMs?}',
   phases: [
     { title: 'Impact', detail: 'impact-mapper maps callers, contracts, tests, protections, and which lenses apply', model: 'sonnet' },
     { title: 'Hunt', detail: 'one hunter per routed lens, in parallel; findings merged and deduplicated in code', model: 'sonnet' },
+    { title: 'Verify', detail: 'one skeptic per candidate, in parallel, seeing only the structured claim', model: 'sonnet' },
+    { title: 'Referee', detail: 'the advisor settles what the skeptic could not, and any blocking finding it refuted', model: 'fable' },
+    { title: 'Reproduce', detail: 'a reproducer writes a failing test; a runner runs evidence.mjs and the gate reads its last line', model: 'sonnet' },
   ],
 }
 
@@ -17,14 +20,31 @@ export const meta = {
 //   impact returns nothing --> route on the intake signals alone, and say so
 //   a hunter returns nothing --> its lens is recorded not_covered (the report asks for review)
 //
-// Every finding leaves as a 'candidate': nothing here verifies or reproduces it.
-// This script has no filesystem access; /bughunt persists the returned ledger.
+//   --> skeptic x candidate (parallel; the claim only, never the hunter's reasoning)
+//         confirmed with a path, not denied as introduced  --> confirmed
+//         refuted above 67 and below HIGH                  --> refuted
+//         names another live finding as the same bug       --> refuted as its duplicate
+//         anything else, a blocking refute, or no answer   --> contested
+//   --> referee (the advisor, one batched call) for every contested finding:
+//         real=false --> refuted; real or no verdict --> confirmed (pre-existing when it says so)
+//   --> reproduce x confirmed (pipeline, capped at maxRepros): reproducer writes a test,
+//       runner runs evidence.mjs, the gate reads the script's own last line:
+//         REPRODUCED --> reproduced; PREEXISTING --> preexisting; NOT_REPRODUCED --> not_reproduced;
+//         ERROR, no test, or no EVIDENCE line --> stays confirmed, static evidence only
+//
+// /bughunt re-runs every reproduction itself (evidence.mjs recheck) before the
+// report, so the runner's transcription is never the final word. This script
+// has no filesystem access; /bughunt persists the returned ledger.
 
 // One place for every node's agent, model, and effort. The agent files carry
 // the same models and efforts for standalone use; the tests fail if they drift.
 const NODES = {
-  impact: { agentType: 'impact-mapper', model: 'sonnet', effort: 'high', phase: 'Impact' },
-  hunt:   { agentType: 'hunter',        model: 'sonnet', effort: 'high', phase: 'Hunt' },
+  impact:    { agentType: 'impact-mapper', model: 'sonnet', effort: 'high', phase: 'Impact' },
+  hunt:      { agentType: 'hunter',        model: 'sonnet', effort: 'high', phase: 'Hunt' },
+  skeptic:   { agentType: 'skeptic',       model: 'sonnet', effort: 'high', phase: 'Verify' },
+  referee:   { agentType: 'advisor',       model: 'fable',  effort: 'high', phase: 'Referee' },
+  reproduce: { agentType: 'reproducer',    model: 'sonnet', effort: 'high', phase: 'Reproduce' },
+  run:       { agentType: 'runner',        model: 'haiku',  effort: 'high', phase: 'Reproduce' },
 }
 // The token in each lens reference (core/skills/bug-lenses/lenses/<lens>.md). A
 // hunter that returns another token never read its lens; the tests fail if
@@ -37,6 +57,11 @@ const LENS_TOKENS = {
 const LENS_ORDER = ['logic', 'regression', 'security', 'contract', 'errors', 'concurrency']
 const DEFAULT_MAX_HUNTERS = 6
 const DEFAULT_MAX_FINDINGS = 25
+const DEFAULT_MAX_REPROS = 8
+// The skeptic refutes on its own only above this, and never a blocking finding:
+// missing a real bug costs about twice a false alarm.
+const REFUTE_BAR = 67
+const EVIDENCE_VERDICTS = ['REPRODUCED', 'PREEXISTING', 'NOT_REPRODUCED', 'ERROR']
 
 // ---- shared: copied verbatim into graphs/hunt/workflows/bughunt-flow.js (workflow scripts cannot import) ----
 const SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
@@ -44,6 +69,7 @@ const BLOCKING = ['CRITICAL', 'HIGH']
 const LENSES = ['logic', 'contract', 'concurrency', 'security', 'errors', 'regression']
 const CONFIDENCE_FLOOR = 60   // a candidate below this is dropped before anyone spends a call on it
 const UNREPRODUCED_CAP = 79   // no finding claims more until a test reproduces it
+const REPRODUCED_CONFIDENCE = 90   // a reproduced finding claims at least this
 const NEAR_LINES = 5          // two reports this close in one file can be the same bug
 // Allowed status moves. A new head sends every finding that was not refuted
 // back to 'candidate' (mergeFindings), outside this table.
@@ -122,7 +148,7 @@ function nextFindingId(findings) {
 // verified again, unless it was refuted. Known findings at another head that
 // nothing re-found are marked stale. Returns { findings, added, merged }.
 function mergeFindings(known, candidates, head) {
-  const findings = known.map(f => ({ ...f, sources: [...(f.sources || [])] }))
+  const findings = known.map(f => ({ ...f, sources: [...(f.sources || [])], history: [...(f.history || [])] }))
   const added = []
   const merged = []
   const seenThisRun = new Set()
@@ -204,6 +230,20 @@ const CANDIDATE_SCHEMA = obj({
   actual_behavior: STR,
   evidence: { type: 'array', items: obj({ file: STR, line: { type: 'integer' }, quote: STR }) },
 })
+const SKEPTIC_SCHEMA = obj({
+  verdict: { type: 'string', enum: ['confirmed', 'refuted', 'uncertain'] },
+  refute_confidence: { type: 'integer', minimum: 0, maximum: 100 },
+  reason: STR,
+  execution_path: STR,
+  introduced_by_change: { type: 'string', enum: ['yes', 'no', 'unsure'] },
+  severity: { type: 'string', enum: SEVERITIES },
+  duplicate_of: STR,
+})
+const REFEREE_SCHEMA = obj({
+  verdicts: { type: 'array', items: obj({ finding_id: STR, real: BOOL, introduced_by_change: BOOL, severity: { type: 'string', enum: SEVERITIES }, reason: STR }) },
+})
+const REPRO_SCHEMA = obj({ written: BOOL, test_file: STR, how_it_fails: STR, reason: STR })
+const RUN_SCHEMA = obj({ output: STR, exit_code: { type: 'integer' } })
 const HUNT_SCHEMA = obj({
   lens_token: STR,
   coverage: { type: 'array', items: obj({ area: STR, status: { type: 'string', enum: ['finding', 'clean', 'not_relevant', 'not_covered'] }, note: STR }) },
@@ -222,6 +262,7 @@ const abs = v => (typeof v === 'string' && v.startsWith('/') ? v : null)
 const REPO = abs(A.repo)
 const TREE = abs(A.tree)
 const CONFIG = abs(A.configDir)
+const STATE = abs(A.stateDir)
 const MODE = typeof A.mode === 'string' ? A.mode : 'discover'
 const IN = A.intake && typeof A.intake === 'object' && !Array.isArray(A.intake) ? A.intake : null
 const T = IN && IN.target && typeof IN.target === 'object' ? IN.target : null
@@ -229,6 +270,8 @@ const PRIOR = Array.isArray(A.prior) ? A.prior : []
 const posInt = (v, d) => (Number.isInteger(v) && v > 0 ? v : d)
 const MAX_HUNTERS = Math.min(posInt(A.maxHunters, DEFAULT_MAX_HUNTERS), LENS_ORDER.length)
 const MAX_FINDINGS = posInt(A.maxFindings, DEFAULT_MAX_FINDINGS)
+const MAX_REPROS = posInt(A.maxRepros, DEFAULT_MAX_REPROS)
+const EVIDENCE_TIMEOUT = Number.isInteger(A.evidenceTimeoutMs) && A.evidenceTimeoutMs > 0 ? A.evidenceTimeoutMs : null
 
 // ---------- ledger ----------
 const ledger = {
@@ -329,8 +372,72 @@ ${fenced('untrusted-pr-description', IN.untrusted && IN.untrusted.description)}
 Hunt through the ${lens} lens following your instructions and the bug-lenses skill. Put lens_token, coverage, and every finding in the structured output. An empty findings list is a valid answer.`
 }
 
+// The claim as the hunter froze it, without its reasoning (description), so
+// the skeptic forms its own view.
+function claimOf(f) {
+  return {
+    finding_id: f.finding_id, file_path: f.file_path, line_range: f.line_range, bug_category: f.bug_category, severity: f.severity,
+    title: f.title, failure_scenario: f.failure_scenario, expected_behavior: f.expected_behavior, actual_behavior: f.actual_behavior, evidence: f.evidence,
+  }
+}
+
+function skepticPrompt(f) {
+  const others = ledger.findings.filter(g => g !== f && !g.stale && g.verification_status !== 'refuted').map(g => ({ finding_id: g.finding_id, file_path: g.file_path, line_range: g.line_range, title: g.title }))
+  return `${scope()}
+
+A hunter claims this bug. Its reasoning is withheld on purpose; read the code and decide for yourself.
+${fenced('claim', json(claimOf(f)))}
+
+Other findings in this run, for the duplicate check (duplicate_of is one of these ids, or empty):
+${fenced('other-findings', json(others))}
+
+Try to disprove the claim following your instructions, and fill the structured output.`
+}
+
+function refereePrompt(contested) {
+  const cases = contested.map(({ f, v }) => ({
+    claim: claimOf(f),
+    hunter_reasoning: f.description,
+    skeptic: v ? { verdict: v.verdict, refute_confidence: v.refute_confidence, reason: v.reason, execution_path: v.execution_path, introduced_by_change: v.introduced_by_change, severity: v.severity } : 'the skeptic returned nothing',
+  }))
+  return `${scope()}
+
+The skeptic could not settle these findings, or refuted a blocking one. Referee each, following your "Refereeing a finding" instructions.
+${fenced('contested-findings', json(cases))}
+
+Return one verdict per finding_id: ${contested.map(c => c.f.finding_id).join(', ')}.`
+}
+
+function evidenceCommand(id) {
+  return `node ${CONFIG}/skills/bughunt/evidence.mjs repro ${STATE} ${id}${EVIDENCE_TIMEOUT ? ` --timeout-ms ${EVIDENCE_TIMEOUT}` : ''}`
+}
+
+function reproPrompt(f) {
+  const id = f.finding_id
+  const why = [...f.history].reverse().find(h => h.to === 'confirmed')
+  return `${scope()}
+
+Reproduce this confirmed finding with a new failing test, following your instructions.
+${fenced('claim', json(claimOf(f)))}
+How it was confirmed: ${why ? why.why : 'n/a'}
+
+Your reproduction directory (write only here): ${STATE}/repro/${id}/
+  - ${STATE}/repro/${id}/repro.json   {"test_file": "<repo-relative path of the new test>"}
+  - ${STATE}/repro/${id}/files/<test_file>   the test
+The failure message of the assertion that catches the bug must contain: ${markerOf(id)}
+Check your test with exactly this command, at most 3 times: ${evidenceCommand(id)}
+
+Fill the structured output: written (false when it cannot be reproduced in an automated test, with the reason), test_file, how_it_fails (one line), reason.`
+}
+
+function runPrompt(f) {
+  return `Run exactly this command, once, and copy its full output verbatim into output:
+${evidenceCommand(f.finding_id)}`
+}
+const markerOf = id => `BUGHUNT-${id}`
+
 // ---------- graph ----------
-if (!REPO || !TREE || !CONFIG) return finish('escalate', 'args.repo, args.tree, and args.configDir are required absolute paths')
+if (!REPO || !TREE || !CONFIG || !STATE) return finish('escalate', 'args.repo, args.tree, args.configDir, and args.stateDir are required absolute paths')
 if (!T || typeof T.head !== 'string' || typeof T.mergeBase !== 'string' || !Array.isArray(IN.files)) {
   return finish('escalate', 'args.intake must be the intake.json that intake.mjs wrote')
 }
@@ -415,4 +522,101 @@ ledger.findings = findings
 ledger.added = added
 ledger.merged = merged.merged.filter(m => findings.some(f => f.finding_id === m.finding_id))
 if (ledger.dropped.length) log(`dropped ${ledger.dropped.length} candidate(s) that did not clear the bar`)
-return finish('done', `${added.length} new candidate finding(s), ${ledger.merged.length} report(s) of known ones, across ${lenses.length} lens(es); none verified yet`)
+
+// ----- verify -----
+const byId = id => ledger.findings.find(f => f.finding_id === id)
+const toVerify = ledger.findings.filter(f => !f.stale && f.verification_status === 'candidate')
+const contested = []
+if (toVerify.length) {
+  phase('Verify')
+  const verdicts = await parallel(toVerify.map(f => () => runNode('skeptic', `skeptic: ${f.finding_id}`, skepticPrompt(f), SKEPTIC_SCHEMA)))
+  toVerify.forEach((f, i) => {
+    const v = verdicts[i]
+    if (!v) {
+      transition(f, 'verification_status', 'contested', 'the skeptic returned nothing')
+      contested.push({ f, v: null })
+      return
+    }
+    ledger.history.push({ node: 'skeptic', finding: f.finding_id, verdict: v.verdict, refute_confidence: v.refute_confidence })
+    const dup = v.duplicate_of && v.duplicate_of !== f.finding_id ? byId(v.duplicate_of) : null
+    if (dup && !dup.stale && dup.verification_status !== 'refuted') {
+      for (const s of f.sources) if (!dup.sources.includes(s)) dup.sources.push(s)
+      dup.duplicates += 1
+      transition(f, 'verification_status', 'refuted', `duplicate of ${dup.finding_id}: ${v.reason}`)
+      return
+    }
+    if (v.verdict === 'confirmed' && v.introduced_by_change !== 'no') {
+      transition(f, 'verification_status', 'confirmed', `skeptic: ${v.execution_path || v.reason}`)
+      return
+    }
+    if (v.verdict === 'refuted' && v.refute_confidence > REFUTE_BAR && !BLOCKING.includes(f.severity)) {
+      transition(f, 'verification_status', 'refuted', `skeptic (${v.refute_confidence}): ${v.reason}`)
+      return
+    }
+    transition(f, 'verification_status', 'contested', `skeptic ${v.verdict}${v.verdict === 'refuted' ? ` (${v.refute_confidence})` : ''}: ${v.reason}`)
+    contested.push({ f, v })
+  })
+}
+
+// ----- referee -----
+if (contested.length) {
+  phase('Referee')
+  const ref = await runNode('referee', `referee: ${contested.length} finding(s)`, refereePrompt(contested), REFEREE_SCHEMA)
+  if (!ref) {
+    log(`${nodeFailure('referee')}; ${contested.length} finding(s) stay contested`)
+  } else {
+    ledger.history.push({ node: 'referee', findings: contested.length, verdicts: ref.verdicts.length })
+    const verdictFor = new Map(ref.verdicts.map(v => [v.finding_id, v]))
+    for (const { f } of contested) {
+      const v = verdictFor.get(f.finding_id)
+      if (v && v.real === false) { transition(f, 'verification_status', 'refuted', `referee: ${v.reason}`); continue }
+      // No verdict for a finding counts as real: a reproduction test settles it next.
+      transition(f, 'verification_status', 'confirmed', v ? `referee: ${v.reason}` : 'the referee gave no verdict for it; a missed bug costs more than a test')
+      if (v && v.severity !== f.severity) { f.history.push({ field: 'severity', from: f.severity, to: v.severity, why: 'referee' }); f.severity = v.severity }
+      if (v && v.introduced_by_change === false) transition(f, 'verification_status', 'preexisting', 'referee: the same defect is at the merge-base')
+    }
+  }
+}
+
+// ----- reproduce -----
+const confirmed = ledger.findings
+  .filter(f => !f.stale && f.verification_status === 'confirmed')
+  .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || b.confidence - a.confidence)
+const toRepro = confirmed.slice(0, MAX_REPROS)
+if (confirmed.length > toRepro.length) log(`reproducing the ${MAX_REPROS} most severe of ${confirmed.length} confirmed finding(s); the rest keep static evidence only`)
+if (toRepro.length) {
+  phase('Reproduce')
+  const outcomes = await pipeline(
+    toRepro,
+    f => runNode('reproduce', `reproduce: ${f.finding_id}`, reproPrompt(f), REPRO_SCHEMA),
+    (r, f) => (r && r.written ? runNode('run', `run: ${f.finding_id}`, runPrompt(f), RUN_SCHEMA).then(out => ({ r, out })) : { r, out: null }),
+  )
+  toRepro.forEach((f, i) => {
+    const o = outcomes[i]
+    const id = f.finding_id
+    if (!o || !o.r) { f.reproduction_artifact = { written: false, reason: 'the reproducer returned nothing' }; return }
+    if (!o.r.written) { f.reproduction_artifact = { written: false, reason: o.r.reason || 'no reason given' }; return }
+    const art = { written: true, test_file: o.r.test_file, path: `${STATE}/repro/${id}/files/${o.r.test_file}`, how_it_fails: o.r.how_it_fails, verdict: null, reason: '' }
+    f.reproduction_artifact = art
+    if (!o.out) { art.reason = 'the runner returned nothing'; return }
+    const lines = String(o.out.output).split('\n').map(l => l.trim()).filter(Boolean)
+    const last = lines.length ? lines[lines.length - 1] : ''
+    const m = last.match(/^EVIDENCE: ([A-Z_]+) (F[0-9]+)$/)
+    if (!m || m[2] !== id || !EVIDENCE_VERDICTS.includes(m[1])) { art.reason = 'the runner output did not end with an EVIDENCE line for this finding'; return }
+    art.verdict = m[1]
+    const said = lines.find(l => l.startsWith(`EVIDENCE ${id}: `))
+    art.reason = said ? said.slice(`EVIDENCE ${id}: `.length) : ''
+    ledger.history.push({ node: 'run', finding: id, verdict: m[1] })
+    if (m[1] === 'REPRODUCED') {
+      transition(f, 'verification_status', 'reproduced', `evidence.mjs: ${art.reason}`)
+      f.confidence = Math.max(f.confidence, REPRODUCED_CONFIDENCE)
+    } else if (m[1] === 'PREEXISTING') {
+      transition(f, 'verification_status', 'preexisting', `evidence.mjs: ${art.reason}`)
+    } else if (m[1] === 'NOT_REPRODUCED') {
+      transition(f, 'verification_status', 'not_reproduced', `evidence.mjs: ${art.reason}`)
+    }
+  })
+}
+
+const count = st => ledger.findings.filter(f => !f.stale && f.verification_status === st).length
+return finish('done', `${added.length} new finding(s) across ${lenses.length} lens(es): ${count('reproduced')} reproduced, ${count('confirmed')} confirmed without a reproduction, ${count('contested')} contested, ${count('not_reproduced')} not reproduced, ${count('preexisting')} pre-existing, ${count('refuted')} refuted`)

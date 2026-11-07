@@ -1036,3 +1036,68 @@ it; 21 of 21 are caught.
 - 7 new validate.sh rules.
 - 3 new skills, 2 new agents, and 1 workflow.
 - Discover mode is tested with mocked agents only; its first live run is part of PR5.
+
+## 26. /bughunt, part 2: adversarial verification and real reproductions (2026-11-06)
+
+**What changed.**
+- **The skeptic.** `bughunt-flow` now sends every candidate to a blind skeptic (Sonnet). The skeptic
+  sees the frozen claim and its quotes, never the hunter's reasoning, and tries to disprove it:
+  - an unreachable path;
+  - a guard upstream;
+  - a misread callee;
+  - the same behavior already at the merge-base;
+  - a duplicate of another finding.
+- **Routing in code:**
+  - **confirmed** needs an execution path;
+  - **refuted** needs a refute above 67 on a finding below HIGH, or a named duplicate;
+  - **contested** is everything else, including a confident refute of a HIGH finding (one Sonnet
+    never drops a blocking bug) and a skeptic that returned nothing.
+- **The referee.** The advisor (Fable) referees every contested finding in one batched call, with
+  both sides' reasoning. A missing verdict counts as real, because the test settles it next. Fable
+  runs only when something is contested (the cost lever from entry 24).
+- **Reproduction.** A reproducer (Sonnet) writes a new failing test whose assertion carries
+  `BUGHUNT-F<n>`. A runner (Haiku) runs `evidence.mjs repro`, and the graph gates on that script's
+  own last line. The runner's command is fixed in code; the reproducer declares only a test path,
+  never a command.
+- **`evidence.mjs`** is the only code in the graph that executes the change:
+  - **Arms:** it runs the test at the head and at the merge-base.
+  - **Exports:** each arm runs in a fresh `git archive` export, so the repo is never touched.
+  - **Environment:** credentials are stripped, Claude's sign-in included.
+  - **Network:** blocked by `unshare -rn`.
+  - **Time:** limited under GNU `timeout -s KILL`.
+  - **Verdict:** decided from exit codes and the marker. **REPRODUCED** (the head fails with the
+    marker; the merge-base passes, or fails without it because the code is new), **PREEXISTING**,
+    **NOT_REPRODUCED**, or **ERROR**.
+- **The session reruns everything.** The `/bughunt` session reruns every reproduction itself
+  (`evidence.mjs recheck`), and `findings.mjs reconcile` corrects the ledger to the runs, so a
+  runner's transcription is never the final word. `test_results` come only from those runs.
+
+**Measured, not assumed.**
+- `unshare -rn` blocks the network on this WSL2 box (`EAI_AGAIN`), and the tests check it.
+- Killing only the test runner at a timeout left `node --test`'s child spinning forever. I found the
+  orphan with `ps` after the first green run. GNU `timeout -s KILL` signals the whole process group:
+  2 s, no orphans. A test now asserts that no test process outlives the timeout.
+
+**Bugs caught before review.**
+- The orphaned test process above.
+- `mergeFindings` copied each finding but shared its `history` array with the input, so a status
+  move in the workflow also wrote into the caller's objects.
+
+**Mutation run.** 26 mutations across the workflow's routing, `evidence.mjs`'s verdicts, guards, and
+sandbox, and `reconcile`; 24 were caught at first. The two survivors were real test gaps:
+- Every token in the sandbox test was also caught by a prefix rule, so dropping `TOKEN` from the
+  pattern went unseen. `SLACK_BOT_TOKEN` closes it.
+- The reconcile test's findings had no claimed test results to overwrite.
+
+26 of 26 are caught now.
+
+**Stats.**
+- 34 new tests:
+  - 17 evidence tests that run real `node --test` processes in throwaway repos (every verdict, a
+    timeout, bad paths, a symlinked test, a modified tree, secrets, the network, no orphans, the
+    repo untouched, recheck);
+  - 16 routing tests;
+  - 1 reconcile test.
+- The suite is 494 workflow tests, 0 failed.
+- 3 new agents, 6 new validate.sh rules, and an advisor section.
+- The workflow test harness gained a real `pipeline()`.
