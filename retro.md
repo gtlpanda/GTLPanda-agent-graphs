@@ -1036,3 +1036,119 @@ it; 21 of 21 are caught.
 - 7 new validate.sh rules.
 - 3 new skills, 2 new agents, and 1 workflow.
 - Discover mode is tested with mocked agents only; its first live run is part of PR5.
+
+## 26. /bughunt, part 2: adversarial verification and real reproductions (2026-11-06)
+
+**What changed.**
+- **The skeptic.** `bughunt-flow` now sends every candidate to a blind skeptic (Sonnet). The skeptic
+  sees the frozen claim and its quotes, never the hunter's reasoning, and tries to disprove it:
+  - an unreachable path;
+  - a guard upstream;
+  - a misread callee;
+  - the same behavior already at the merge-base;
+  - a duplicate of another finding.
+- **Routing in code:**
+  - **confirmed** needs an execution path;
+  - **refuted** needs a refute above 67 on a finding below HIGH, or a named duplicate;
+  - **contested** is everything else, including a confident refute of a HIGH finding (one Sonnet
+    never drops a blocking bug) and a skeptic that returned nothing.
+- **The referee.** The advisor (Fable) referees every contested finding in one batched call, with
+  both sides' reasoning. A missing verdict counts as real, because the test settles it next. Fable
+  runs only when something is contested (the cost lever from entry 24).
+- **Reproduction.** A reproducer (Sonnet) writes a new failing test whose assertion carries
+  `BUGHUNT-F<n>`. A runner (Haiku) runs `evidence.mjs repro`, and the graph gates on that script's
+  own last line. The runner's command is fixed in code; the reproducer declares only a test path,
+  never a command.
+- **`evidence.mjs`** is the only code in the graph that executes the change:
+  - **Arms:** it runs the test at the head and at the merge-base.
+  - **Exports:** each arm runs in a fresh `git archive` export, so the repo is never touched.
+  - **Environment:** credentials are stripped, Claude's sign-in included.
+  - **Network:** blocked by `unshare -rn`.
+  - **Time:** limited under GNU `timeout -s KILL`.
+  - **Verdict:** decided from exit codes and the marker. **REPRODUCED** (the head fails with the
+    marker; the merge-base passes, or fails without it because the code is new), **PREEXISTING**,
+    **NOT_REPRODUCED**, or **ERROR**.
+- **The session reruns everything.** The `/bughunt` session reruns every reproduction itself
+  (`evidence.mjs recheck`), and `findings.mjs reconcile` corrects the ledger to the runs, so a
+  runner's transcription is never the final word. `test_results` come only from those runs.
+
+**Measured, not assumed.**
+- `unshare -rn` blocks the network on this WSL2 box (`EAI_AGAIN`), and the tests check it.
+- Killing only the test runner at a timeout left `node --test`'s child spinning forever. I found the
+  orphan with `ps` after the first green run. GNU `timeout -s KILL` signals the whole process group:
+  2 s, no orphans. A test now asserts that no test process outlives the timeout.
+
+**Bugs caught before review.**
+- The orphaned test process above.
+- `mergeFindings` copied each finding but shared its `history` array with the input, so a status
+  move in the workflow also wrote into the caller's objects.
+
+**PR review (#28).** Two independent reviewers: a line-level reviewer and a behavioral QA auditor,
+both reproducing in throwaway repos. They found 5 HIGH, 7 MEDIUM, and 4 LOW, which overlap to 16
+distinct issues. All are fixed and tested:
+- **Recheck:** a claimed `reproduced` with no `repro.json` was never re-run, so a fabricated runner
+  line survived. Now a claimed run with no written reproduction falls back to confirmed.
+- **Crashes:** one throw in a run (a PR file where the test's directory should be) aborted the whole
+  recheck before anything was written. Each run is now caught, and recheck writes the ledger after
+  each finding.
+- **Failures counted against the finding:** a missing runner (no pytest, no go) or a test failing
+  without its marker became `NOT_REPRODUCED`, which demoted real bugs. Now only a test that passes at
+  the head is `NOT_REPRODUCED`; the rest is ERROR, which keeps static evidence. Missing tools are
+  probed, and exit 126 or 127 means the runner never started.
+- **Network:** loopback was down inside `unshare -rn`, so any local-server test failed. It is now
+  brought up inside a fresh PID namespace (measured: 200 inside, `ENETUNREACH` without).
+- **Processes:** a detached grandchild survived every run. The namespace now kills it on exit
+  (measured: 0 left versus 1 without), and output goes to a file, not a pipe.
+- **Symlinks:** a symlink the PR commits in the test's path made `evidence.mjs` itself write outside
+  the state dir. Every part of the path is now checked in the export.
+- **Flags:** a test path starting with `-` reached the runner as a flag (`--import=...`).
+- **Quoting:** paths with spaces broke every evidence command an agent was told to run. They are now
+  single-quoted, and a shell test proves the split.
+- **Stale state:** reproductions, test results, and fixes from an old head carried over to a
+  re-found finding, and the report showed old-head runs. A new head now clears them, and the report
+  shows only runs from this head and this finding's own test.
+- **Environment:** the deny-list missed `DATABASE_URL`, `SENTRY_DSN`, `STRIPE_KEY`, `KUBECONFIG`, and
+  others. It is now an allowlist.
+- **Duplicates:** a duplicate verdict could refute a HIGH finding into a twin that was later refuted,
+  or keep the lower severity. It now folds only into a confirmed twin, which keeps the higher rating.
+- **The referee:** its "not introduced" view skipped the reproduction. Only the test decides now.
+- **Re-runs:** a finding left contested by a failed referee was never refereed again.
+- **Unfenced text:** the confirmation notes reached the reproducer unfenced.
+- **Monorepos:** the runner read only the root `package.json`. It now uses the test's nearest
+  package.
+- **Report wording:** it said "not attempted" for an attempted reproduction.
+
+A third mutation run over the fixes: 17 of 17 caught, after one more test that forces a throw inside
+a run.
+
+A focused re-review of the fix commit confirmed seven of its eight fixes and found one new HIGH,
+which it reproduced. The pytest probe added for the missing-tool fix ran
+`python3 -c 'import pytest'` inside the export, with the full environment and no sandbox. A PR that
+committed its own `pytest.py` therefore had that file executed with the real credentials, outside
+every isolation the run itself had. Probes now run from an empty temp directory, in Python's
+isolated mode (`-I`), with the sandbox environment and a 20-second limit. A test commits a trap
+`pytest.py` and checks the secret never reaches it; with the old probe back, that test fails.
+
+My own mistake while running it: a cleanup step's `pkill -f <name>` matched the shell that carried
+that name in its command line and killed it. That orphaned one mutation run, which then raced a
+second one and left three mutations in `evidence.mjs`. A site-by-site check found all three, and I
+restored them before any commit (tasks/lessons.md).
+
+**Mutation run.** 26 mutations across the workflow's routing, `evidence.mjs`'s verdicts, guards, and
+sandbox, and `reconcile`; 24 were caught at first. The two survivors were real test gaps:
+- Every token in the sandbox test was also caught by a prefix rule, so dropping `TOKEN` from the
+  pattern went unseen. `SLACK_BOT_TOKEN` closes it.
+- The reconcile test's findings had no claimed test results to overwrite.
+
+26 of 26 are caught now.
+
+**Stats.**
+- 46 new tests:
+  - 24 evidence tests that run real `node --test` processes in throwaway repos (every verdict, a
+    timeout, bad paths, symlinks, a modified tree, a forced throw, secrets, the network, loopback,
+    no orphans, the repo untouched, recheck);
+  - 19 routing tests;
+  - 3 reconcile and report tests.
+- The suite is 506 workflow tests, 0 failed.
+- 3 new agents, 6 new validate.sh rules, and an advisor section.
+- The workflow test harness gained a real `pipeline()`.

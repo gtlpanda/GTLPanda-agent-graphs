@@ -19,6 +19,7 @@ const BLOCKING = ['CRITICAL', 'HIGH']
 const LENSES = ['logic', 'contract', 'concurrency', 'security', 'errors', 'regression']
 const CONFIDENCE_FLOOR = 60   // a candidate below this is dropped before anyone spends a call on it
 const UNREPRODUCED_CAP = 79   // no finding claims more until a test reproduces it
+const REPRODUCED_CONFIDENCE = 90   // a reproduced finding claims at least this
 const NEAR_LINES = 5          // two reports this close in one file can be the same bug
 // Allowed status moves. A new head sends every finding that was not refuted
 // back to 'candidate' (mergeFindings), outside this table.
@@ -26,7 +27,7 @@ const MOVES = {
   verification_status: {
     candidate: ['refuted', 'confirmed', 'contested'],
     contested: ['refuted', 'confirmed'],
-    confirmed: ['reproduced', 'preexisting', 'not_reproduced'],
+    confirmed: ['reproduced', 'preexisting', 'not_reproduced', 'refuted'],   // refuted: folded into its duplicate
     not_reproduced: ['reproduced', 'preexisting'],
     reproduced: [], preexisting: [], refuted: [],
   },
@@ -94,10 +95,12 @@ function nextFindingId(findings) {
 // re-run never duplicates one: on the same head it only adds its source (a
 // second hunter in this run counts as a duplicate); on a new head the finding
 // takes the new location and evidence and goes back to 'candidate' to be
-// verified again, unless it was refuted. Known findings at another head that
-// nothing re-found are marked stale. Returns { findings, added, merged }.
+// verified again, unless it was refuted. Its reproduction, test results, and
+// fix belonged to the old head, so they are cleared and its confidence drops
+// back under the cap. Known findings at another head that nothing re-found are
+// marked stale. Returns { findings, added, merged }.
 function mergeFindings(known, candidates, head) {
-  const findings = known.map(f => ({ ...f, sources: [...(f.sources || [])] }))
+  const findings = known.map(f => ({ ...f, sources: [...(f.sources || [])], history: [...(f.history || [])] }))
   const added = []
   const merged = []
   const seenThisRun = new Set()
@@ -126,6 +129,8 @@ function mergeFindings(known, candidates, head) {
       Object.assign(match, {
         line_range: [...c.line_range], evidence: c.evidence.map(e => ({ ...e })), description: c.description,
         failure_scenario: { ...c.failure_scenario }, head, stale: false,
+        reproduction_artifact: null, test_results: [], fix_status: 'none', fix_artifact: null,
+        confidence: Math.min(match.confidence, UNREPRODUCED_CAP),
       })
       if (match.verification_status !== 'refuted') {
         match.history.push({ field: 'verification_status', from: match.verification_status, to: 'candidate', why: `re-found at a new head ${head}` })
@@ -153,7 +158,7 @@ function transition(f, field, to, why) {
 // ---- end shared ----
 
 export {
-  SEVERITIES, BLOCKING, LENSES, CONFIDENCE_FLOOR, UNREPRODUCED_CAP, MOVES,
+  SEVERITIES, BLOCKING, LENSES, CONFIDENCE_FLOOR, UNREPRODUCED_CAP, REPRODUCED_CONFIDENCE, MOVES,
   candidateProblems, sameFinding, mergeFindings, transition,
 }
 
@@ -236,6 +241,41 @@ export function saveRun(ledger, intake, result, at) {
   return next
 }
 
+// ---------- evidence ----------
+
+// What a reproduction verdict from evidence.mjs means for a finding. ERROR
+// means the evidence is gone, so the finding falls back to confirmed (static
+// evidence only).
+const FROM_EVIDENCE = { REPRODUCED: 'reproduced', PREEXISTING: 'preexisting', NOT_REPRODUCED: 'not_reproduced', ERROR: 'confirmed' }
+const REPRO_STATUSES = ['confirmed', 'reproduced', 'preexisting', 'not_reproduced']
+
+// The ledger corrected to what the runs show. `evidence` is {F<n>: {verdict,
+// reason, runs}} from evidence.mjs. Execution outranks every agent here: a
+// status that disagrees with the runs is moved to match them (outside the
+// MOVES table, and recorded in history), test_results are replaced by the runs,
+// and confidence follows (at least 90 when reproduced, at most 79 otherwise).
+// Findings the skeptic or referee settled (refuted, contested) are never
+// touched. Returns {ledger, corrected: [{finding_id, from, to}]}.
+export function reconcile(ledger, evidence) {
+  const corrected = []
+  const findings = ledger.findings.map(f => {
+    const e = evidence[f.finding_id]
+    if (!e || !REPRO_STATUSES.includes(f.verification_status)) return f
+    const g = { ...f, history: [...f.history] }
+    g.test_results = (e.runs || []).map(r => ({ kind: r.kind || 'repro', arm: r.arm, sha: r.sha, exit: r.exit, timedOut: !!r.timedOut, marker: !!r.marker, error: r.error || null }))
+    g.reproduction_artifact = { ...(f.reproduction_artifact || {}), verdict: e.verdict, reason: e.reason }
+    const to = FROM_EVIDENCE[e.verdict]
+    if (to && to !== f.verification_status) {
+      g.history.push({ field: 'verification_status', from: f.verification_status, to, why: `evidence recheck: ${e.reason}` })
+      g.verification_status = to
+      corrected.push({ finding_id: f.finding_id, from: f.verification_status, to })
+    }
+    g.confidence = g.verification_status === 'reproduced' ? Math.max(g.confidence, REPRODUCED_CONFIDENCE) : Math.min(g.confidence, UNREPRODUCED_CAP)
+    return g
+  })
+  return { ledger: { ...ledger, findings }, corrected }
+}
+
 // ---------- grounding ----------
 
 // Checks each evidence quote against the file it cites, at the cited line
@@ -315,7 +355,9 @@ export function metrics(ledger, truth) {
 // Markdown for a human. Confirmed bugs, unverified findings, pre-existing ones,
 // refuted ones, and coverage each get their own section, so nothing unverified
 // reads as confirmed. Test results come only from the evidence files that
-// evidence.mjs wrote ({finding_id: [results]}), never from the run's own claims.
+// evidence.mjs wrote ({finding_id: {head, test_file, runs}}), never from the
+// run's own claims, and only from files written at this head for the test this
+// finding's reproduction declared.
 export function renderReport(ledger, evidence = {}) {
   const t = ledger.target || {}
   const short = s => (typeof s === 'string' ? s.slice(0, 7) : '?')
@@ -336,10 +378,17 @@ export function renderReport(ledger, evidence = {}) {
     for (const f of list) render(f)
   }
   const full = f => {
-    const tests = evidence[f.finding_id] || []
+    const ra = f.reproduction_artifact
+    const ev = evidence[f.finding_id]
+    const tests = ev && ra && ra.written === true && ev.head === t.head && ev.test_file === ra.test_file ? ev.runs : []
     L.push('', `### ${f.finding_id} [${f.severity}] ${f.title}`, '')
     L.push(`- **Where:** \`${f.file_path}:${f.line_range[0]}${f.line_range[1] !== f.line_range[0] ? `-${f.line_range[1]}` : ''}\` (${f.bug_category}; found by ${f.sources.join(', ')}; confidence ${f.confidence})`)
     L.push(`- **Status:** ${f.verification_status}; fix ${f.fix_status}`)
+    const staticOnly = ['confirmed', 'contested', 'candidate'].includes(f.verification_status) ? ' Static evidence only.' : ''
+    if (ra && ra.verdict) L.push(`- **Reproduction:** ${ra.verdict}: ${ra.reason}${ra.test_file ? ` (\`${ra.test_file}\`)` : ''}.${staticOnly}`)
+    else if (ra && ra.written === false) L.push(`- **Reproduction:** no test written: ${ra.reason}.${staticOnly}`)
+    else if (ra && ra.written === true) L.push(`- **Reproduction:** attempted (\`${ra.test_file}\`), no verdict: ${ra.reason || 'unknown'}.${staticOnly}`)
+    else if (staticOnly) L.push(`- **Reproduction:** not attempted.${staticOnly}`)
     L.push(`- **Trigger:** ${f.failure_scenario.trigger}`)
     L.push(`- **Path:** ${f.failure_scenario.path}`)
     L.push(`- **Observable:** ${f.failure_scenario.observable}`)
@@ -374,15 +423,17 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch (e) { throw new Error(`${path}: ${e.message}`) }
 }
 
-// Reads every <id>.json in the evidence directory evidence.mjs writes.
+// Reads every <id>.json in the evidence directory evidence.mjs writes, as
+// {F<n>: {head, test_file, runs}}. An unreadable file has no runs.
 export function readEvidence(dir) {
   const out = {}
   if (!dir || !existsSync(dir)) return out
   for (const f of readdirSync(dir).filter(n => /^F[0-9]+\.json$/.test(n))) {
+    const id = f.replace(/\.json$/, '')
     try {
       const e = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      out[f.replace(/\.json$/, '')] = Array.isArray(e.runs) ? e.runs : []
-    } catch { out[f.replace(/\.json$/, '')] = [] }
+      out[id] = { head: e.head || null, test_file: e.test_file || null, runs: Array.isArray(e.runs) ? e.runs : [] }
+    } catch { out[id] = { head: null, test_file: null, runs: [] } }
   }
   return out
 }

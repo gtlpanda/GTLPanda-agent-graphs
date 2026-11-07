@@ -1,15 +1,22 @@
 ---
 name: bughunt
-description: Hunt a pull request for real bugs with the hunt graph - map the change's impact, run the specialist hunters it calls for (logic, contract, concurrency, security, errors, regression) in parallel, merge their findings under stable ids, and report confirmed bugs apart from unverified ones, with a computed disposition. Read-only; it never edits your branch, pushes, or comments. Use when the user says "/bughunt [PR# | branch | base..head]", "hunt this PR for bugs", "find the bugs in this PR", or asks whether a PR was reviewed for bugs.
+description: Hunt a pull request for real bugs with the hunt graph - map the change's impact, run the specialist hunters it calls for (logic, contract, concurrency, security, errors, regression) in parallel, challenge every finding with a blind skeptic and a referee, reproduce each confirmed one with a failing test run in a sandbox at the head and the merge-base, and report reproduced bugs apart from unverified ones, with a computed disposition. It never edits your branch, pushes, or comments. Use when the user says "/bughunt [PR# | branch | base..head]", "hunt this PR for bugs", "find the bugs in this PR", or asks whether a PR was reviewed for bugs.
 ---
 
 # /bughunt
 
 Find the functional defects one change introduced, with evidence, not style
-opinions. This build runs **discover mode**: it maps the impact, hunts, merges,
-and reports. Nothing in it verifies or reproduces a finding yet, so every
-finding is reported as an unverified candidate. `--propose` and `--fix` are
-not built yet. If either is asked for, say so and stop.
+opinions. This build runs **discover mode**:
+1. It maps the impact and hunts.
+2. A blind skeptic challenges every finding, and the advisor referees the
+   contested ones.
+3. Every confirmed finding gets a reproduction test. `evidence.mjs` runs it at
+   the head and at the merge-base, in a sandbox.
+4. You re-run every reproduction yourself before the report, so no agent's
+   transcription is the final word.
+
+`--propose` and `--fix` are not built yet. If either is asked for, say so and
+stop.
 
 These instructions are the opt-in to the Workflow tool for this skill.
 
@@ -51,12 +58,18 @@ node "$CONFIG/skills/workflow-state/run-script.mjs" INJECTED_INPUT "$D/input.jso
 
 ## 3. Run the graph
 
-Before launching, tell the human which lenses intake routed (`lenses=` on the
-`INTAKE: OK` line).
+Before launching, tell the human:
+- which lenses intake routed (`lenses=` on the `INTAKE: OK` line);
+- that reproduction tests run code from the change. They run in fresh exports
+  of each commit, with only an allowlist of the environment (no credentials),
+  a timeout, and, where `unshare` works, no outside network (loopback stays up)
+  and a process namespace that dies with the run. The tests can still read and
+  write files your user can, including the repo's linked `node_modules`, so run
+  `/bughunt` only on changes you are willing to execute locally.
 
 Call the Workflow tool with `scriptPath` set to the absolute path that
 `run-script.mjs` printed, and these args:
-`{"repo": "<REPO>", "tree": "<D>/tree", "configDir": "<CONFIG expanded>", "mode": "discover"}`.
+`{"repo": "<REPO>", "tree": "<D>/tree", "configDir": "<CONFIG expanded>", "stateDir": "<D>", "mode": "discover"}`.
 Do not pass the intake or the findings in args; the run script carries them.
 
 If the run reports an agent type that is not found, the hunt agents are not
@@ -69,14 +82,28 @@ PandaStack checkout and restart Claude Code, then stop.
 2. Save it, checking each quote against the code:
    `node "$CONFIG/skills/findings/findings.mjs" save "$D/ledger.json" "$D/intake.json" "$D/result.json" --repo "$D/tree"`.
    It must print `FINDINGS: SAVED`; otherwise report the error.
-3. Print the report:
+3. Re-run every reproduction the ledger relies on, and correct the ledger to
+   what the runs show:
+   `node "$CONFIG/skills/bughunt/evidence.mjs" recheck "$D"`.
+   - Run it with the Bash tool's timeout at 600000 ms. Each finding can take two
+     test runs.
+   - It writes the ledger after each finding. If it is cut off anyway, run it
+     again before the report.
+   - The last line is `RECHECK: PASS` (the runs agree with the graph) or
+     `RECHECK: CORRECTED <n>`.
+   - When it corrected anything, list each `corrected` line for the human. A
+     correction means the graph's runner transcribed a result the rerun did not
+     reproduce.
+4. Print the report:
    `node "$CONFIG/skills/findings/findings.mjs" report "$D/ledger.json" "$D/evidence"`.
    Show it to the human as it is. Then add, in your own words:
    - the disposition;
    - every lens that was skipped or not covered;
-   - that discover mode reports candidates only, none verified or reproduced.
-4. If the run ended with `escalate`, quote its `reason`. The save kept the
+   - which findings are **reproduced** (a test proved them), which are
+     confirmed by reading only (static evidence), and which are contested.
+5. If the run ended with `escalate`, quote its `reason`. The save kept the
    earlier findings as they were; nothing from the stopped run replaced them.
 
 Never edit the branch under review, commit, push, or post a comment. The report
-stays local until the human decides what to do with it.
+and the reproduction tests (under `$D/repro/`) stay local until the human
+decides what to do with them.

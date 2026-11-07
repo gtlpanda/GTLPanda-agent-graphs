@@ -90,7 +90,15 @@ export async function run(fn, script, args, { allowLeftover = false } = {}) {
     try { return next(childArgs) } catch (e) { mockErrors.push(e); throw e }
   }
   const parallel = async thunks => Promise.all(thunks.map(t => t().catch(() => null)))
-  const pipeline = async () => { throw new Error('pipeline not used by this graph') }
+  // As the runtime does: each item runs through every stage on its own, items
+  // concurrently; a stage that throws drops that item to null and skips its rest.
+  const pipeline = async (items, ...stages) => Promise.all(items.map(async (item, index) => {
+    let value = item
+    for (const stage of stages) {
+      try { value = await stage(value, item, index) } catch { return null }
+    }
+    return value
+  }))
   const result = await fn(agent, parallel, pipeline, () => {}, m => logs.push(m), args, { total: null, spent: () => 0, remaining: () => Infinity }, workflow, SafeMath, SafeDate)
   if (mockErrors.length) throw mockErrors[0]
   const leftover = Object.entries(queues).filter(([, q]) => q.length).map(([k, q]) => `${k}:${q.length}`)
