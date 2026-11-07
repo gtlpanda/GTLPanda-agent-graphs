@@ -231,6 +231,19 @@ await test('the right repair: passes with it, fails without it, the suite passes
   assert.equal(record('F1').verdict, 'REPRODUCED', 'the reproduction record survives the fix runs')
 })
 
+await test('a reproduction recorded PREEXISTING (failing at both commits) still gets the full three-arm proof, never the suite-only path', () => {
+  const recFile = join(STATE, 'evidence', 'F1.json')
+  const saved = readFileSync(recFile, 'utf8')
+  const rec = JSON.parse(saved)
+  writeFileSync(recFile, JSON.stringify({ ...rec, verdict: 'PREEXISTING' }))
+  put(join(FIX, 'src/sum.mjs'), RIGHT)
+  const r = ev('fix', STATE, 'F1')
+  writeFileSync(recFile, saved)   // the worktree keeps the same checked repair the next tests use
+  assert.equal(lastLine(r.stdout), 'FIX: PASS F1', r.stdout)
+  assert.match(r.stdout, /the reproduction passes with the repair and fails without it/)
+  assert.doesNotMatch(r.stdout, /human approved/)
+})
+
 console.log('== repair: adversarial tests, commit, revert')
 const ADV = join(STATE, 'repro', 'F1', 'adversarial')
 await test('no adversarial tests -> PASS; one that passes -> PASS; one that fails -> FAIL, naming it', () => {

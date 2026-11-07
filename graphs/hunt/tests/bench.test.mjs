@@ -57,6 +57,10 @@ await test('the runner scores each ledger against its truth: precision, recall, 
   const t = JSON.parse(readFileSync(join(o, 'results.json'), 'utf8')).totals
   assert.deepEqual({ tp: t.true_positives, fp: t.false_positives, p: t.precision, r: t.recall, cleanFp: t.clean_cases_with_false_positives, cost: t.cost_usd, perBug: t.cost_per_true_bug }, { tp: 1, fp: 1, p: 0.5, r: 1, cleanFp: 1, cost: 1.5, perBug: 1.5 })
 })
+await test('totals: recall counts true bugs found, and a second report of one bug is a duplicate, not a second find', () => {
+  const t = totals([{ truth_bugs: 1, found: 1, true_positives: 3, false_positives: 1, missed: 0, cost_usd: 2, seconds: 1 }, { truth_bugs: 1, found: 0, true_positives: 0, false_positives: 0, missed: 1, cost_usd: 1, seconds: 1 }])
+  assert.deepEqual({ r: t.recall, p: t.precision, dup: t.duplicate_reports, found: t.bugs_found }, { r: 0.5, p: 0.75, dup: 2, found: 1 })
+})
 await test('totals: no reported findings gives precision null, not 1; no true bugs gives recall null', () => {
   const t = totals([{ truth_bugs: 0, true_positives: 0, false_positives: 0, missed: 0, cost_usd: 1, seconds: 3 }])
   assert.equal(t.precision, null)

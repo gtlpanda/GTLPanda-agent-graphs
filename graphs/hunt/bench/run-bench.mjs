@@ -56,6 +56,7 @@ export function scoreCase(name, dir, logFile, seconds, fixMode) {
   return {
     ...row, ledger: true, status: l.status, disposition: disposition(l).disposition,
     findings: m.findings, true_positives: m.true_positives, false_positives: m.false_positives,
+    found: Math.round((m.recall || 0) * truth.bugs.length),
     missed: truth.bugs.length - Math.round((m.recall || 0) * truth.bugs.length),
     reproduced: l.findings.filter(f => !f.stale && f.verification_status === 'reproduced').length,
     refuted: l.findings.filter(f => f.verification_status === 'refuted').length,
@@ -65,15 +66,18 @@ export function scoreCase(name, dir, logFile, seconds, fixMode) {
 
 export function totals(rows) {
   const sum = k => rows.reduce((n, r) => n + (Number(r[k]) || 0), 0)
+  // Precision is over reported findings (a second report of one bug counts as a
+  // true positive and as a duplicate); recall is over true bugs found.
   const tp = sum('true_positives')
   const fp = sum('false_positives')
   const truthBugs = sum('truth_bugs')
+  const found = sum('found')
   const clean = rows.filter(r => r.truth_bugs === 0)
   const cost = rows.every(r => r.cost_usd !== null) ? Math.round(sum('cost_usd') * 100) / 100 : null
   return {
-    cases: rows.length, truth_bugs: truthBugs, true_positives: tp, false_positives: fp, missed: sum('missed'),
+    cases: rows.length, truth_bugs: truthBugs, bugs_found: found, true_positives: tp, duplicate_reports: tp - found, false_positives: fp, missed: sum('missed'),
     precision: tp + fp ? Math.round((tp / (tp + fp)) * 1000) / 1000 : null,
-    recall: truthBugs ? Math.round((tp / truthBugs) * 1000) / 1000 : null,
+    recall: truthBugs ? Math.round((found / truthBugs) * 1000) / 1000 : null,
     clean_cases: clean.length, clean_cases_with_false_positives: clean.filter(r => r.false_positives > 0).length,
     reproduced: sum('reproduced'), refuted: sum('refuted'), fixes_verified: sum('fixes_verified'),
     cost_usd: cost, cost_per_true_bug: cost !== null && tp ? Math.round((cost / tp) * 100) / 100 : null,

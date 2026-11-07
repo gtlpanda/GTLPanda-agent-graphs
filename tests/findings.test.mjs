@@ -112,6 +112,14 @@ await test('same file but far apart and differently titled are two findings; a d
   assert.equal(sameFinding(CAND(), CAND({ line_range: [16, 18], title: 'Unrelated overflow in tax' })), true, 'near and the same category')
   assert.equal(sameFinding(CAND(), CAND({ line_range: [16, 18], bug_category: 'errors', title: 'Unrelated overflow in tax' })), false)
 })
+await test('overlapping reports that quote the same line are one bug, whatever their category or wording; different code is not', () => {
+  const q = [{ file: 'src/files.js', line: 5, quote: "return readFileSync(join(root, name), 'utf8')" }]
+  const a = CAND({ file_path: 'src/files.js', line_range: [4, 5], bug_category: 'security', title: 'Path traversal through name', evidence: q })
+  const b = CAND({ file_path: 'src/files.js', line_range: [3, 6], bug_category: 'regression', title: 'Allowlist removal drops the root guarantee', evidence: q })
+  assert.equal(sameFinding(a, b), true)
+  assert.equal(sameFinding(a, { ...b, evidence: [{ file: 'src/files.js', line: 3, quote: 'export function readPublic(root, name) {' }] }), false, 'no shared quote, other category, other wording')
+  assert.equal(sameFinding(a, { ...b, line_range: [7, 9] }), false, 'the same quote but no overlapping lines')
+})
 await test('merging keeps the higher severity and confidence', () => {
   const first = mergeFindings([], [CAND({ severity: 'MEDIUM', confidence: 65 })], H1).findings
   const next = mergeFindings(first, [CAND({ severity: 'CRITICAL', confidence: 70, source_agent: 'hunter:security' })], H1)

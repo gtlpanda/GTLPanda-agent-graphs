@@ -74,15 +74,19 @@ function similarTitles(a, b) {
   return shared / (A.size + B.size - shared) >= 0.5
 }
 // One bug reported twice: the same file, and either lines within NEAR_LINES
-// with the same category or a similar title, or (lines moved by a new head)
-// the same title, the same category, and a quote in common. The same generic
-// title far apart in one file is two bugs.
+// with the same category or a similar title; or overlapping lines that quote
+// the same line of code (three lenses once filed one path traversal three
+// times, in three wordings); or (lines moved by a new head) the same title,
+// the same category, and a quote in common. The same generic title far apart
+// in one file is two bugs.
 function sameFinding(a, b) {
   if (a.file_path !== b.file_path) return false
+  const quote = e => String(e.quote).replace(/\s+/g, ' ').trim()
+  const sharedQuote = (a.evidence || []).some(e => (b.evidence || []).some(x => quote(x) && quote(x) === quote(e)))
+  const overlap = a.line_range[0] <= b.line_range[1] && b.line_range[0] <= a.line_range[1]
+  if (overlap && sharedQuote) return true
   const near = a.line_range[0] <= b.line_range[1] + NEAR_LINES && b.line_range[0] <= a.line_range[1] + NEAR_LINES
   if (near) return a.bug_category === b.bug_category || similarTitles(a.title, b.title)
-  const quote = e => String(e.quote).replace(/\s+/g, ' ').trim()
-  const sharedQuote = (a.evidence || []).some(e => (b.evidence || []).some(x => quote(x) === quote(e)))
   return normTitle(a.title) === normTitle(b.title) && a.bug_category === b.bug_category && sharedQuote
 }
 function nextFindingId(findings) {

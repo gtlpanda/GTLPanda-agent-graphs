@@ -55,6 +55,7 @@ export function bughuntPrompt({ repo, stateDir, configDir, branch }) {
     `1. node ${q(findings)} input ${q(join(stateDir, 'ledger.json'))} ${q(join(stateDir, 'intake.json'))} ${q(join(stateDir, 'input.json'))}`,
     `2. node ${q(join(configDir, 'skills', 'workflow-state', 'run-script.mjs'))} INJECTED_INPUT ${q(join(stateDir, 'input.json'))} ${q(join(configDir, 'workflows', 'bughunt-flow.js'))} ${q(join(stateDir, 'run.js'))}; its output must start with "run-script: wrote".`,
     `3. Run the Workflow tool with scriptPath set to the path it printed, and args {"repo": ${j(repo)}, "tree": ${j(join(stateDir, 'tree'))}, "configDir": ${j(configDir)}, "stateDir": ${j(stateDir)}, "mode": "fix", "fixBranch": ${j(branch)}}.`,
+    '   It runs in the background and notifies you when it completes: wait for that notification, never a ScheduleWakeup or a sleep.',
     `4. Write the ledger it returns, as JSON, to ${join(stateDir, 'result.json')}.`,
     `5. node ${q(findings)} save ${q(join(stateDir, 'ledger.json'))} ${q(join(stateDir, 'intake.json'))} ${q(join(stateDir, 'result.json'))} --repo ${q(join(stateDir, 'tree'))}`,
     `6. node ${q(evidence)} recheck ${q(stateDir)} (with the Bash tool's timeout set to 600000 ms)`,
