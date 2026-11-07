@@ -566,3 +566,63 @@ await test('the PR body carries the bug hunt: what was found, what was fixed in 
   assert.match(body, /## Bug hunt\nThe bug hunt \(`\/bughunt --fix`\) ran over the whole branch: 2 confirmed bug\(s\), 1 of them reproduced by a failing test; 1 fixed and independently verified \(in this branch/)
   assert.match(body, /- \*\*Still open:\*\* F2 \[MEDIUM\] bug 2/)
 })
+await test('the driver verifies the fix branch in the repo itself, where the installed dependencies are', () => {
+  const root = one()
+  // node_modules is ignored and present only in the repo; the verify needs it.
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\n')
+  execFileSync('git', ['-C', root, 'add', '.gitignore'])
+  execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'ignore deps'])
+  mkdirSync(join(root, 'node_modules'))
+  writeFileSync(join(root, 'node_modules', 'marker'), 'x')
+  const verify = `test -f node_modules/marker || { echo 'VERIFY: FAIL'; exit 1; }; ${VERIFY}`
+  const fix = { subject: 'bughunt: fix F1', files: { 'src/S1.js': 'export const S1 = 2\n' } }
+  const { code } = drive(root, [good('S1'), good('S2'), QA, HUNT({ commits: [fix], findings: [{ fix: 'verified' }] })], { ...HUNT_ON, HARNESS_BUILD_VERIFY: verify })
+  assert.equal(code, 0, status(root).message)
+  assert.equal(gitOut(root, 'rev-parse', '--abbrev-ref', 'HEAD'), INT, 'the repo is back on integration')
+})
+await test('a fix commit the hunt\'s ledger does not call verified never lands', () => {
+  const root = one()
+  const fix = { subject: 'bughunt: fix F1', files: { 'src/S1.js': 'export const S1 = 2\n' } }
+  const { code } = drive(root, [good('S1'), good('S2'), QA, HUNT({ commits: [fix], findings: [{ fix: 'rejected' }] })], HUNT_ON)
+  assert.equal(code, 3, status(root).message)
+  assert.match(status(root).message, /fix commits the hunt's ledger does not call verified: [0-9a-f]{7}/)
+  assert.equal(gitOut(root, 'log', '-1', '--format=%s', INT), 'S2: C1: build S2')
+})
+await test('a rerun keeps the uncommitted work an earlier hunt left, on its attempt branch', () => {
+  const root = one()
+  drive(root, [good('S1'), good('S2'), QA, HUNT({ dirty: { 'src/evidence-of-failure.js': 'x\n' }, findings: [] })], HUNT_ON)
+  drive(root, [QA, HUNT({ findings: [] })], HUNT_ON)
+  const kept = gitOut(root, 'branch', '--list', 'attempt/bughunt-*').split('\n').map(s => s.trim()).filter(Boolean)
+  assert.ok(kept.some(b => gitOut(root, 'ls-tree', '-r', '--name-only', b).split('\n').includes('src/evidence-of-failure.js')), 'the dirty file is on a kept branch')
+})
+await test('a resume after a failed push does not hunt again at the same head; a merged-by-hand integration skips the hunt', () => {
+  const root = one()
+  const fix = { subject: 'bughunt: fix F1', files: { 'src/S1.js': 'export const S1 = 2\n' } }
+  const ghLog = join(dirname(root), `${root.split('/').pop()}-gh.log`)
+  // No remote: the push fails after the hunt landed.
+  let r = drive(root, [good('S1'), good('S2'), QA, HUNT({ commits: [fix], findings: [{ fix: 'verified' }] })], { ...HUNT_ON, HARNESS_BUILD_GH: FAKE_GH, FAKE_GH_LOG: ghLog }, [])
+  assert.equal(r.code, 13, status(root).message)
+  const remote = mkdtempSync(join(tmpdir(), 'build-app-remote-'))
+  execFileSync('git', ['init', '-q', '--bare', remote])
+  execFileSync('git', ['-C', root, 'remote', 'add', 'origin', remote])
+  r = drive(root, [QA], { ...HUNT_ON, HARNESS_BUILD_GH: FAKE_GH, FAKE_GH_LOG: ghLog }, [])
+  assert.equal(r.code, 0, status(root).message)
+  assert.equal(r.calls.length, 1, 'only the QA ran: the hunt already landed at this head')
+  assert.match(driverLog(root), /bug hunt: already landed at [0-9a-f]{7}; not repeated/)
+  // Integration merged into main by hand: nothing left to review.
+  const merged = one()
+  drive(merged, [good('S1'), good('S2'), QA, HUNT({ hunt: 'none' })], HUNT_ON)
+  execFileSync('git', ['-C', merged, 'branch', '-f', 'main', INT])
+  r = drive(merged, [QA], HUNT_ON)
+  assert.equal(r.code, 0, status(merged).message)
+  assert.match(driverLog(merged), /bug hunt skipped: .*nothing to review/)
+})
+await test('the PR text never calls a partial hunt clean: lenses not covered, or a budget stop, are said', async () => {
+  const { bughuntLine } = await import('../skills/build-app/driver/finish.mjs')
+  const ledger = { version: 1, key: 'k', findings: [], coverage: [{ lens: 'logic', status: 'not_covered' }, { lens: 'security', status: 'partial' }], runs: [{ status: 'done', budget_stop: 'Reproduce' }], status: 'done' }
+  const line = bughuntLine(ledger, false)
+  assert.match(line, /0 confirmed bug\(s\)/)
+  assert.match(line, /\*\*Disposition: manual review\*\* \(logic not covered, security partly covered\)/)
+  assert.match(line, /stopped before Reproduce: its token budget was nearly spent/)
+  assert.doesNotMatch(bughuntLine({ ...ledger, coverage: [], runs: [{ status: 'done' }] }, false), /Disposition|budget/, 'a full, clean hunt says nothing more')
+})

@@ -69,6 +69,17 @@ await test('writableDirs opens one directory inside .git, everything under it, a
     assert.match(decide('Write', { file_path: f }, hunt), /inside \.git/, f)
   }
 })
+await test('a symlink inside a writable dir, even a dangling one, is never written through', () => {
+  const real = mkdtempSync(join(tmpdir(), 'guard-wd-'))
+  const state = join(real, '.git', 'bughunt', 'k')
+  mkdirSync(join(state, 'fix'), { recursive: true })
+  symlinkSync('/nonexistent-target-dir/x', join(state, 'dangling'))
+  symlinkSync(join(real, '.git'), join(state, 'fix', 'up'))
+  const wd = { repo: real, frozen: [], writable: [], writableDirs: [state] }
+  assert.match(decide('Write', { file_path: join(state, 'dangling') }, wd), /inside \.git/)
+  assert.match(decide('Write', { file_path: join(state, 'fix', 'up', 'hooks', 'post-merge') }, wd), /inside \.git/)
+  assert.equal(decide('Write', { file_path: join(state, 'fix', 'src', 'a.js') }, wd), null)
+})
 await test('a symlinked repo path, or ../ in a file path, does not dodge the edit rules', () => {
   const real = mkdtempSync(join(tmpdir(), 'guard-real-'))
   mkdirSync(join(real, 'tests'))

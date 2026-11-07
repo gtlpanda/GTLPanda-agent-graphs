@@ -135,7 +135,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
   const files = {
     ledger: join(state, 'ledger.json'), status: join(state, 'status.json'), pid: join(state, 'driver.pid'),
     settings: join(state, 'session-settings.json'), guard: join(state, 'guard.json'), stopFailure: join(state, 'stop-failure.json'), session: join(state, 'session.pid'),
-    driverLog: join(logs, 'driver.log'), probe: join(logs, 'probe.jsonl'), finalQa: join(state, 'final-qa.json'),
+    driverLog: join(logs, 'driver.log'), probe: join(logs, 'probe.jsonl'), finalQa: join(state, 'final-qa.json'), hunt: join(state, 'bughunt.json'),
     devLedger: join(git(repo, ['rev-parse', '--path-format=absolute', '--git-path', 'harness-dev']).stdout.trim(), 'ledger.json'),
   }
   // Bookkeeping never crashes the driver: if the state directory vanishes, the
@@ -202,8 +202,20 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
   // Returns {line} for the PR body, or {ended} when the run must stop here.
   const runHunt = async base => {
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
+    // A hunt already landed at this head (a resume after a failed push) is not repeated.
+    const head0 = git(repo, ['rev-parse', integration]).stdout.trim()
+    let landed = null
+    try { landed = JSON.parse(readFileSync(files.hunt, 'utf8')) } catch { landed = null }
+    if (landed && landed.head === head0 && typeof landed.line === 'string') {
+      log(`bug hunt: already landed at ${head0.slice(0, 7)}; not repeated`)
+      return { line: landed.line }
+    }
     const intake = run(process.execPath, [INTAKE, repo, '--branch', integration, '--base', base], { cwd: repo })
     const last = intake.out.trim().split('\n').pop() || ''
+    if (/nothing to review/.test(last)) {
+      log(`bug hunt skipped: ${last.replace(/^INTAKE: FAIL /, '')}`)
+      return { line: `The bug hunt did not run: ${last.replace(/^INTAKE: FAIL /, '')}.` }
+    }
     if (!last.startsWith('INTAKE: OK')) return { ended: end(EXIT.brake, 'braked', `the bug hunt's intake failed (${last}); every slice and the final QA stay landed: run /build-app resume to retry it`) }
     const stateDir = dirname(intake.stdout.split('\n')[0].trim())
     let key
@@ -214,6 +226,13 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
     // What an earlier hunt left is set aside, never lost: its worktree goes, its
     // branch is kept as attempt/bughunt-<stamp>, and its ledger is archived (its
     // fixes are not on the new branch, so it starts over).
+    // Uncommitted work an earlier hunt left is committed onto its branch first,
+    // so the branch kept below keeps it too.
+    const nohooks = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
+    if (existsSync(fixDir) && git(fixDir, [...nohooks, 'status', '--porcelain']).stdout.trim()) {
+      git(fixDir, [...nohooks, 'add', '-A'])
+      git(fixDir, [...nohooks, '-c', 'user.name=build-app', '-c', 'user.email=build-app@localhost', 'commit', '-q', '--no-verify', '-m', 'bughunt: uncommitted work an earlier hunt left'])
+    }
     if (existsSync(fixDir)) git(repo, ['worktree', 'remove', '--force', fixDir])
     git(repo, ['worktree', 'prune'])
     if (git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]).ok) {
@@ -249,12 +268,15 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
       const byKind = { billing: EXIT.billing, auth: EXIT.auth, usage_limit: EXIT.limitTooFar, transient: EXIT.apiDown }
       return { ended: end(byKind[verdict.kind] || EXIT.brake, verdict.kind === 'normal' ? 'braked' : 'paused', keep(`the bug hunt did not finish (exit ${code}, ${huntCost}${lastRun ? `; its last run: ${lastRun.status}${lastRun.reason ? `: ${lastRun.reason}` : ''}` : '; it saved no run'}${verdict.message ? `, ${verdict.message}` : ''}); every slice and the final QA stay landed: run /build-app resume to retry it`)) }
     }
-    const checks = bughuntChecks({ repo, integration, branch, worktree: fixDir, frozen: frozenFiles(ledger), verifyCommand: cfg.verifyCommand })
+    const verified = hl.findings.filter(f => !f.stale && f.fix_status === 'verified' && f.fix_artifact && f.fix_artifact.commit).map(f => f.fix_artifact.commit)
+    const checks = bughuntChecks({ repo, integration, branch, worktree: fixDir, frozen: frozenFiles(ledger), verifyCommand: cfg.verifyCommand, verified })
+    if (stopping) return { ended: end(EXIT.stopped, 'stopped', keep(`stopped by request during the bug hunt's checks (${huntCost}); every slice and the final QA stay landed`)) }
     if (checks.problems.length) return { ended: end(EXIT.brake, 'braked', keep(`the bug hunt's fixes did not pass the driver's checks (${huntCost}): ${checks.problems.join('; ')}`)) }
-    if (checks.commits && !git(repo, ['merge', '-q', '--ff-only', branch]).ok) return { ended: end(EXIT.gitState, 'failed', keep(`the bug hunt's fixes could not be fast-forwarded onto ${integration}`)) }
+    if (checks.commits && !(git(repo, ['checkout', '-q', integration]).ok && git(repo, ['-c', 'core.hooksPath=/dev/null', 'merge', '-q', '--ff-only', branch]).ok)) return { ended: end(EXIT.gitState, 'failed', keep(`the bug hunt's fixes could not be fast-forwarded onto ${integration}`)) }
     git(repo, ['worktree', 'remove', '--force', fixDir])
     git(repo, ['branch', '-q', '-D', branch])
     const line = bughuntLine(hl, checks.commits > 0)
+    writeJson(files.hunt, { head: git(repo, ['rev-parse', integration]).stdout.trim(), line })
     log(`bug hunt: ${checks.commits} verified fix(es) landed on ${integration} (${huntCost})`)
     return { line }
   }
@@ -305,6 +327,7 @@ export async function runDriver({ repo: given, app, noPr: noPrFlag = null }, cfg
       const hunt = await runHunt(base)
       if (hunt.ended) return hunt.ended
       huntLine = hunt.line
+      if (stopping) return end(EXIT.stopped, 'stopped', 'stopped by request after the bug hunt; nothing was pushed')
     }
     if (noPr) return end(EXIT.done, 'done', `every slice landed on ${integration}, the final QA passed${cfg.bughunt ? ', and the bug hunt ran' : ''}; --no-pr, so nothing was pushed`)
     let pr

@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git, run } from './proc.mjs'
 import { sliceState } from '../../../../../core/skills/backlog/backlog.mjs'
+import { disposition } from '../../../../../core/skills/findings/findings.mjs'
 
 // The branch the PR goes to: origin's default branch, else main, else master.
 export function defaultBase(repo) {
@@ -42,15 +43,18 @@ export function qaReport(file) {
 // fix worktree, so the session only runs the hunt graph in fix mode and writes
 // its results into the state dir (the one place in .git the guard opens).
 export function bughuntPrompt({ repo, stateDir, configDir, branch }) {
-  const q = p => JSON.stringify(p)
+  // Shell lines get single-quoted paths ($ and backticks stay literal); the
+  // Workflow args are JSON.
+  const q = p => `'${String(p).replace(/'/g, `'\\''`)}'`
+  const j = p => JSON.stringify(p)
   const findings = join(configDir, 'skills', 'findings', 'findings.mjs')
   const evidence = join(configDir, 'skills', 'bughunt', 'evidence.mjs')
   return [
     'Bug hunt of an unattended /build-app build, in fix mode, over the whole integration branch. These instructions are your opt-in to the Workflow tool for this one run.',
-    `The driver already ran intake and made the fix worktree ${q(join(stateDir, 'fix'))} on ${branch}. Do not run intake.mjs, and never create, remove, or switch a worktree or branch.`,
+    `The driver already ran intake and made the fix worktree ${j(join(stateDir, 'fix'))} on ${branch}. Do not run intake.mjs, and never create, remove, or switch a worktree or branch.`,
     `1. node ${q(findings)} input ${q(join(stateDir, 'ledger.json'))} ${q(join(stateDir, 'intake.json'))} ${q(join(stateDir, 'input.json'))}`,
     `2. node ${q(join(configDir, 'skills', 'workflow-state', 'run-script.mjs'))} INJECTED_INPUT ${q(join(stateDir, 'input.json'))} ${q(join(configDir, 'workflows', 'bughunt-flow.js'))} ${q(join(stateDir, 'run.js'))}; its output must start with "run-script: wrote".`,
-    `3. Run the Workflow tool with scriptPath set to the path it printed, and args {"repo": ${q(repo)}, "tree": ${q(join(stateDir, 'tree'))}, "configDir": ${q(configDir)}, "stateDir": ${q(stateDir)}, "mode": "fix", "fixBranch": ${q(branch)}}.`,
+    `3. Run the Workflow tool with scriptPath set to the path it printed, and args {"repo": ${j(repo)}, "tree": ${j(join(stateDir, 'tree'))}, "configDir": ${j(configDir)}, "stateDir": ${j(stateDir)}, "mode": "fix", "fixBranch": ${j(branch)}}.`,
     `4. Write the ledger it returns, as JSON, to ${join(stateDir, 'result.json')}.`,
     `5. node ${q(findings)} save ${q(join(stateDir, 'ledger.json'))} ${q(join(stateDir, 'intake.json'))} ${q(join(stateDir, 'result.json'))} --repo ${q(join(stateDir, 'tree'))}`,
     `6. node ${q(evidence)} recheck ${q(stateDir)} (with the Bash tool's timeout set to 600000 ms)`,
@@ -70,6 +74,12 @@ export function bughuntLine(ledger, landed) {
   const lines = [`The bug hunt (\`/bughunt --fix\`) ran over the whole branch: ${real.length} confirmed bug(s), ${live.filter(f => f.verification_status === 'reproduced').length} of them reproduced by a failing test; ${fixed.length} fixed and independently verified${landed ? ' (in this branch, one `bughunt: fix F<n>` commit each, with its regression test)' : ''}.`]
   for (const f of open) lines.push(`- **Still open:** ${f.finding_id} [${f.severity}] ${f.title} (\`${f.file_path}:${f.line_range[0]}\`; ${f.verification_status}, fix ${f.fix_status}${f.fix_artifact && f.fix_artifact.last_feedback ? `: ${f.fix_artifact.last_feedback}` : ''})`)
   if (unverified.length) lines.push(`- ${unverified.length} more finding(s) were not confirmed; see the hunt's report.`)
+  // A hunt that did not cover everything is never reported as clean.
+  const fixedIds = new Set(fixed.map(f => f.finding_id))
+  const d = disposition({ ...ledger, findings: ledger.findings.filter(f => !fixedIds.has(f.finding_id)) })
+  if (d.disposition !== 'pass') lines.push(`- **Disposition: ${d.disposition.replace('_', ' ')}** (${d.because.join(', ')}).`)
+  const run = ledger.runs && ledger.runs.length ? ledger.runs[ledger.runs.length - 1] : null
+  if (run && run.budget_stop) lines.push(`- The hunt stopped before ${run.budget_stop}: its token budget was nearly spent.`)
   return lines.join('\n')
 }
 

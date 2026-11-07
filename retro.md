@@ -1295,3 +1295,32 @@ review had looked at.
   - 2 budget tests;
   - 1 duration test.
 - 3 new validate.sh rules. The suite is 563 workflow tests, 0 failed.
+
+**PR review (#30).** Two independent reviewers found 1 HIGH, 5 MEDIUM, and 8 LOW, which overlap to 13
+distinct issues. All are fixed:
+- **HIGH: the driver's verify ran in the fix worktree,** which has no installed dependencies, so
+  every pnpm, yarn, or bun project would brake on its first fix. The driver now checks the fix branch
+  out, detached, in the repo itself (where the dependencies are), verifies there, and checks
+  integration out again.
+- **MEDIUM:**
+  - A dangling symlink inside the hunt's state dir let a Write escape into `.git`; the guard now
+    refuses any symlink below a writable dir.
+  - A partial hunt (lenses not covered, a budget stop) read as clean in the PR text; the text now
+    states the disposition.
+  - A resume after a failed push re-ran the whole hunt; a hunt already landed at the current head is
+    now skipped, and its PR text reused.
+  - A stop request during the driver's long checks did not stop the push.
+  - A fix commit that recheck later took back still landed; only commits the ledger calls verified
+    land now.
+- **LOW:**
+  - A re-hunt discarded the earlier worktree's uncommitted work; it is now committed onto the kept
+    attempt branch.
+  - `/loop` treated a hunt that stopped early as done; it now compares against the last finished run.
+  - Paths in the hunt prompt were unsafe inside shell double quotes; they are now single-quoted.
+  - The fast-forward did not check out integration first.
+  - The skill still said it never pushes.
+  - `--draft-pr` pushed before knowing its base existed on origin; it now resolves and checks the
+    base before asking.
+  - "Nothing to review" (the PR merged by hand) braked forever; it now skips the hunt.
+
+A mutation run over the fixes caught 7 of 7. 6 new tests, for 569 workflow tests and 0 failed.

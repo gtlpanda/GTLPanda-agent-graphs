@@ -51,7 +51,8 @@ else if (step.hunt) {
   const fixDir = join(state, 'fix')
   const inFix = (...args) => execFileSync('git', ['-C', fixDir, ...args], { stdio: 'pipe' })
   const write = files => { for (const [p, text] of Object.entries(files || {})) { mkdirSync(dirname(join(fixDir, p)), { recursive: true }); writeFileSync(join(fixDir, p), text) } }
-  for (const c of step.commits || []) { write(c.files); inFix('add', '-A'); inFix('commit', '-q', '--no-verify', '-m', c.subject) }
+  const shas = []
+  for (const c of step.commits || []) { write(c.files); inFix('add', '-A'); inFix('commit', '-q', '--no-verify', '-m', c.subject); shas.push(execFileSync('git', ['-C', fixDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()) }
   write(step.dirty)
   if (step.hunt !== 'none') {
     const { mergeFindings, writeLedger, emptyLedger } = await import(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'core', 'skills', 'findings', 'findings.mjs'))
@@ -62,8 +63,15 @@ else if (step.hunt) {
       failure_scenario: { trigger: 't', path: 'p', observable: 'o' }, expected_behavior: 'e', actual_behavior: 'a', evidence: [{ file: `src/f${i + 1}.js`, line: 1, quote: 'x' }], source_agent: 'hunter:logic',
     })
     const found = step.findings || []
-    const findings = mergeFindings([], found.map(cand), head).findings.map((f, i) => ({ ...f, verification_status: found[i].status || 'reproduced', fix_status: found[i].fix || 'none' }))
-    writeLedger(join(state, 'ledger.json'), { ...emptyLedger(intake.key), target: intake.target, findings, status: step.hunt, runs: [{ at: 't', mode: 'fix', head, status: step.hunt, reason: step.reason || 'r', added: [], merged: 0, dropped: 0, calls: 1 }] })
+    // A verified finding claims the next commit, unless the step says it claims none.
+    let next = 0
+    const findings = mergeFindings([], found.map(cand), head).findings.map((f, i) => {
+      const fix = found[i].fix || 'none'
+      const commit = fix === 'verified' && !found[i].noCommit ? shas[next++] || null : null
+      return { ...f, verification_status: found[i].status || 'reproduced', fix_status: fix, fix_artifact: commit ? { mode: 'fix', commit } : null }
+    })
+    const coverage = step.coverage || []
+    writeLedger(join(state, 'ledger.json'), { ...emptyLedger(intake.key), target: intake.target, findings, coverage, status: step.hunt, runs: [{ at: 't', mode: 'fix', head, status: step.hunt, reason: step.reason || 'r', added: [], merged: 0, dropped: 0, calls: 1 }] })
   }
   result({})
 }

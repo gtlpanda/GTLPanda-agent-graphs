@@ -10,7 +10,7 @@
 // the common spellings, not every one: the driver's checks after the session are
 // the backstop (a frozen test changed any way at all, or a commit it did not
 // expect, keeps the slice from landing).
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync, lstatSync } from 'node:fs'
 import { resolve, relative, isAbsolute, dirname, basename, join } from 'node:path'
 
 // A git subcommand (with its arguments) a slice session never needs, with why.
@@ -139,6 +139,21 @@ function realish(p) {
   return join(head, ...rest)
 }
 
+// Whether any existing part of `abs` below `dir` is a symlink. realish cannot
+// resolve a dangling link, so without this a link inside a writable dir
+// pointing at a file not yet created (say .git/hooks/post-merge) would look
+// inside it while the write landed outside (found in review).
+function symlinkBelow(dir, abs) {
+  let cur = dir
+  for (const part of relative(dir, abs).split('/').filter(Boolean)) {
+    cur = join(cur, part)
+    let st
+    try { st = lstatSync(cur) } catch { return false }
+    if (st.isSymbolicLink()) return true
+  }
+  return false
+}
+
 // The reason to deny one tool call, or null to let it run.
 export function decide(tool, params, rules) {
   if (tool === 'Bash') return decideBash(params.command || '')
@@ -149,7 +164,7 @@ export function decide(tool, params, rules) {
   const abs = realish(isAbsolute(file) ? file : resolve(repo, file))
   const rel = relative(repo, abs).split('\\').join('/')
   if ((rules.writable || []).some(w => realish(w) === abs)) return null
-  if ((rules.writableDirs || []).some(d => { const dir = realish(d); return abs === dir || abs.startsWith(`${dir}/`) })) return null
+  if ((rules.writableDirs || []).some(d => { const dir = realish(d); return (abs === dir || abs.startsWith(`${dir}/`)) && !symlinkBelow(dir, abs) })) return null
   if (rel === '.git' || rel.startsWith('.git/')) return 'editing inside .git'
   if ((rules.frozen || []).includes(rel)) return `${rel} is a frozen test from a slice that already landed; add a new test instead of changing it`
   return null
