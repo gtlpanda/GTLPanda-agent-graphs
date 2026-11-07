@@ -1,6 +1,6 @@
 ---
 name: build-app
-description: Build an approved /blueprint backlog unattended with the build graph - one fresh headless /dev session per slice on integration/<app>, each landed only on the driver's own checks, then one final QA pass, a push of the branch, and one pull request for you to review. Use when the user says "/build-app", "build the backlog", "build the whole app unattended", or asks for the status of, to stop, to resume, or to unblock such a build. Subcommands start (the default), status, stop, resume, unblock.
+description: Build an approved /blueprint backlog unattended with the build graph - one fresh headless /dev session per slice on integration/<app>, each landed only on the driver's own checks, then one final QA pass, a bug hunt in fix mode over the whole branch (/bughunt), a push of the branch, and one pull request for you to review. Use when the user says "/build-app", "build the backlog", "build the whole app unattended", or asks for the status of, to stop, to resume, or to unblock such a build. Subcommands start (the default), status, stop, resume, unblock.
 ---
 
 # /build-app
@@ -60,7 +60,9 @@ is `"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/build-app/driver/driver.mjs"`.
    many already landed (from the ledger, when there is one), that each slice
    is a full `/dev` run (the first real runs took 30 minutes of planning and
    55-85 minutes of building for 7-8 components), and what happens at the end
-   (the final QA pass, then the push and the PR, or not with `--no-pr`).
+   (the final QA pass, then a bug hunt in fix mode whose verified fixes land as
+   `bughunt: fix F<n>` commits, then the push and the PR, or not with
+   `--no-pr`; `HARNESS_BUILD_BUGHUNT=0` in the environment skips the hunt).
 4. Launch it detached, so it survives this session (`setsid` where it exists,
    as on Linux; plain `nohup` elsewhere, as on macOS):
    `$(command -v setsid) nohup node "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/build-app/driver/driver.mjs" run --repo REPO --app <app> [--no-pr|--pr] > STATE/logs/nohup.out 2>&1 < /dev/null &`

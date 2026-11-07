@@ -27,9 +27,17 @@ loop: brake? --> stop (exit 3)
       nextSlice --none--> finish:
           slice/final from integration; claude -p (the QA graph, harness-repair, once over the whole
           branch against the default branch; its fixes committed as "final: QA fixes")
-          --QA done + the same checks (no commits is fine)--> fast-forward, then push integration/<app>
-            and open one PR to the default branch (reused if one is open; skipped with --no-pr) (exit 0)
-          --anything else--> brake (exit 3), every slice stays landed; a rerun repeats only the finish
+          --QA done + the same checks (no commits is fine)--> fast-forward, then the bug hunt:
+            the driver runs intake on integration/<app> and makes bughunt/<key> in a fix worktree;
+            claude -p (the hunt graph, bughunt-flow, in fix mode over the whole branch; the guard opens
+            only the hunt's state dir; skipped with HARNESS_BUILD_BUGHUNT=0)
+            --a finished hunt + the driver's checks (every commit "bughunt: fix F<n>", no frozen test
+              changed, a clean worktree, its own verify passing)--> fast-forward its fixes, remove the
+              worktree and branch, then push integration/<app> and open one PR to the default branch,
+              its body carrying what the hunt found and fixed (reused if one is open; skipped with
+              --no-pr) (exit 0)
+          --anything else--> brake (exit 3), every slice stays landed, and a hunt's branch is kept as
+            attempt/bughunt-<time>; a rerun repeats only the finish (an earlier hunt's ledger is archived)
       slice/S<n> fresh from integration/<app>
       claude -p "/dev --slice S<n> --base integration/<app> --unattended"
         --usage limit--> wait for the reset (or probe), retry the same slice, not counted
@@ -51,7 +59,7 @@ loop: brake? --> stop (exit 3)
 | What | Value | Why |
 |------|-------|-----|
 | Permission mode | `bypassPermissions` | nobody is there to approve a prompt |
-| Guard | `hooks/guard.mjs` (PreToolUse: Bash, Edit, Write, MultiEdit, NotebookEdit) | denies, in the common spellings (quoted words, `bash -c`, `$(...)`, `xargs`, `env`), git push, remote changes, history rewrites, forced branch changes, `git clean -f`, touching `integration/`, `rm -rf` of `/` `~` `$HOME`, edits in `.git`, and edits to frozen tests. Commit messages and heredocs are data, never commands. Measured: a hook deny holds under `bypassPermissions` in headless `claude -p`, also in subagents. The driver's checks are the backstop for any spelling it misses |
+| Guard | `hooks/guard.mjs` (PreToolUse: Bash, Edit, Write, MultiEdit, NotebookEdit) | denies, in the common spellings (quoted words, `bash -c`, `$(...)`, `xargs`, `env`), git push, remote changes, history rewrites, forced branch changes, `git clean -f`, touching `integration/`, `rm -rf` of `/` `~` `$HOME`, edits in `.git` (except the final QA's report and, for the bug hunt, its own state dir: `writableDirs`), and edits to frozen tests. Commit messages and heredocs are data, never commands. Measured: a hook deny holds under `bypassPermissions` in headless `claude -p`, also in subagents. The driver's checks are the backstop for any spelling it misses |
 | Deny rules | `git push`, `git remote`, `git reset --hard`, `git rebase`, `rm -rf /` `~` | a second layer: rules match command text only |
 | StopFailure hook | `hooks/stop-failure.mjs` | records `rate_limit` and other API errors, so the driver waits instead of counting a failure |
 | Model env | `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5-5`, `..._FORCE=0`, `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL=""` | pinned agents keep their pins; a set workflow model forces every workflow agent onto it (measured) |

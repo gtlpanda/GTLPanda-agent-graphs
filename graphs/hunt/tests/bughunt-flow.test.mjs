@@ -546,3 +546,20 @@ await test('a finding an earlier run left unresolved is tried again on the next 
   const { result } = await run(fn, { ...ONE(), repairer: [REP()], runner: RUNNER({ fix: [['PASS']], commit: [['DONE', 'c', SHA]] }) }, ARGS({ mode: 'propose', prior: first.result.findings }))
   assert.equal(f1(result).fix_status, 'proposed')
 })
+
+console.log('== bughunt-flow: budget')
+await test('with a token budget nearly spent, no costly stage starts; the run finishes with what it has and says where it stopped', async () => {
+  const tight = { total: 500_000, spent: () => 470_000, remaining: () => 30_000 }
+  const { result, calls, logs } = await run(fn, ONE(), ARGS(), { budget: tight })
+  assert.equal(types(calls), 'impact-mapper,hunter,hunter,hunter', 'no skeptic, referee, reproducer, or repairer')
+  assert.equal(result.status, 'done')
+  assert.equal(f1(result).verification_status, 'candidate', 'found but not verified, and reported as such')
+  assert.match(result.reason, /stopped before Verify: the token budget was nearly spent/)
+  assert.ok(logs.some(l => /the token budget is nearly spent \(30000 left\); not starting Verify/.test(l)))
+})
+await test('with budget to spare, or none set, every stage runs', async () => {
+  const roomy = { total: 500_000, spent: () => 10_000, remaining: () => 490_000 }
+  const { result } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [RAN('REPRODUCED')] }, ARGS(), { budget: roomy })
+  assert.equal(f1(result).verification_status, 'reproduced')
+  assert.doesNotMatch(result.reason, /budget/)
+})

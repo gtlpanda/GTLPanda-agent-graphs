@@ -1259,3 +1259,68 @@ by the guard hook. The fixes added 12 tests, for 549 workflow tests and 0 failed
     commands);
   - 2 findings tests.
 - 2 new agents, 6 new or updated validate.sh rules.
+
+## 28. /bughunt, part 4: wired into /build-app and /loop (2026-11-06)
+
+**Why.** This closes the gap that started the work: an unattended build opened PRs no dedicated bug
+review had looked at.
+
+**What changed.**
+- **`/build-app` hunts before its PR.** After the final QA lands, the driver runs intake on
+  `integration/<app>` itself and makes `bughunt/<key>` in a fix worktree. A headless session then
+  runs the hunt graph in fix mode over the whole branch, from explicit steps like the final QA's.
+  - The guard learned `writableDirs`. It opens only the hunt's state dir inside `.git`, where the
+    reproducer writes, the repairer edits the fix worktree, and the session saves its results.
+  - The driver lands the fixes only after its own checks: a finished run at this head, every commit
+    `bughunt: fix F<n>`, no frozen test changed, a clean worktree, and its own verify passing. It
+    then fast-forwards integration and removes the worktree and branch.
+  - The PR body gains a "Bug hunt" section: confirmed and reproduced counts, what was fixed in this
+    branch, and each finding still open.
+  - Anything else brakes, with every slice and the final QA still landed. The hunt's branch is kept
+    as `attempt/bughunt-<time>`, and a rerun archives the old ledger and hunts again.
+  - `HARNESS_BUILD_BUGHUNT=0` skips the hunt.
+- **`/loop` runs `/bughunt` in discover mode** on a PR whenever the PR's head has changed since the
+  last hunt. It reports the disposition and never posts to the PR.
+- **`--draft-pr` is the one outward step.** With `--fix`, it pushes `bughunt/<key>` and opens a draft
+  PR into the reviewed branch, only after the human says yes in the session.
+- **Budgets.** With a token budget set, no costly stage starts under 40,000 tokens left; the run
+  finishes with what it has and records where it stopped.
+- **Observability.** Each run in the ledger records its duration.
+
+**Stats.**
+- New tests:
+  - 6 driver tests (a fix landing, a hunt that saves no run, a foreign commit, a frozen test, a
+    dirty worktree, a rerun, and the PR body);
+  - 1 guard test;
+  - 2 budget tests;
+  - 1 duration test.
+- 3 new validate.sh rules. The suite is 563 workflow tests, 0 failed.
+
+**PR review (#30).** Two independent reviewers found 1 HIGH, 5 MEDIUM, and 8 LOW, which overlap to 13
+distinct issues. All are fixed:
+- **HIGH: the driver's verify ran in the fix worktree,** which has no installed dependencies, so
+  every pnpm, yarn, or bun project would brake on its first fix. The driver now checks the fix branch
+  out, detached, in the repo itself (where the dependencies are), verifies there, and checks
+  integration out again.
+- **MEDIUM:**
+  - A dangling symlink inside the hunt's state dir let a Write escape into `.git`; the guard now
+    refuses any symlink below a writable dir.
+  - A partial hunt (lenses not covered, a budget stop) read as clean in the PR text; the text now
+    states the disposition.
+  - A resume after a failed push re-ran the whole hunt; a hunt already landed at the current head is
+    now skipped, and its PR text reused.
+  - A stop request during the driver's long checks did not stop the push.
+  - A fix commit that recheck later took back still landed; only commits the ledger calls verified
+    land now.
+- **LOW:**
+  - A re-hunt discarded the earlier worktree's uncommitted work; it is now committed onto the kept
+    attempt branch.
+  - `/loop` treated a hunt that stopped early as done; it now compares against the last finished run.
+  - Paths in the hunt prompt were unsafe inside shell double quotes; they are now single-quoted.
+  - The fast-forward did not check out integration first.
+  - The skill still said it never pushes.
+  - `--draft-pr` pushed before knowing its base existed on origin; it now resolves and checks the
+    base before asking.
+  - "Nothing to review" (the PR merged by hand) braked forever; it now skips the hunt.
+
+A mutation run over the fixes caught 7 of 7. 6 new tests, for 569 workflow tests and 0 failed.

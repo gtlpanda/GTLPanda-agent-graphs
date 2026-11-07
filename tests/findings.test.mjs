@@ -287,6 +287,13 @@ await test('saveRun replaces the findings, keeps the last 20 runs, and stamps th
   assert.equal(l.findings.length, 1)
   assert.throws(() => saveRun(l, intake, { status: 'done' }, 't'), /no findings list/)
 })
+await test('saveRun records how long the run took (from --started) and where a token budget stopped it', () => {
+  const intake = { key: 'pr-7', target: { head: H1, label: 'x' } }
+  const l = saveRun(emptyLedger('pr-7'), intake, { status: 'done', findings: [], budgetStop: 'Reproduce' }, '2026-11-06T10:05:30.000Z', '2026-11-06T10:00:00Z')
+  assert.equal(l.runs[0].duration_s, 330)
+  assert.equal(l.runs[0].budget_stop, 'Reproduce')
+  assert.equal(saveRun(emptyLedger('pr-7'), intake, { status: 'done', findings: [] }, 't', 'not a time').runs[0].duration_s, null)
+})
 await test('saveRun: a run that stopped early never replaces the findings, coverage, or target; it records the stop', () => {
   const intake = { key: 'pr-7', target: { head: H1, label: 'first' } }
   const kept = saveRun(emptyLedger('pr-7'), intake, { status: 'done', findings: mergeFindings([], [CAND()], H1).findings, coverage: [{ lens: 'logic', status: 'covered' }] }, 't1')
@@ -308,8 +315,9 @@ await test('CLI: input, save, check, and report work end to end, also through a 
   let r = cli('input', ledger, intake, join(d, 'input.json'))
   assert.equal(r.status, 0, r.stderr)
   assert.deepEqual(JSON.parse(readFileSync(join(d, 'input.json'), 'utf8')).prior, [])
-  r = cli('save', ledger, intake, result)
+  r = cli('save', ledger, intake, result, '--started', '2026-11-06T10:00:00Z')
   assert.equal(r.status, 0, r.stderr)
+  assert.equal(typeof JSON.parse(readFileSync(ledger, 'utf8')).runs[0].duration_s, 'number')
   assert.match(r.stdout, /FINDINGS: SAVED 1 finding\(s\), disposition manual_review/)
   const link = join(d, 'linked.mjs')
   symlinkSync(SCRIPT, link)

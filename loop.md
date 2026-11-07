@@ -12,6 +12,19 @@ Stopping an iteration never skips steps 5 to 7.
    - Address every unresolved review comment. Reply on the thread with what changed.
    - If CI is red, read the failing job's log, fix the cause, push.
    - If there are merge conflicts with the base branch, rebase or merge and resolve.
+   - **Bug hunt.** If the PR's head commit differs from the head of the last bug
+     hunt, run `/bughunt <PR number>` in discover mode:
+     - The last hunt's head is the `head` of the last entry in `runs` whose
+       `status` is `done`, in
+       `"$(git rev-parse --path-format=absolute --git-common-dir)/bughunt/pr-<n>/ledger.json"`.
+       A missing ledger, or no finished run, means it has never been hunted;
+       a hunt that stopped early is tried again.
+     - The hunt runs the PR's code in its reproduction sandbox. Say so in the
+       iteration's report the first time it runs on a PR.
+     - Report its disposition. When it is `changes requested` or
+       `manual review`, the reproduced findings are work for step 3 or for the
+       human: name each one in step 5.
+     - It never posts to the PR, and neither do you, unless the human asks.
 3. **Repair graph.** These instructions are the opt-in to the Workflow tool for
    this step. The graph checks, fixes, reviews, QA-audits, and stops on its own; you own
    its state and every commit.

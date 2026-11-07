@@ -1,6 +1,6 @@
 ---
 name: bughunt
-description: Hunt a pull request for real bugs with the hunt graph - map the change's impact, run the specialist hunters it calls for (logic, contract, concurrency, security, errors, regression) in parallel, challenge every finding with a blind skeptic and a referee, reproduce each confirmed one with a failing test run in a sandbox at the head and the merge-base, and report reproduced bugs apart from unverified ones, with a computed disposition. --propose and --fix also repair each reproduced bug at its root in an isolated worktree, proven by the reproduction and the suite, and (--fix) reviewed by an independent verifier with adversarial tests. It never edits your branch, merges, pushes, or comments. Use when the user says "/bughunt [PR# | branch | base..head]", "hunt this PR for bugs", "find the bugs in this PR", or asks whether a PR was reviewed for bugs.
+description: Hunt a pull request for real bugs with the hunt graph - map the change's impact, run the specialist hunters it calls for (logic, contract, concurrency, security, errors, regression) in parallel, challenge every finding with a blind skeptic and a referee, reproduce each confirmed one with a failing test run in a sandbox at the head and the merge-base, and report reproduced bugs apart from unverified ones, with a computed disposition. --propose and --fix also repair each reproduced bug at its root in an isolated worktree, proven by the reproduction and the suite, and (--fix) reviewed by an independent verifier with adversarial tests. It never edits your branch, merges, or comments, and never pushes except the one --draft-pr push you approve. Use when the user says "/bughunt [PR# | branch | base..head]", "hunt this PR for bugs", "find the bugs in this PR", or asks whether a PR was reviewed for bugs.
 ---
 
 # /bughunt
@@ -26,13 +26,14 @@ Two more modes share the same graph:
 - **`--approve F3,F5`** lets a confirmed finding with no reproduction be
   repaired too. Without it, only reproduced findings are.
 
-No mode ever touches the branch under review, merges, or pushes.
+No mode ever touches the branch under review or merges. The one push is
+`--draft-pr` (step 8), only after the human says yes.
 
 These instructions are the opt-in to the Workflow tool for this skill.
 
 ## 1. Resolve the target
 
-Usage: `/bughunt [<PR number> | <branch> | <base>..<head>] [--base <ref>] [--propose | --fix] [--approve F<n>,...]`.
+Usage: `/bughunt [<PR number> | <branch> | <base>..<head>] [--base <ref>] [--propose | --fix] [--approve F<n>,...] [--draft-pr]`.
 It reviews committed work only.
 
 ```bash
@@ -104,8 +105,9 @@ Before launching, tell the human:
   write files your user can, including the repo's linked `node_modules`, so run
   `/bughunt` only on changes you are willing to execute locally.
 
-Call the Workflow tool with `scriptPath` set to the absolute path that
-`run-script.mjs` printed, and these args:
+Note the start time first: `STARTED="$(date -u +%FT%TZ)"`. Then call the
+Workflow tool with `scriptPath` set to the absolute path that `run-script.mjs`
+printed, and these args:
 `{"repo": "<REPO>", "tree": "<D>/tree", "configDir": "<CONFIG expanded>", "stateDir": "<D>", "mode": "<discover | propose | fix>"}`.
 - **`--fix`:** also pass `"fixBranch": "bughunt/<KEY>"`.
 - **`--approve`:** also pass `"approve": ["F3", "F5"]`.
@@ -119,7 +121,7 @@ PandaStack checkout and restart Claude Code, then stop.
 
 1. Write the returned ledger, as JSON, to `$D/result.json`.
 2. Save it, checking each quote against the code:
-   `node "$CONFIG/skills/findings/findings.mjs" save "$D/ledger.json" "$D/intake.json" "$D/result.json" --repo "$D/tree"`.
+   `node "$CONFIG/skills/findings/findings.mjs" save "$D/ledger.json" "$D/intake.json" "$D/result.json" --repo "$D/tree" --started "$STARTED"`.
    It must print `FINDINGS: SAVED`; otherwise report the error.
 3. Re-run every reproduction the ledger relies on, and correct the ledger to
    what the runs show:
@@ -153,8 +155,30 @@ PandaStack checkout and restart Claude Code, then stop.
    - Give the human's options: review the branch, cherry-pick the commits onto
      their own branch, or push it and open a PR themselves.
    - List every unresolved finding with its last feedback.
+8. **`--draft-pr`** (only with `--fix`, and only when `bughunt/<KEY>` has
+   commits). First resolve the base, before asking anything:
+   - **The base:** the PR's head branch (`gh pr view <n> --json headRefName -q .headRefName`)
+     for a PR target, or the hunted branch for a `--branch` target. A range or
+     a detached HEAD has none: say `--draft-pr` does not apply, and stop.
+   - **On origin:** check `git -C "$REPO" ls-remote --exit-code origin <base>`.
+     If it fails (a local-only branch, or a PR from a fork), say the draft PR
+     cannot open there, and push nothing.
 
-Never edit the branch under review, merge, push, or post a comment. The only
-commits are the repairs in `$D/fix`, made by `evidence.mjs`. The report, the
+   This is the one outward step, so then ask the human with AskUserQuestion,
+   naming exactly what happens:
+   - pushing `bughunt/<KEY>` to `origin`;
+   - opening a draft PR from it into the reviewed branch (the PR's head branch,
+     or the branch you hunted), titled `bughunt: fixes for <label>`, with the
+     report as its body.
+
+   Only on a yes:
+   `git -C "$REPO" push -u origin "bughunt/$KEY"`, then
+   `gh pr create --draft --base <reviewed branch> --head "bughunt/$KEY" --title "bughunt: fixes for <label>" --body-file "$D/report.md"`
+   (write the report there first). Give the human the URL. Never merge it, and
+   never push anything else. On anything but a yes, push nothing and say so.
+
+Never edit the branch under review, merge, or post a comment, and never push,
+except the one `--draft-pr` push the human approves in step 8. The only commits
+are the repairs in `$D/fix`, made by `evidence.mjs`. The report, the
 reproduction tests (under `$D/repro/`), and the fix worktree stay local until
 the human decides what to do with them.
