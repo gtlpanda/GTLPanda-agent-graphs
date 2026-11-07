@@ -369,7 +369,7 @@ export function recheck(stateDir, opts = {}) {
     lines.push(`RECHECK ${f.finding_id}: ${r.verdict} (the ledger said ${f.verification_status})`)
     // test_results carry every run on file for this finding: the reproduction, and any fix runs.
     const all = written ? readEvidenceRecord(stateDir, f.finding_id).runs || r.runs : r.runs
-    const out = reconcile(ledger, { [f.finding_id]: { verdict: r.verdict, reason: r.reason, runs: all } })
+    const out = reconcile(ledger, { [f.finding_id]: { verdict: r.verdict, reason: r.reason, runs: all } }, intake.files)
     ledger = out.ledger
     writeLedger(ledgerFile, ledger)
     corrected.push(...out.corrected)
@@ -475,13 +475,17 @@ function stagedTree(dir, work) {
 // repair pass (found in review).
 const SUITE_FILE = /(^|\/)(package\.json|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|conftest\.py|go\.mod|Makefile|\.mocharc[^/]*|(jest|vitest|vite|karma|playwright|cypress|babel)\.config\.[^/]+|tsconfig[^/]*\.json)$|\.snap$|(^|\/)__snapshots__\/|(^|\/)scripts\/(test|validate)\.sh$/
 
-// The reproduction behind a finding, when one proved it. A finding the
-// evidence shows REPRODUCED must have a readable reproduction, or the check
-// fails closed; any other finding (approved by the human) is checked without
-// one. Returns {repro} | {none: true} | {error}.
+// The reproduction behind a finding, when a test proved it fails at the head
+// with its marker: REPRODUCED, or PREEXISTING (failing at the merge-base too),
+// which the graph counts as reproduced when the change wrote the finding's
+// lines. A missed PREEXISTING here once let such a repair skip the proof and
+// pass on the suite alone (found by the first live benchmark run). Such a
+// finding must have a readable reproduction, or the check fails closed; any
+// other finding (approved by the human) is checked without one. Returns
+// {repro} | {none: true} | {error}.
 function reproFor(stateDir, id) {
   const rec = readEvidenceRecord(stateDir, id)
-  if (rec.verdict !== 'REPRODUCED') return { none: true }
+  if (rec.verdict !== 'REPRODUCED' && rec.verdict !== 'PREEXISTING') return { none: true }
   try {
     const spec = JSON.parse(readFileSync(join(stateDir, 'repro', id, 'repro.json'), 'utf8'))
     if (testFileProblems(spec.test_file).length || spec.test_file !== rec.test_file) throw new Error('its repro.json no longer names the test that reproduced it')

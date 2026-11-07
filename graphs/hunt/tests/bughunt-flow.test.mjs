@@ -306,8 +306,10 @@ await test('a referee that returns nothing leaves contested findings contested, 
   assert.equal(f1(result).verification_status, 'contested')
   assert.ok(logs.some(l => /advisor failed: overloaded; 1 finding\(s\) stay contested/.test(l)))
 })
+// A finding outside the change's hunks (INTAKE's src/cart.js hunk is 10-14).
+const OLD = () => [CAND({ line_range: [40, 41], evidence: [{ file: 'src/cart.js', line: 40, quote: 'old code' }] })]
 await test('"not introduced by this change" goes to the referee, but only the reproduction can make it pre-existing', async () => {
-  const { result, calls } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed', 0, { introduced_by_change: 'no' })], advisor: [REFEREE(true, { introduced_by_change: false })], reproducer: [WROTE()], runner: [RAN('PREEXISTING', 'F1', 'fails with its marker at the merge-base too')] }, ARGS())
+  const { result, calls } = await run(fn, { ...ONE(OLD()), skeptic: [SKEP('confirmed', 0, { introduced_by_change: 'no' })], advisor: [REFEREE(true, { introduced_by_change: false })], reproducer: [WROTE()], runner: [RAN('PREEXISTING', 'F1', 'fails with its marker at the merge-base too')] }, ARGS())
   assert.ok(calls.some(c => c.agentType === 'reproducer'), 'the referee\'s view does not skip the experiment')
   assert.deepEqual(f1(result).history.filter(h => h.field === 'verification_status').map(h => h.to), ['contested', 'confirmed', 'preexisting'])
   assert.match(f1(result).history.find(h => h.field === 'introduced_by_change').why, /the reproduction decides/)
@@ -352,7 +354,7 @@ await test('the runner gate reads only the last line: wrong id, garbage, or no l
 })
 await test('PREEXISTING, NOT_REPRODUCED, and ERROR map to their statuses; ERROR keeps static evidence only', async () => {
   for (const [verdict, status] of [['PREEXISTING', 'preexisting'], ['NOT_REPRODUCED', 'not_reproduced'], ['ERROR', 'confirmed']]) {
-    const { result } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [RAN(verdict, 'F1', 'why')] }, ARGS())
+    const { result } = await run(fn, { ...ONE(OLD()), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [RAN(verdict, 'F1', 'why')] }, ARGS())
     assert.equal(f1(result).verification_status, status, verdict)
     assert.equal(f1(result).reproduction_artifact.verdict, verdict)
     assert.ok(f1(result).confidence <= 79, 'only a reproduced finding claims more than 79')
@@ -562,4 +564,12 @@ await test('with budget to spare, or none set, every stage runs', async () => {
   const { result } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [RAN('REPRODUCED')] }, ARGS(), { budget: roomy })
   assert.equal(f1(result).verification_status, 'reproduced')
   assert.doesNotMatch(result.reason, /budget/)
+})
+await test('a reproduction failing at both commits is the change\'s bug when the change wrote those lines, and pre-existing only when it did not', async () => {
+  let { result } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [RAN('PREEXISTING', 'F1', 'fails with its marker at the merge-base too')] }, ARGS())
+  assert.equal(f1(result).verification_status, 'reproduced', 'lines 10-12 are inside the change\'s hunk 10-14')
+  assert.equal(f1(result).confidence, 90)
+  assert.match(f1(result).history.at(-1).why, /the change wrote these lines/)
+  ;({ result } = await run(fn, { ...ONE(OLD()), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [RAN('PREEXISTING', 'F1', 'fails with its marker at the merge-base too')] }, ARGS()))
+  assert.equal(f1(result).verification_status, 'preexisting', 'lines 40-41 are outside every hunk')
 })

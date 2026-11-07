@@ -30,7 +30,9 @@ in:
 - **`/loop`** runs it in discover mode whenever the PR's head has changed since
   the last hunt, and reports. It never posts to the PR.
 
-Still planned: the live benchmark.
+**Live-run** on the benchmark below (2026-11-07). All 6 planted bugs were
+found and reproduced, there were no false positives on the 4 bug-free changes,
+and discovery cost $9.64 for 10 cases.
 
 ```
 intake.mjs (the session, deterministic) → the commits, files, hunks, routing signals, analysis worktree
@@ -341,6 +343,48 @@ ledger.
 - **Quotes are checked.** `findings.mjs save --repo` checks each quoted line
   against the file at the head. A quote that is not there shows as a warning in
   the report.
+
+## Benchmark
+
+`scripts/bench-bughunt.sh <out dir> [--cases a,b] [--fix a,b]` runs it live.
+It is opt-in, costs real money, and is never part of `scripts/test.sh`.
+- **The fixtures.** `bench/make-fixtures.mjs` builds 10 small Node repos, each
+  a base commit on `main` and a change on `pr` with an `npm test` suite:
+  - 6 planted bugs (off by one, boundary, broken contract, missing await,
+    swallowed error, path traversal);
+  - 1 change that looks wrong but is correct;
+  - 3 clean changes (a refactor, docs, test-only).
+- **The run.** `bench/run-bench.mjs` runs one fresh headless
+  `/bughunt pr --base main` per case, and `--fix` for the cases you name. It
+  scores each ledger against `<case>.truth.json` with `findings.mjs metrics`.
+- `tests/bench.test.mjs` checks every fixture and the runner's scoring offline.
+
+The second live run, after the fixes the first one prompted (results in
+`bench/results-2026-11-07.json`):
+
+Discovery is scored over the 10 discover runs only; a fix run hunts its case a
+second time.
+
+| Measure | Result |
+|---|---|
+| Planted bugs found | 6 of 6 (recall 1.0), every one reproduced by a failing test |
+| False positives on the 4 bug-free changes | 0 (the misleading one included) |
+| Precision against the truth files | 0.70: 7 of 10 confirmed findings |
+| The 3 others | the same pattern each time: the PR rewrote its own test to hide the bug. Real defects a reviewer should flag, absent from the truth files, never hallucinated |
+| One more match | in `errors-swallowed`, a second real bug (`portOf('null')` throws), 4 lines from the planted one, counts as a match through the 5-line window |
+| Recheck corrections | 0: the session's re-run agreed with the graph every time |
+| Fix mode, `boundary-discount` | fixed, verified (three-arm proof, suite, fix verifier, an adversarial test), committed on `bughunt/<key>`; `pr` untouched |
+| Fix mode, `logic-off-by-one` | unresolved after 2 attempts: the PR's own test asserts the buggy result, so any correct fix breaks the suite, and a repair may never edit an existing test |
+| Cost | $9.64 for the 10 discover runs ($0.65 to $1.22 each), $1.61 per true bug found; $12.01 for all 12 runs |
+| Time | 16.5 minutes for discovery, 47 to 135 seconds per case; 22.6 minutes for all 12 runs |
+
+**Limits.**
+- The fixtures are tiny, self-authored JavaScript changes, so they show the
+  graph works end to end, not how it does on a real codebase.
+- A finding within 5 lines of a true bug counts as a match, so a distinct
+  nearby bug can count as a hit (once in `errors-swallowed`).
+- A fix is blocked whenever the PR's own test asserts the bug. The hunt
+  reports that test as a finding, but only a human can change it.
 
 ## Budgets and observability
 

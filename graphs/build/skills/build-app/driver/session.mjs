@@ -38,7 +38,7 @@ export function sessionSettings(hooksDir) {
 
 // What a slice session is told besides the /dev command. The user's own
 // CLAUDE.md may ask for plan mode, questions, or worktrees; nobody is there.
-export const SYSTEM_PROMPT = 'UNATTENDED BUILD (PandaStack /build-app). No human is present. Run the /dev command you were given exactly, and stop when it reports. Never enter plan mode, never ask a question, never push, never switch branches. Where user-level instructions conflict (plan mode, asking before acting, worktree isolation, retro or changelog updates), the /dev skill wins in this session.'
+export const SYSTEM_PROMPT = 'UNATTENDED BUILD (PandaStack /build-app). No human is present. Do exactly what you were given (a /dev command, or numbered steps), and stop when it reports. Never enter plan mode, never ask a question, never push, never switch branches. Where user-level instructions conflict (plan mode, asking before acting, worktree isolation, retro or changelog updates), the given command or steps win in this session.'
 
 // Running sessions, so stopping the driver stops them instead of orphaning them.
 const sessions = new Set()

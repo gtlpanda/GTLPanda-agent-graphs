@@ -216,6 +216,7 @@ rule graphs/hunt/agents/runner.md 'character for character' 'the runner never ch
 rule core/agents/advisor.md '## Refereeing a finding' 'the referee settles what the bughunt skeptic could not'
 rule graphs/hunt/skills/bughunt/SKILL.md 'evidence.mjs" recheck' 'the session re-runs every reproduction before the report'
 rule loop.md 'run `/bughunt <PR number>` in discover mode' 'every PR the loop tends gets a bug hunt when its head changes'
+rule graphs/hunt/skills/bughunt/SKILL.md 'Never use ScheduleWakeup or sleep to wait for it' 'a bughunt session waits for the workflow notification, never a long wakeup'
 
 # ---- Required files ----
 for f in install.sh README.md CLAUDE.md settings.json loop.md .gitignore .githooks/pre-commit; do

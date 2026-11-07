@@ -113,6 +113,11 @@ printed, and these args:
 - **`--approve`:** also pass `"approve": ["F3", "F5"]`.
 Do not pass the intake or the findings in args; the run script carries them.
 
+The workflow runs in the background and notifies you when it completes. Wait
+for that notification. Never use ScheduleWakeup or sleep to wait for it: a
+benchmark session once scheduled a 30-minute wakeup for a hunt that finished
+in 3 minutes.
+
 If the run reports an agent type that is not found, the hunt agents are not
 installed in this session. Tell the human to run `./install.sh` in their
 PandaStack checkout and restart Claude Code, then stop.

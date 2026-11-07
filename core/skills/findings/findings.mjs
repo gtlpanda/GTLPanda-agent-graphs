@@ -74,15 +74,23 @@ function similarTitles(a, b) {
   return shared / (A.size + B.size - shared) >= 0.5
 }
 // One bug reported twice: the same file, and either lines within NEAR_LINES
-// with the same category or a similar title, or (lines moved by a new head)
-// the same title, the same category, and a quote in common. The same generic
-// title far apart in one file is two bugs.
+// with the same category or a similar title; or overlapping lines that quote
+// the same line of code (three lenses once filed one path traversal three
+// times, in three wordings); or (lines moved by a new head) the same title,
+// the same category, and a quote in common. The same generic title far apart
+// in one file is two bugs.
 function sameFinding(a, b) {
   if (a.file_path !== b.file_path) return false
+  const quote = e => String(e.quote).replace(/\s+/g, ' ').trim()
+  // A generic line (`}`, `return x`) is no evidence of one bug: the shared
+  // quote must carry at least 16 letters or digits.
+  const substantive = q => q.replace(/[^A-Za-z0-9]/g, '').length >= 16
+  const shares = test => (a.evidence || []).some(e => (b.evidence || []).some(x => quote(x) && quote(x) === quote(e) && test(quote(x))))
+  const sharedQuote = shares(() => true)
+  const overlap = a.line_range[0] <= b.line_range[1] && b.line_range[0] <= a.line_range[1]
+  if (overlap && shares(substantive)) return true
   const near = a.line_range[0] <= b.line_range[1] + NEAR_LINES && b.line_range[0] <= a.line_range[1] + NEAR_LINES
   if (near) return a.bug_category === b.bug_category || similarTitles(a.title, b.title)
-  const quote = e => String(e.quote).replace(/\s+/g, ' ').trim()
-  const sharedQuote = (a.evidence || []).some(e => (b.evidence || []).some(x => quote(x) === quote(e)))
   return normTitle(a.title) === normTitle(b.title) && a.bug_category === b.bug_category && sharedQuote
 }
 function nextFindingId(findings) {
@@ -124,6 +132,12 @@ function mergeFindings(known, candidates, head) {
     }
     if (!match.sources.includes(c.source_agent)) match.sources.push(c.source_agent)
     if (seenThisRun.has(match.finding_id)) match.duplicates += 1
+    // A merged report that says something different keeps its title and its
+    // evidence on the finding, so two concerns on one statement are never lost.
+    if (!similarTitles(match.title, c.title) && normTitle(match.title) !== normTitle(c.title)) {
+      match.also_reported_as = [...(match.also_reported_as || []), `${c.title} (${c.bug_category})`].filter((t, i, all) => all.indexOf(t) === i)
+      for (const e of c.evidence) if (match.evidence.length < 6 && !match.evidence.some(x => x.file === e.file && x.line === e.line)) match.evidence.push({ ...e })
+    }
     seenThisRun.add(match.finding_id)
     if (match.head !== head) {
       Object.assign(match, {
@@ -145,6 +159,24 @@ function mergeFindings(known, candidates, head) {
   return { findings, added, merged }
 }
 
+// Whether the change wrote the finding's lines: its file is new, or one of the
+// file's head-side hunks (intake's `files`) overlaps the finding's range
+// exactly (no slack: an old bug next to an unrelated edit stays old). A
+// reproduction that also fails at the merge-base is a pre-existing bug only
+// when the change left these lines alone; when it wrote them, the behavior the
+// test asserts is the change's own (a feature the base never had). The first
+// live benchmark run called a brand-new discount threshold "pre-existing".
+// Limits: a renamed file reads as new (intake runs without rename detection),
+// and a cosmetic edit to a line holding an old bug reads as written.
+function touchedByChange(f, files) {
+  const file = (Array.isArray(files) ? files : []).find(x => x && x.path === f.file_path)
+  if (!file) return false
+  if (file.status === 'A') return true
+  return (file.hunks || []).some(([s, e]) => s <= f.line_range[1] && f.line_range[0] <= e)
+}
+// The one note both the workflow and recheck record when that decides it.
+const WROTE_THESE_LINES = 'it fails at the merge-base too, but the change wrote these lines, so the behavior the test asserts is the change\'s own, not an old bug'
+
 // Moves one status field, or throws on a move the table does not allow.
 function transition(f, field, to, why) {
   const from = f[field]
@@ -159,7 +191,7 @@ function transition(f, field, to, why) {
 
 export {
   SEVERITIES, BLOCKING, LENSES, CONFIDENCE_FLOOR, UNREPRODUCED_CAP, REPRODUCED_CONFIDENCE, MOVES,
-  candidateProblems, sameFinding, mergeFindings, transition,
+  candidateProblems, sameFinding, mergeFindings, transition, touchedByChange, WROTE_THESE_LINES,
 }
 
 // ---------- the ledger ----------
@@ -252,13 +284,15 @@ const FROM_EVIDENCE = { REPRODUCED: 'reproduced', PREEXISTING: 'preexisting', NO
 const REPRO_STATUSES = ['confirmed', 'reproduced', 'preexisting', 'not_reproduced']
 
 // The ledger corrected to what the runs show. `evidence` is {F<n>: {verdict,
-// reason, runs}} from evidence.mjs. Execution outranks every agent here: a
+// reason, runs}} from evidence.mjs; `files` is intake's changed files, which
+// decide whether a test failing at both commits means pre-existing (the change
+// left the lines alone) or reproduced (the change wrote them). Execution outranks every agent here: a
 // status that disagrees with the runs is moved to match them (outside the
 // MOVES table, and recorded in history), test_results are replaced by the runs,
 // and confidence follows (at least 90 when reproduced, at most 79 otherwise).
 // Findings the skeptic or referee settled (refuted, contested) are never
 // touched. Returns {ledger, corrected: [{finding_id, from, to}]}.
-export function reconcile(ledger, evidence) {
+export function reconcile(ledger, evidence, files = null) {
   const corrected = []
   const findings = ledger.findings.map(f => {
     const e = evidence[f.finding_id]
@@ -266,9 +300,11 @@ export function reconcile(ledger, evidence) {
     const g = { ...f, history: [...f.history] }
     g.test_results = (e.runs || []).map(r => ({ kind: r.kind || 'repro', arm: r.arm, sha: r.sha, exit: r.exit, timedOut: !!r.timedOut, marker: !!r.marker, error: r.error || null }))
     g.reproduction_artifact = { ...(f.reproduction_artifact || {}), verdict: e.verdict, reason: e.reason }
-    const to = FROM_EVIDENCE[e.verdict]
+    const wrote = e.verdict === 'PREEXISTING' && touchedByChange(f, files)
+    const to = wrote ? 'reproduced' : FROM_EVIDENCE[e.verdict]
+    if (wrote) g.reproduction_artifact.reason = `${e.reason}; ${WROTE_THESE_LINES}`
     if (to && to !== f.verification_status) {
-      g.history.push({ field: 'verification_status', from: f.verification_status, to, why: `evidence recheck: ${e.reason}` })
+      g.history.push({ field: 'verification_status', from: f.verification_status, to, why: `evidence recheck: ${wrote ? g.reproduction_artifact.reason : e.reason}` })
       g.verification_status = to
       corrected.push({ finding_id: f.finding_id, from: f.verification_status, to })
     }
@@ -414,6 +450,7 @@ export function renderReport(ledger, evidence = {}) {
     L.push(`- **Observable:** ${f.failure_scenario.observable}`)
     L.push(`- **Expected:** ${f.expected_behavior}`, `- **Actual:** ${f.actual_behavior}`)
     for (const e of f.evidence) L.push(`- **Evidence:** \`${e.file}:${e.line}\` \`${String(e.quote).replace(/`/g, "'").slice(0, 160)}\``)
+    if (f.also_reported_as && f.also_reported_as.length) L.push(`- **Also reported as:** ${f.also_reported_as.join('; ')}`)
     if (f.evidence_missing && f.evidence_missing.length) L.push(`- **Warning:** quoted evidence not found at ${f.evidence_missing.join(', ')}`)
     if (f.root_cause) L.push(`- **Root cause:** ${f.root_cause}`)
     const fa = f.fix_artifact

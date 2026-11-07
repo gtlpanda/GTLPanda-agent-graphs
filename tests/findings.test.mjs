@@ -112,6 +112,24 @@ await test('same file but far apart and differently titled are two findings; a d
   assert.equal(sameFinding(CAND(), CAND({ line_range: [16, 18], title: 'Unrelated overflow in tax' })), true, 'near and the same category')
   assert.equal(sameFinding(CAND(), CAND({ line_range: [16, 18], bug_category: 'errors', title: 'Unrelated overflow in tax' })), false)
 })
+await test('overlapping reports that quote the same line are one bug, whatever their category or wording; different code is not', () => {
+  const q = [{ file: 'src/files.js', line: 5, quote: "return readFileSync(join(root, name), 'utf8')" }]
+  const a = CAND({ file_path: 'src/files.js', line_range: [4, 5], bug_category: 'security', title: 'Path traversal through name', evidence: q })
+  const b = CAND({ file_path: 'src/files.js', line_range: [3, 6], bug_category: 'regression', title: 'Allowlist removal drops the root guarantee', evidence: q })
+  assert.equal(sameFinding(a, b), true)
+  assert.equal(sameFinding(a, { ...b, evidence: [{ file: 'src/files.js', line: 3, quote: 'export function readPublic(root, name) {' }] }), false, 'no shared quote, other category, other wording')
+  assert.equal(sameFinding(a, { ...b, line_range: [7, 9] }), false, 'the same quote but no overlapping lines')
+  const brace = [{ file: 'src/files.js', line: 5, quote: '}' }]
+  assert.equal(sameFinding({ ...a, evidence: brace }, { ...b, evidence: brace }), false, 'a generic line like } is no evidence of one bug')
+})
+await test('a merged report that says something different keeps its title and evidence on the finding', () => {
+  const a = CAND({ file_path: 'src/files.js', line_range: [5, 5], bug_category: 'security', title: 'Path traversal through name', evidence: [{ file: 'src/files.js', line: 5, quote: "return readFileSync(join(root, name), 'utf8')" }] })
+  const b = { ...a, bug_category: 'errors', title: 'Unhandled ENOENT crash on a missing file', source_agent: 'hunter:errors', evidence: [...a.evidence, { file: 'src/api.js', line: 9, quote: 'readPublic(root, req.name)' }] }
+  const f = mergeFindings([], [a, b], H1).findings
+  assert.equal(f.length, 1)
+  assert.deepEqual(f[0].also_reported_as, ['Unhandled ENOENT crash on a missing file (errors)'])
+  assert.ok(f[0].evidence.some(e => e.file === 'src/api.js'), 'the second report\'s own evidence is kept')
+})
 await test('merging keeps the higher severity and confidence', () => {
   const first = mergeFindings([], [CAND({ severity: 'MEDIUM', confidence: 65 })], H1).findings
   const next = mergeFindings(first, [CAND({ severity: 'CRITICAL', confidence: 70, source_agent: 'hunter:security' })], H1)
@@ -230,6 +248,17 @@ await test('reconcile moves a status to what the runs show, fills test_results f
   assert.equal(l.findings[0].verification_status, 'not_reproduced', 'the input ledger is not mutated')
 })
 
+await test('reconcile: PREEXISTING on lines the change wrote is reproduced; on untouched lines, or with no file list, pre-existing', () => {
+  const l = ledgerWith([F('confirmed', 'HIGH', { line_range: [10, 12] }), F('confirmed', 'HIGH', { finding_id: 'F2', file_path: 'src/cart.js', line_range: [80, 81] }), F('confirmed', 'HIGH', { finding_id: 'F3', file_path: 'src/new.js', line_range: [1, 1] })])
+  const files = [{ path: 'src/cart.js', status: 'M', hunks: [[9, 14]] }, { path: 'src/new.js', status: 'A', hunks: [[1, 20]] }]
+  const ev = { verdict: 'PREEXISTING', reason: 'r', runs: [] }
+  const out = reconcile(l, { F1: ev, F2: ev, F3: ev }, files)
+  assert.deepEqual(out.ledger.findings.map(f => f.verification_status), ['reproduced', 'preexisting', 'reproduced'])
+  assert.equal(reconcile(l, { F1: ev }).ledger.findings[0].verification_status, 'preexisting', 'without intake\'s files, nothing is assumed touched')
+  assert.match(out.ledger.findings[0].reproduction_artifact.reason, /the change wrote these lines/, 'the upgrade says why, as the workflow does')
+  const near = ledgerWith([F('confirmed', 'HIGH', { line_range: [16, 17] })])
+  assert.equal(reconcile(near, { F1: ev }, files).ledger.findings[0].verification_status, 'preexisting', 'an old bug 2 lines from an unrelated edit stays old')
+})
 await test('reconcileFix takes back a committed repair that no longer proves out, and leaves the rest alone', () => {
   const l = ledgerWith([
     F('reproduced', 'HIGH', { fix_status: 'verified', fix_artifact: { commit: 'a'.repeat(40) } }),
