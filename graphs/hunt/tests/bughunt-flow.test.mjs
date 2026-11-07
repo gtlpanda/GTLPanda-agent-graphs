@@ -5,6 +5,8 @@ import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+const require_ = createRequire(import.meta.url)
 import { test, load, run, agentField, REPO } from '../../../scripts/workflow-harness.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -159,7 +161,7 @@ await test('the hunter prompt names its lens file, the tree, the impact focus, a
   const { calls } = await go({ 'impact-mapper': [IMPACT()], hunter: huntersBy({ logic: HUNT('logic'), regression: HUNT('regression'), security: HUNT('security') }) }, ARGS())
   const p = calls.find(c => c.label === 'hunt: security').prompt
   assert.match(p, /\/home\/u\/\.claude\/skills\/bug-lenses\/lenses\/security\.md/)
-  assert.match(p, /cd there first, read only\): \/tmp\/repo\/\.git\/bughunt\/pr-7\/tree/)
+  assert.match(p, /cd there first, read only\): '\/tmp\/repo\/\.git\/bughunt\/pr-7\/tree'/)
   assert.match(p, /src\/cart\.js:18/, 'the impact map\'s focus for this lens')
   assert.match(p, /total is never negative/)
   assert.equal((p.match(/<\/untrusted-pr-description>/g) || []).length, 1, 'the description cannot close its own fence')
@@ -304,10 +306,19 @@ await test('a referee that returns nothing leaves contested findings contested, 
   assert.equal(f1(result).verification_status, 'contested')
   assert.ok(logs.some(l => /advisor failed: overloaded; 1 finding\(s\) stay contested/.test(l)))
 })
-await test('confirmed but "not introduced by this change": the referee settles it, and it can mark it pre-existing', async () => {
-  const { result, calls } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed', 0, { introduced_by_change: 'no' })], advisor: [REFEREE(true, { introduced_by_change: false })] }, ARGS())
-  assert.deepEqual(f1(result).history.map(h => h.to), ['contested', 'confirmed', 'preexisting'])
-  assert.ok(!calls.some(c => c.agentType === 'reproducer'), 'a pre-existing finding is not reproduced')
+await test('"not introduced by this change" goes to the referee, but only the reproduction can make it pre-existing', async () => {
+  const { result, calls } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed', 0, { introduced_by_change: 'no' })], advisor: [REFEREE(true, { introduced_by_change: false })], reproducer: [WROTE()], runner: [RAN('PREEXISTING', 'F1', 'fails with its marker at the merge-base too')] }, ARGS())
+  assert.ok(calls.some(c => c.agentType === 'reproducer'), 'the referee\'s view does not skip the experiment')
+  assert.deepEqual(f1(result).history.filter(h => h.field === 'verification_status').map(h => h.to), ['contested', 'confirmed', 'preexisting'])
+  assert.match(f1(result).history.find(h => h.field === 'introduced_by_change').why, /the reproduction decides/)
+})
+await test('a finding an earlier run left contested is refereed again, and no skeptic runs for it', async () => {
+  const first = await run(fn, { ...ONE(), skeptic: [SKEP('uncertain')], advisor: [{ throws: 'overloaded' }] }, ARGS())
+  assert.equal(f1(first.result).verification_status, 'contested')
+  const { result, calls } = await run(fn, { ...ONE(), advisor: [REFEREE(false)] }, ARGS({ prior: first.result.findings }))
+  assert.ok(!calls.some(c => c.agentType === 'skeptic'))
+  assert.match(calls.find(c => c.agentType === 'advisor').prompt, /Return one verdict per finding_id: F1\./)
+  assert.equal(f1(result).verification_status, 'refuted')
 })
 await test('the referee\'s severity replaces the hunter\'s, with history', async () => {
   const { result } = await run(fn, { ...ONE(), skeptic: [SKEP('uncertain')], advisor: [REFEREE(true, { severity: 'LOW' })], reproducer: [{ written: false, test_file: '', how_it_fails: '', reason: 'r' }] }, ARGS())
@@ -319,8 +330,18 @@ await test('a skeptic naming another live finding as the same bug: refuted as it
   const { result } = await run(fn, { ...ONE(two), skeptic: [SKEP('confirmed'), SKEP('confirmed', 0, { duplicate_of: 'F1' })], reproducer: [{ written: false, test_file: '', how_it_fails: '', reason: 'r' }] }, ARGS())
   const f2 = result.findings.find(f => f.finding_id === 'F2')
   assert.equal(f2.verification_status, 'refuted')
-  assert.match(f2.history[0].why, /^duplicate of F1/)
+  assert.match(f2.history.at(-1).why, /^duplicate of F1/)
   assert.equal(f1(result).duplicates, 1)
+})
+await test('a duplicate is folded only into a confirmed twin, and the twin keeps the more severe rating', async () => {
+  // F2 is the CRITICAL one; F1 (HIGH) is confirmed; the skeptic says F2 duplicates F1.
+  const two = [CAND(), CAND({ file_path: 'src/b.js', title: 'Same bug seen from the API', severity: 'CRITICAL' })]
+  let { result } = await run(fn, { ...ONE(two), skeptic: [SKEP('confirmed', 0, { duplicate_of: 'F2' }), SKEP('confirmed')], reproducer: [{ written: false, test_file: '', how_it_fails: '', reason: 'r' }] }, ARGS())
+  const crit = result.findings.find(f => f.severity === 'CRITICAL' && f.verification_status === 'confirmed')
+  assert.ok(crit, 'the critical twin survives')
+  // A twin the skeptic refutes takes nothing with it: the named duplicate stays live and goes to the referee.
+  ;({ result } = await run(fn, { ...ONE(two), skeptic: [SKEP('refuted', 90, { duplicate_of: 'F2' }), SKEP('refuted', 95)], advisor: [REFEREE(true)], reproducer: [{ written: false, test_file: '', how_it_fails: '', reason: 'r' }, { written: false, test_file: '', how_it_fails: '', reason: 'r' }] }, ARGS()))
+  assert.deepEqual(result.findings.map(f => f.verification_status), ['confirmed', 'confirmed'])
 })
 await test('the runner gate reads only the last line: wrong id, garbage, or no line leaves the finding confirmed with the reason', async () => {
   for (const out of [RAN('REPRODUCED', 'F2'), { output: 'All good, reproduced!', exit_code: 0 }, { output: 'EVIDENCE: REPRODUCED F1\nextra line', exit_code: 0 }, { output: 'EVIDENCE: MAYBE F1', exit_code: 0 }]) {
@@ -340,9 +361,10 @@ await test('PREEXISTING, NOT_REPRODUCED, and ERROR map to their statuses; ERROR 
 await test('the runner gets exactly the evidence.mjs command, with the state dir and timeout and nothing an agent chose', async () => {
   const { calls } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE('tests/$(rm -rf ~).test.js')], runner: [RAN('ERROR')] }, ARGS({ evidenceTimeoutMs: 5000 }))
   const p = calls.find(c => c.agentType === 'runner').prompt
-  assert.equal(p, 'Run exactly this command, once, and copy its full output verbatim into output:\nnode /home/u/.claude/skills/bughunt/evidence.mjs repro /tmp/repo/.git/bughunt/pr-7 F1 --timeout-ms 5000')
+  assert.equal(p, "Run exactly this command, once, and copy its full output verbatim into output:\nnode '/home/u/.claude/skills/bughunt/evidence.mjs' repro '/tmp/repo/.git/bughunt/pr-7' F1 --timeout-ms 5000")
   const rp = calls.find(c => c.agentType === 'reproducer').prompt
   assert.match(rp, /BUGHUNT-F1/)
+  assert.match(rp, /<confirmation-notes>\nskeptic: src\/api\.js:4 -> src\/cart\.js:11\n<\/confirmation-notes>/, 'the skeptic\'s text is fenced')
   assert.match(rp, /\/tmp\/repo\/\.git\/bughunt\/pr-7\/repro\/F1\/repro\.json/)
 })
 await test('maxRepros reproduces the most severe confirmed findings and logs the rest', async () => {
@@ -367,4 +389,11 @@ await test('every verification node pins its model and effort to the agent files
     assert.equal(c.model, agentField(c.agentType, 'model'), `${c.agentType}: model drift`)
     assert.equal(c.effort, agentField(c.agentType, 'effort'), `${c.agentType}: effort drift`)
   }
+})
+await test('paths with spaces and quotes are single-quoted in every command an agent is told to run', async () => {
+  const { calls } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE()], runner: [RAN('REPRODUCED')] }, ARGS({ stateDir: "/home/First O'Last/repo/.git/bughunt/pr-7", configDir: '/home/First Last/.claude' }))
+  const p = calls.find(c => c.agentType === 'runner').prompt.split('\n')[1]
+  assert.equal(p, "node '/home/First Last/.claude/skills/bughunt/evidence.mjs' repro '/home/First O'\\''Last/repo/.git/bughunt/pr-7' F1")
+  const argv = require_('child_process').spawnSync('sh', ['-c', `printf '%s\\n' ${p.slice('node '.length)}`], { encoding: 'utf8' }).stdout.trim().split('\n')
+  assert.deepEqual(argv, ['/home/First Last/.claude/skills/bughunt/evidence.mjs', 'repro', "/home/First O'Last/repo/.git/bughunt/pr-7", 'F1'], 'a shell splits it into exactly these arguments')
 })

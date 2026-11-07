@@ -37,9 +37,13 @@ config. Never install anything.
   applies the discount twice')`. A failure without the marker counts as a
   failure for another reason, and the reproduction is rejected.
 - **Make it pass once the bug is fixed.** Nothing else in it may fail.
-- **Make it deterministic.** No network (it is blocked), no real clock or
+- **Make it deterministic.** No outside network (it is blocked; loopback
+  works, so a test may start a local server on port 0), no real clock or
   randomness without pinning, no sleeps, no shared state, and no files outside
   a temp directory it creates.
+- **Use what the repo already has.** Use its installed test framework, and
+  for Python and Go, the repo's own test setup. A tool that is not installed
+  makes the run an ERROR, not a reproduction.
 - **Make it fast.** It has a timeout.
 
 ## Checking your test

@@ -1083,6 +1083,49 @@ it; 21 of 21 are caught.
 - `mergeFindings` copied each finding but shared its `history` array with the input, so a status
   move in the workflow also wrote into the caller's objects.
 
+**PR review (#28).** Two independent reviewers: a line-level reviewer and a behavioral QA auditor,
+both reproducing in throwaway repos. They found 5 HIGH, 7 MEDIUM, and 4 LOW, which overlap to 16
+distinct issues. All are fixed and tested:
+- **Recheck:** a claimed `reproduced` with no `repro.json` was never re-run, so a fabricated runner
+  line survived. Now a claimed run with no written reproduction falls back to confirmed.
+- **Crashes:** one throw in a run (a PR file where the test's directory should be) aborted the whole
+  recheck before anything was written. Each run is now caught, and recheck writes the ledger after
+  each finding.
+- **Failures counted against the finding:** a missing runner (no pytest, no go) or a test failing
+  without its marker became `NOT_REPRODUCED`, which demoted real bugs. Now only a test that passes at
+  the head is `NOT_REPRODUCED`; the rest is ERROR, which keeps static evidence. Missing tools are
+  probed, and exit 126 or 127 means the runner never started.
+- **Network:** loopback was down inside `unshare -rn`, so any local-server test failed. It is now
+  brought up inside a fresh PID namespace (measured: 200 inside, `ENETUNREACH` without).
+- **Processes:** a detached grandchild survived every run. The namespace now kills it on exit
+  (measured: 0 left versus 1 without), and output goes to a file, not a pipe.
+- **Symlinks:** a symlink the PR commits in the test's path made `evidence.mjs` itself write outside
+  the state dir. Every part of the path is now checked in the export.
+- **Flags:** a test path starting with `-` reached the runner as a flag (`--import=...`).
+- **Quoting:** paths with spaces broke every evidence command an agent was told to run. They are now
+  single-quoted, and a shell test proves the split.
+- **Stale state:** reproductions, test results, and fixes from an old head carried over to a
+  re-found finding, and the report showed old-head runs. A new head now clears them, and the report
+  shows only runs from this head and this finding's own test.
+- **Environment:** the deny-list missed `DATABASE_URL`, `SENTRY_DSN`, `STRIPE_KEY`, `KUBECONFIG`, and
+  others. It is now an allowlist.
+- **Duplicates:** a duplicate verdict could refute a HIGH finding into a twin that was later refuted,
+  or keep the lower severity. It now folds only into a confirmed twin, which keeps the higher rating.
+- **The referee:** its "not introduced" view skipped the reproduction. Only the test decides now.
+- **Re-runs:** a finding left contested by a failed referee was never refereed again.
+- **Unfenced text:** the confirmation notes reached the reproducer unfenced.
+- **Monorepos:** the runner read only the root `package.json`. It now uses the test's nearest
+  package.
+- **Report wording:** it said "not attempted" for an attempted reproduction.
+
+A third mutation run over the fixes: 17 of 17 caught, after one more test that forces a throw inside
+a run.
+
+My own mistake while running it: a cleanup step's `pkill -f <name>` matched the shell that carried
+that name in its command line and killed it. That orphaned one mutation run, which then raced a
+second one and left three mutations in `evidence.mjs`. A site-by-site check found all three, and I
+restored them before any commit (tasks/lessons.md).
+
 **Mutation run.** 26 mutations across the workflow's routing, `evidence.mjs`'s verdicts, guards, and
 sandbox, and `reconcile`; 24 were caught at first. The two survivors were real test gaps:
 - Every token in the sandbox test was also caught by a prefix rule, so dropping `TOKEN` from the
@@ -1092,12 +1135,12 @@ sandbox, and `reconcile`; 24 were caught at first. The two survivors were real t
 26 of 26 are caught now.
 
 **Stats.**
-- 34 new tests:
-  - 17 evidence tests that run real `node --test` processes in throwaway repos (every verdict, a
-    timeout, bad paths, a symlinked test, a modified tree, secrets, the network, no orphans, the
-    repo untouched, recheck);
-  - 16 routing tests;
-  - 1 reconcile test.
-- The suite is 494 workflow tests, 0 failed.
+- 45 new tests:
+  - 23 evidence tests that run real `node --test` processes in throwaway repos (every verdict, a
+    timeout, bad paths, symlinks, a modified tree, a forced throw, secrets, the network, loopback,
+    no orphans, the repo untouched, recheck);
+  - 19 routing tests;
+  - 3 reconcile and report tests.
+- The suite is 505 workflow tests, 0 failed.
 - 3 new agents, 6 new validate.sh rules, and an advisor section.
 - The workflow test harness gained a real `pipeline()`.

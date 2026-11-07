@@ -80,8 +80,9 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
   - **confirmed:** it names an execution path, and it does not say the bug
     predates the change;
   - **refuted:** it refutes above 67 on a finding below HIGH, or names another
-    live finding as the same bug (refuted as its duplicate, with the other
-    gaining the source);
+    finding as the same bug and that twin ends up confirmed. Then it is folded
+    in as a duplicate: the twin gains its source and keeps the more severe
+    rating. A twin that is itself refuted takes nothing with it;
   - **contested:** everything else, including a confident refute of a HIGH or
     CRITICAL finding (one Sonnet never drops a blocking bug) and a skeptic that
     returned nothing.
@@ -90,8 +91,10 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
   - `real=false` refutes it.
   - `real=true`, or no verdict for it, confirms it: a missed bug costs more,
     and the test settles it.
-  - It can set the severity, and mark a finding pre-existing.
-  - A referee that returns nothing leaves them contested.
+  - It can set the severity. Its view on whether the change introduced the bug
+    is recorded, but only the reproduction can make a finding pre-existing.
+  - A referee that returns nothing leaves them contested, and the next run on
+    the same head referees them again.
 - **Reproduction** runs on the most severe confirmed findings, up to
   `maxRepros` (default 8, the rest logged).
   - The reproducer writes `repro/F<n>/repro.json` (`{"test_file": ...}`) and
@@ -108,14 +111,24 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
   - **REPRODUCED:** the head fails with the marker, and the merge-base passes or
     fails without the marker (the code under test is new).
   - **PREEXISTING:** both arms fail with the marker.
-  - **NOT_REPRODUCED:** the head passes, or fails without the marker (another
-    reason).
-  - **ERROR:** a timeout, a test that cannot run, a bad path, a symlinked test,
-    or an analysis tree the reproducer modified.
+  - **NOT_REPRODUCED:** the test passes at the head. That is the only way to
+    get it.
+  - **ERROR:** no evidence either way. That covers a failure without the
+    marker, a missing tool (pytest, go, jest, vitest), a runner that cannot
+    start, a timeout, a bad path, a symlink or file in the test's path, or an
+    analysis tree the reproducer modified. An ERROR leaves the finding confirmed
+    with static evidence only, never demoted.
 - **The session re-runs every reproduction** (`evidence.mjs recheck`) and
-  corrects the ledger to what the runs show (`findings.mjs reconcile`). The
-  runner's transcription is never the final word. `test_results` come only
-  from these runs.
+  corrects the ledger to what the runs show (`findings.mjs reconcile`), writing
+  it after each finding.
+  - The runner's transcription is never the final word.
+  - A claimed run with no written reproduction falls back to confirmed.
+  - `test_results` come only from these runs.
+  - The report shows a run only when it came from this head and from the test
+    that finding's reproduction declared.
+- **A new head clears what belonged to the old one.** A re-found finding loses
+  its reproduction, test results, and fix, and drops back under the confidence
+  cap.
 - **The disposition is computed** (`findings.mjs disposition`), never chosen by a model.
   - **changes requested:** an open confirmed or reproduced bug above LOW.
   - **manual review:** an unsettled HIGH or CRITICAL finding, a lens not fully covered, or a run that stopped early. A stopped run never replaces the saved findings.
@@ -158,17 +171,33 @@ ledger.
   - **Where:** in a fresh `git archive` export of each commit, so the repo,
     its worktrees, and the user's checkout are never touched. The repo's
     `node_modules` are linked in when present.
-  - **Environment:** credentials are stripped. That means anything named like
-    a token, secret, key, password, credential, or session, and every `AWS_`,
-    `GH_`, `GITHUB_`, `ANTHROPIC_`, `CLAUDE_`, `NPM_`, and `SSH_` variable,
-    Claude's own sign-in included.
-  - **Network:** blocked with `unshare -rn` where that works (measured on WSL2:
-    it does).
-  - **Time:** under GNU `timeout -s KILL`, which kills the whole process group.
-    Killing only the runner left a `node --test` child spinning forever
-    (measured).
-  - **What is not isolated:** the test can still read files your user can
-    read. Run `/bughunt` only on changes you are willing to execute locally.
+  - **Environment:** only an allowlist of variables a toolchain needs (`PATH`,
+    `HOME`, locale, `TMPDIR`, and the Node, Go, Python, Java, and Rust home
+    variables), none of them named like a credential. Nothing else reaches the
+    test: no tokens, database URLs, webhooks, or Claude's own sign-in.
+  - **Processes:** in a fresh PID namespace (`unshare -rnpf --kill-child`), so
+    every process the test starts, detached ones included, dies with the run.
+  - **Network:** no outside network. Loopback is brought up inside, so a test
+    can start a local server.
+  - **Time:** under GNU `timeout -s KILL`.
+  - **Output:** written to a file, not a pipe.
+  - **Measured on WSL2:** killing only the runner left a `node --test` child
+    spinning forever, and a detached grandchild survived. Without the
+    namespace, loopback was unreachable. Where `unshare` is missing, it falls
+    back to the process group and says so in the evidence.
+  - **What is not isolated:** the test can still read and write files your user
+    can, including the repo's linked `node_modules`. Run `/bughunt` only on
+    changes you are willing to execute locally.
+  - **What the test may never decide:** the reproducer names only a test path.
+    The path is checked:
+    - repo-relative;
+    - no `..`;
+    - no part starting with `-`;
+    - named like a test;
+    - new at the head;
+    - no symlink in its path in the commit.
+    The command, its flags, and its working directory are chosen in code. For
+    JavaScript, the working directory is the nearest `package.json`.
 - **What `/bughunt` never does:** edit the branch under review, commit, push,
   or comment.
 - **Untrusted text.** The PR title and description, branch names, the code,

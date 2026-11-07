@@ -79,7 +79,7 @@ When a candidate matches a known finding:
 |-------|------|----|
 | verification_status | candidate | refuted, confirmed, contested |
 | | contested | refuted, confirmed |
-| | confirmed | reproduced, preexisting, not_reproduced |
+| | confirmed | reproduced, preexisting, not_reproduced, refuted (folded into a confirmed duplicate) |
 | | not_reproduced | reproduced, preexisting |
 | fix_status | none | proposed |
 | | proposed | verified, rejected |

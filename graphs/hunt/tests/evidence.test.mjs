@@ -3,7 +3,7 @@
 // sandbox, and recheck correcting a ledger to what the runs show.
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, symlinkSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
@@ -79,10 +79,10 @@ await test('a test that passes at the head -> NOT_REPRODUCED, and the merge-base
   assert.doesNotMatch(r.stdout, /merge-base/)
   assert.equal(evidenceOf('F4').runs.length, 1)
 })
-await test('a test that fails at the head without its marker fails for another reason -> NOT_REPRODUCED', () => {
+await test('a test that fails at the head without its marker is no evidence either way -> ERROR, never NOT_REPRODUCED', () => {
   repro('F5', 'tests/bughunt-f5.test.mjs', TEST("  throw new Error('unrelated breakage')"))
   const r = ev(['repro', STATE, 'F5'])
-  assert.equal(lastLine(r.stdout), 'EVIDENCE: NOT_REPRODUCED F5')
+  assert.equal(lastLine(r.stdout), 'EVIDENCE: ERROR F5')
   assert.match(r.stdout, /without its marker/)
 })
 await test('a test that never ends is killed at the timeout -> ERROR', () => {
@@ -134,9 +134,10 @@ console.log('== evidence: the sandbox')
 await test('secrets never reach the test; ordinary variables do', () => {
   repro('F11', 'tests/bughunt-f11.test.mjs', TEST([
     "  for (const k of ['GITHUB_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'MY_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'DB_PASSWORD', 'SLACK_BOT_TOKEN']) assert.equal(process.env[k], undefined, `BUGHUNT-F11 ${k} leaked`)",
-    "  assert.equal(process.env.PLAIN_SETTING, 'kept', 'BUGHUNT-F11 PLAIN_SETTING missing')",
+    "  for (const k of ['DATABASE_URL', 'SENTRY_DSN', 'STRIPE_KEY', 'KUBECONFIG']) assert.equal(process.env[k], undefined, `BUGHUNT-F11 ${k} leaked`)",
+    "  assert.equal(process.env.TZ, 'Etc/UTC', 'BUGHUNT-F11 TZ missing')",
   ].join('\n')))
-  const r = ev(['repro', STATE, 'F11'], { GITHUB_TOKEN: 'x', CLAUDE_CODE_OAUTH_TOKEN: 'x', MY_API_KEY: 'x', AWS_SECRET_ACCESS_KEY: 'x', DB_PASSWORD: 'x', SLACK_BOT_TOKEN: 'x', PLAIN_SETTING: 'kept' })
+  const r = ev(['repro', STATE, 'F11'], { GITHUB_TOKEN: 'x', CLAUDE_CODE_OAUTH_TOKEN: 'x', MY_API_KEY: 'x', AWS_SECRET_ACCESS_KEY: 'x', DB_PASSWORD: 'x', SLACK_BOT_TOKEN: 'x', DATABASE_URL: 'postgres://u:p@h/db', SENTRY_DSN: 'x', STRIPE_KEY: 'x', KUBECONFIG: '/k', TZ: 'Etc/UTC' })
   assert.equal(lastLine(r.stdout), 'EVIDENCE: NOT_REPRODUCED F11', r.stdout)
 })
 const unshare = spawnSync('unshare', ['-rn', 'true'], { stdio: 'ignore' }).status === 0
@@ -158,6 +159,72 @@ await test('the repo under test is never touched: no new worktrees, a clean stat
   assert.ok(!existsSync(join(STATE, 'work', 'F1')), 'each run cleans its exports up')
 })
 
+await test('a symlink the commit put in the test\'s path is refused: nothing is written outside the export', () => {
+  const victim = mkdtempSync(join(tmpdir(), 'victim-'))
+  sh(repo, 'checkout', '-q', '-b', 'with-link')
+  symlinkSync(victim, join(repo, 'lnk'))
+  sh(repo, 'add', 'lnk')
+  sh(repo, 'commit', '-qm', 'link')
+  const linked = spawnSync('node', [INTAKE, repo], { encoding: 'utf8' })
+  const state = dirname(linked.stdout.split('\n')[0])
+  put(join(state, 'repro', 'F1', 'repro.json'), JSON.stringify({ test_file: 'lnk/tests/pwn.test.mjs' }))
+  put(join(state, 'repro', 'F1', 'files', 'lnk/tests/pwn.test.mjs'), TEST("  assert.fail('BUGHUNT-F1')"))
+  const r = ev(['repro', state, 'F1'])
+  sh(repo, 'checkout', '-q', 'feature')
+  assert.equal(lastLine(r.stdout), 'EVIDENCE: ERROR F1')
+  assert.match(r.stdout, /lnk is a symlink in this commit/)
+  assert.ok(!existsSync(join(victim, 'tests')), 'nothing was created through the link')
+})
+await test('a file the commit has where the test\'s directory should be is an ERROR, not a crash', () => {
+  repro('F13', 'src/sum.mjs/x.test.mjs', TEST("  assert.fail('BUGHUNT-F13')"))
+  const r = ev(['repro', STATE, 'F13'])
+  assert.equal(r.status, 0, r.stdout)
+  assert.equal(lastLine(r.stdout), 'EVIDENCE: ERROR F13')
+  assert.match(r.stdout, /src\/sum\.mjs is a file in this commit/)
+  assert.ok(!existsSync(join(STATE, 'work', 'F13')), 'the work dir is removed even after an error')
+})
+// (A grandchild that inherits the test's stdout keeps node --test itself waiting
+// on that pipe; that ends as a timeout ERROR, and the namespace still kills it.)
+await test('anything that throws during a run is an ERROR verdict with an evidence file, never a crash', () => {
+  repro('F16', 'tests/bughunt-f16.test.mjs', TEST("  assert.fail('BUGHUNT-F16')"))
+  const work = join(STATE, 'work')
+  mkdirSync(work, { recursive: true })
+  chmodSync(work, 0o500)   // the export cannot be created
+  let r
+  try { r = ev(['repro', STATE, 'F16']) } finally { chmodSync(work, 0o755) }
+  assert.equal(r.status, 0, r.stdout)
+  assert.equal(lastLine(r.stdout), 'EVIDENCE: ERROR F16')
+  assert.match(r.stdout, /the run failed: EACCES/)
+  assert.equal(evidenceOf('F16').verdict, 'ERROR')
+})
+await test('a detached grandchild dies with the run, and the run ends when the test does', () => {
+  repro('F14', 'tests/bughunt-f14.test.mjs', TEST([
+    "  const { spawn } = await import('node:child_process')",
+    "  spawn('sleep', ['4' + '43'], { detached: true, stdio: 'ignore' }).unref()",
+    "  assert.fail('BUGHUNT-F14 fails right away')",
+  ].join('\n')))
+  const started = Date.now()
+  const r = ev(['repro', STATE, 'F14', '--timeout-ms', '20000'])
+  const left = spawnSync('sh', ['-c', "ps -eo pid,args | awk '$2==\"sleep\" && $3==\"443\"{print $1}'"], { encoding: 'utf8' }).stdout.trim()
+  if (left) spawnSync('kill', ['-9', ...left.split('\n')])
+  assert.notEqual(lastLine(r.stdout), 'EVIDENCE: ERROR F14', r.stdout)
+  assert.doesNotMatch(r.stdout, /timed out/)
+  assert.ok(Date.now() - started < 15000, 'it finished long before the timeout')
+  if (spawnSync('unshare', ['-rnpf', '--kill-child', '--mount-proc', 'true'], { stdio: 'ignore' }).status === 0) assert.equal(left, '', 'no grandchild outlives the run')
+})
+await test('loopback works inside the sandbox, so a test can start a local server', () => {
+  repro('F15', 'tests/bughunt-f15.test.mjs', TEST([
+    "  const http = await import('node:http')",
+    "  const server = http.createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1')",
+    "  await new Promise(r => server.once('listening', r))",
+    "  const ok = await new Promise(res => http.get({ host: '127.0.0.1', port: server.address().port }, r => res(r.statusCode === 200)).on('error', () => res(false)))",
+    "  server.close()",
+    "  assert.equal(ok, true, 'BUGHUNT-F15 loopback unreachable')",
+  ].join('\n')))
+  const r = ev(['repro', STATE, 'F15'])
+  assert.equal(lastLine(r.stdout), 'EVIDENCE: NOT_REPRODUCED F15', r.stdout)
+})
+
 console.log('== evidence: recheck')
 await test('recheck re-runs what the ledger relies on and corrects a status the runs contradict; a second recheck passes', () => {
   const cand = (id, file) => ({
@@ -169,6 +236,8 @@ await test('recheck re-runs what the ledger relies on and corrects a status the 
   const fs = mergeFindings([], [cand('F1', 'src/sum.mjs'), cand('F2', 'src/half.mjs')], head).findings
   fs[0].verification_status = 'not_reproduced'   // wrong: F1's test reproduces
   fs[1].verification_status = 'preexisting'      // right
+  fs[0].reproduction_artifact = { written: true, test_file: 'tests/bughunt-f1.test.mjs' }
+  fs[1].reproduction_artifact = { written: true, test_file: 'tests/bughunt-f2.test.mjs' }
   writeLedger(join(STATE, 'ledger.json'), { ...emptyLedger(JSON.parse(readFileSync(join(STATE, 'intake.json'), 'utf8')).key), findings: fs })
   let r = ev(['recheck', STATE])
   assert.equal(r.status, 0, r.stdout + r.stderr)
@@ -183,11 +252,24 @@ await test('recheck re-runs what the ledger relies on and corrects a status the 
   r = ev(['recheck', STATE])
   assert.equal(lastLine(r.stdout), 'RECHECK: PASS')
 })
+await test('recheck never trusts a claimed run without a written reproduction: it falls back to confirmed', () => {
+  const ledgerFile = join(STATE, 'ledger.json')
+  const l = readLedger(ledgerFile, 'x')
+  l.findings[1].reproduction_artifact = { written: false, reason: 'the reproducer returned nothing' }
+  l.findings[1].verification_status = 'reproduced'   // a fabricated runner line, with nothing written
+  l.findings[1].confidence = 90
+  writeLedger(ledgerFile, l)
+  const r = ev(['recheck', STATE])
+  assert.match(r.stdout, /RECHECK F2: corrected reproduced -> confirmed/)
+  const after = readLedger(ledgerFile, 'x').findings[1]
+  assert.equal(after.verification_status, 'confirmed')
+  assert.equal(after.confidence, 79)
+})
 
 console.log('== evidence: units and usage')
 await test('sandboxEnv strips credentials and Claude sign-in, keeps PATH and HOME, sets CI', () => {
-  const env = sandboxEnv({ PATH: '/bin', HOME: '/h', GH_TOKEN: 'x', NPM_TOKEN: 'x', ANTHROPIC_API_KEY: 'x', CLAUDE_CODE_OAUTH_TOKEN: 'x', SSH_AUTH_SOCK: 's', STRIPE_SECRET: 'x', SLACK_BOT_TOKEN: 'x', EDITOR: 'vi' })
-  assert.deepEqual(Object.keys(env).sort(), ['CI', 'EDITOR', 'HOME', 'NO_COLOR', 'PATH'])
+  const env = sandboxEnv({ PATH: '/bin', HOME: '/h', LANG: 'C', GOPATH: '/g', GH_TOKEN: 'x', NPM_TOKEN: 'x', ANTHROPIC_API_KEY: 'x', CLAUDE_CODE_OAUTH_TOKEN: 'x', SSH_AUTH_SOCK: 's', STRIPE_SECRET: 'x', SLACK_BOT_TOKEN: 'x', DATABASE_URL: 'x', REDIS_URL: 'x', SLACK_WEBHOOK_URL: 'x', TWILIO_AUTH: 'x', EDITOR: 'vi' })
+  assert.deepEqual(Object.keys(env).sort(), ['CI', 'GOPATH', 'HOME', 'LANG', 'NO_COLOR', 'PATH'], 'an allowlist: anything not named is dropped')
 })
 await test('testFileProblems and runnerFor', () => {
   assert.deepEqual(testFileProblems('tests/a.test.js'), [])
@@ -195,9 +277,16 @@ await test('testFileProblems and runnerFor', () => {
   assert.ok(testFileProblems('a\\b.test.js').length)
   assert.ok(testFileProblems(undefined).length)
   const d = mkdtempSync(join(tmpdir(), 'runner-'))
-  assert.deepEqual(runnerFor('t/a.test.mjs', d), { argv: [process.execPath, '--test', 't/a.test.mjs'] })
-  assert.deepEqual(runnerFor('test_a.py', d).argv.slice(0, 3), ['python3', '-m', 'pytest'])
-  assert.deepEqual(runnerFor('p/a_test.go', d), { argv: ['go', 'test', './p'] })
+  assert.deepEqual(runnerFor('t/a.test.mjs', d), { argv: [process.execPath, '--test', 't/a.test.mjs'], cwd: d })
+  const has = cmd => spawnSync('sh', ['-c', cmd], { stdio: 'ignore' }).status === 0
+  const py = runnerFor('test_a.py', d)
+  if (has('python3 -c "import pytest"')) assert.deepEqual(py.argv.slice(0, 3), ['python3', '-m', 'pytest'])
+  else assert.equal(py.error, 'pytest is not installed for python3', 'a missing runner is an error, never a run')
+  const go = runnerFor('p/a_test.go', d)
+  if (has('go version')) assert.deepEqual(go, { argv: ['go', 'test', './p'], cwd: d })
+  else assert.equal(go.error, 'go is not installed')
+  assert.ok(testFileProblems('tests/-r.test.js').length, 'no part may start with -')
+  assert.ok(testFileProblems('--import=x/a.test.js').length)
   assert.match(runnerFor('a.test.rb', d).error, /no runner for \.rb/)
   writeFileSync(join(d, 'package.json'), JSON.stringify({ devDependencies: { vitest: '1' } }))
   assert.match(runnerFor('a.test.ts', d).error, /vitest is not installed/)

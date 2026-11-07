@@ -77,6 +77,12 @@ await test('a re-run on the same head keeps the id, adds no duplicate, and chang
   assert.equal(again.findings[0].duplicates, 0)
   assert.equal(again.findings[0].verification_status, 'confirmed')
 })
+await test('a new head clears what belonged to the old one: the reproduction, test results, fix, and confidence above the cap', () => {
+  const first = mergeFindings([], [CAND()], H1).findings
+  Object.assign(first[0], { verification_status: 'reproduced', confidence: 95, reproduction_artifact: { written: true, test_file: 't.test.js', verdict: 'REPRODUCED' }, test_results: [{ exit: 1 }], fix_status: 'verified', fix_artifact: { commit: 'x' } })
+  const f = mergeFindings(first, [CAND()], H2).findings[0]
+  assert.deepEqual([f.reproduction_artifact, f.test_results, f.fix_status, f.fix_artifact, f.confidence, f.verification_status], [null, [], 'none', null, 79, 'candidate'])
+})
 await test('a new head moves a re-found finding to the new lines and back to candidate, keeping its id', () => {
   const first = mergeFindings([], [CAND()], H1).findings
   transition(first[0], 'verification_status', 'confirmed', 'skeptic')
@@ -174,8 +180,8 @@ await test('a clean case: no true bugs, nothing reported, precision and recall a
 
 console.log('== findings: report')
 await test('confirmed and unverified findings are in separate sections; test runs only come from evidence files', () => {
-  const l = { ...ledgerWith([F('reproduced'), F('candidate', 'HIGH', { finding_id: 'F2', file_path: 'src/y.js', title: 'Maybe a race', test_results: [{ exit: 1, verdict: 'CLAIMED' }] })]), target: { label: 'PR #7: cart', mergeBase: H1, head: H2, base: 'origin/main' } }
-  const md = renderReport(l, { F1: [{ arm: 'head', exit: 1, verdict: 'REPRODUCED' }] })
+  const l = { ...ledgerWith([F('reproduced', 'HIGH', { reproduction_artifact: { written: true, test_file: 't/a.test.js', verdict: 'REPRODUCED', reason: 'r' } }), F('candidate', 'HIGH', { finding_id: 'F2', file_path: 'src/y.js', title: 'Maybe a race', test_results: [{ exit: 1, verdict: 'CLAIMED' }] })]), target: { label: 'PR #7: cart', mergeBase: H1, head: H2, base: 'origin/main' } }
+  const md = renderReport(l, { F1: { head: H2, test_file: 't/a.test.js', runs: [{ arm: 'head', exit: 1, verdict: 'REPRODUCED' }] }, F2: { head: H2, test_file: 'x', runs: [{ arm: 'head', exit: 1, verdict: 'NOT FOR F2' }] } })
   const confirmed = md.slice(md.indexOf('## Confirmed bugs'), md.indexOf('## Unverified'))
   const unverified = md.slice(md.indexOf('## Unverified'), md.indexOf('## Pre-existing'))
   assert.match(confirmed, /F1 \[HIGH\]/)
@@ -185,6 +191,15 @@ await test('confirmed and unverified findings are in separate sections; test run
   assert.doesNotMatch(md, /CLAIMED/, 'a test result the run claimed never reaches the report')
   assert.match(md, /Disposition: \*\*changes requested\*\* \(F1\)/)
   assert.match(md, /Commits: aaaaaaa\.\.bbbbbbb/)
+  assert.doesNotMatch(md, /NOT FOR F2/, 'evidence for a finding with no written reproduction is never shown')
+})
+await test('the report shows evidence only from this head and this finding\'s own test, and says when it is static only', () => {
+  const ra = { written: true, test_file: 't/a.test.js', verdict: 'ERROR', reason: 'timed out' }
+  const l = { ...ledgerWith([F('confirmed', 'HIGH', { reproduction_artifact: ra }), F('confirmed', 'HIGH', { finding_id: 'F2', file_path: 'b.js', reproduction_artifact: { written: true, test_file: 't/b.test.js', verdict: null, reason: 'the runner returned nothing' } })]), target: { label: 'x', mergeBase: H1, head: H2, base: 'main' } }
+  const md = renderReport(l, { F1: { head: H1, test_file: 't/a.test.js', runs: [{ arm: 'head', exit: 1, verdict: 'OLD HEAD RUN' }] }, F2: { head: H2, test_file: 't/other.test.js', runs: [{ arm: 'head', exit: 1, verdict: 'OTHER TEST RUN' }] } })
+  assert.doesNotMatch(md, /OLD HEAD RUN|OTHER TEST RUN/)
+  assert.match(md, /Reproduction:\*\* ERROR: timed out \(`t\/a\.test\.js`\)\. Static evidence only\./)
+  assert.match(md, /Reproduction:\*\* attempted \(`t\/b\.test\.js`\), no verdict: the runner returned nothing\. Static evidence only\./)
 })
 
 console.log('== findings: reconcile')
@@ -299,7 +314,7 @@ await test('readEvidence reads F<n>.json files and ignores everything else', () 
   writeFileSync(join(d, 'ev', 'F1.json'), JSON.stringify({ runs: [{ exit: 1 }] }))
   writeFileSync(join(d, 'ev', 'F2.json'), '{broken')
   writeFileSync(join(d, 'ev', 'notes.txt'), 'x')
-  assert.deepEqual(readEvidence(join(d, 'ev')), { F1: [{ exit: 1 }], F2: [] })
+  assert.deepEqual(readEvidence(join(d, 'ev')), { F1: { head: null, test_file: null, runs: [{ exit: 1 }] }, F2: { head: null, test_file: null, runs: [] } })
   assert.deepEqual(readEvidence(join(d, 'missing')), {})
   assert.ok(!existsSync(join(d, 'missing')))
 })

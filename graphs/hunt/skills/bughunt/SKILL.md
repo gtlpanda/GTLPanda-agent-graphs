@@ -61,10 +61,11 @@ node "$CONFIG/skills/workflow-state/run-script.mjs" INJECTED_INPUT "$D/input.jso
 Before launching, tell the human:
 - which lenses intake routed (`lenses=` on the `INTAKE: OK` line);
 - that reproduction tests run code from the change. They run in fresh exports
-  of each commit, with credentials stripped from the environment, a timeout,
-  and the network blocked where `unshare -rn` works. The tests can still read
-  files your user can read, so run `/bughunt` only on changes you are willing
-  to execute locally.
+  of each commit, with only an allowlist of the environment (no credentials),
+  a timeout, and, where `unshare` works, no outside network (loopback stays up)
+  and a process namespace that dies with the run. The tests can still read and
+  write files your user can, including the repo's linked `node_modules`, so run
+  `/bughunt` only on changes you are willing to execute locally.
 
 Call the Workflow tool with `scriptPath` set to the absolute path that
 `run-script.mjs` printed, and these args:
@@ -84,6 +85,10 @@ PandaStack checkout and restart Claude Code, then stop.
 3. Re-run every reproduction the ledger relies on, and correct the ledger to
    what the runs show:
    `node "$CONFIG/skills/bughunt/evidence.mjs" recheck "$D"`.
+   - Run it with the Bash tool's timeout at 600000 ms. Each finding can take two
+     test runs.
+   - It writes the ledger after each finding. If it is cut off anyway, run it
+     again before the report.
    - The last line is `RECHECK: PASS` (the runs agree with the graph) or
      `RECHECK: CORRECTED <n>`.
    - When it corrected anything, list each `corrected` line for the human. A

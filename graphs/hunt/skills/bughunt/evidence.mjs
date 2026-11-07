@@ -11,20 +11,21 @@
 //   files/<test_file>  the test
 // It never takes a command from anyone: the runner is chosen here from the
 // test's language and the repo's own test setup, and called with an argument
-// list, never through a shell. Each arm runs in a fresh export of its commit
-// (git archive, so the repo itself is never touched), with secrets stripped
-// from the environment, a timeout, and no network where `unshare -rn` works.
+// list, never as shell text. Each arm runs in a fresh export of its commit
+// (git archive, so the repo itself is never touched), with only an allowlist
+// of the environment, a timeout, and, where unshare works, no network and its
+// own PID namespace (see isolation()).
 // It writes <state dir>/evidence/F<n>.json and prints lines ending with
 //   EVIDENCE: REPRODUCED|PREEXISTING|NOT_REPRODUCED|ERROR F<n>
 // recheck re-runs every reproduction the ledger relies on and corrects the
 // ledger to what the runs show (findings.mjs reconcile). It ends with
 // RECHECK: PASS (nothing changed) or RECHECK: CORRECTED <n>.
 // Exit 0 when it ran, 1 on an error it could not run past, 2 on usage.
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, lstatSync, symlinkSync, realpathSync } from 'node:fs'
-import { join, dirname, extname, normalize } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, lstatSync, symlinkSync, realpathSync, openSync, closeSync } from 'node:fs'
+import { join, dirname, extname, normalize, relative } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { buildEnv, git } from '../../../build/skills/build-app/driver/proc.mjs'
+import { git } from '../../../build/skills/build-app/driver/proc.mjs'
 import { TEST_FILE } from '../../../build/skills/build-app/driver/checks.mjs'
 import { readLedger, writeLedger, reconcile } from '../../../../core/skills/findings/findings.mjs'
 
@@ -34,57 +35,92 @@ const MAX_TEST_BYTES = 200_000
 const TAIL_LINES = 40
 const ID = /^F[1-9][0-9]*$/
 
-// Anything that looks like a credential never reaches the code under test,
-// including how this machine signs in to Claude.
-const SECRET = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|SESSION)|^(AWS|GH|GITHUB|ANTHROPIC|OPENAI|NPM|CLAUDE|AZURE|GOOGLE|GCP|SSH)_/i
+// Only an allowlist of the environment reaches the code under test: what a
+// toolchain needs to find itself. Never a credential, a database URL, a
+// webhook, or how this machine signs in to Claude.
+const ENV_ALLOW = /^(PATH|HOME|LANG|LANGUAGE|LC_[A-Z_]+|TERM|TMPDIR|TMP|TEMP|USER|LOGNAME|SHELL|TZ|NODE_ENV|NODE_PATH|GOPATH|GOROOT|GOCACHE|GOMODCACHE|GOFLAGS|GOTOOLCHAIN|PYTHONPATH|PYTHONHOME|VIRTUAL_ENV|CONDA_PREFIX|JAVA_HOME|CARGO_HOME|RUSTUP_HOME)$/
+const SECRET = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|SESSION)/i
 export function sandboxEnv(base = process.env) {
-  const env = buildEnv({}, base)
-  for (const key of Object.keys(env)) if (SECRET.test(key)) delete env[key]
+  const env = {}
+  for (const [key, value] of Object.entries(base)) if (ENV_ALLOW.test(key) && !SECRET.test(key)) env[key] = value
   return Object.assign(env, { CI: 'true', NO_COLOR: '1' })
 }
 
-let netBlockable = null
-function canBlockNetwork() {
-  if (netBlockable === null) netBlockable = spawnSync('unshare', ['-rn', 'true'], { stdio: 'ignore' }).status === 0
-  return netBlockable
+// What this machine can isolate, probed once. Measured on WSL2 (2026-11-06):
+// - unshare -rnpf --kill-child gives a fresh PID namespace, so every process a
+//   test starts, detached ones included, dies with the run;
+// - inside it, `ip link set lo up` brings loopback back, so a test can start a
+//   local server while the outside network stays unreachable;
+// - GNU timeout -s KILL ends the whole group at the limit.
+// Without the namespace, killing only the runner left a node --test child
+// spinning forever, and a detached grandchild survived the run.
+let probed = null
+export function isolation() {
+  if (probed) return probed
+  const ok = (cmd, args) => spawnSync(cmd, args, { stdio: 'ignore' }).status === 0
+  const pidns = ok('unshare', ['-rnpf', '--kill-child', '--mount-proc', 'true'])
+  probed = {
+    pidns,
+    network: pidns || ok('unshare', ['-rn', 'true']),
+    loopback: pidns && ok('unshare', ['-rnpf', '--kill-child', '--mount-proc', 'sh', '-c', 'ip link set lo up']),
+    timeout: ok('timeout', ['-s', 'KILL', '5', 'true']),
+  }
+  return probed
 }
-// Test runners start children (node --test runs each file in one, go test runs
-// a compiled binary), and killing only the runner left an endless test running
-// forever (measured 2026-11-06). GNU timeout signals its whole process group,
-// so it is the wrapper wherever it exists; elsewhere Node's own timeout is the
-// fallback, and the evidence says which.
-let groupTimeout = null
-function canKillGroup() {
-  if (groupTimeout === null) groupTimeout = spawnSync('timeout', ['-s', 'KILL', '5', 'true'], { stdio: 'ignore' }).status === 0
-  return groupTimeout
+// The command line around a runner's argv. The shell string is fixed; the argv
+// follows it as positional arguments, never as shell text.
+function wrap(argv, seconds) {
+  const i = isolation()
+  const timed = i.timeout ? ['timeout', '-s', 'KILL', String(seconds), ...argv] : argv
+  if (i.pidns) return ['unshare', '-rnpf', '--kill-child', '--mount-proc', 'sh', '-c', `${i.loopback ? 'ip link set lo up 2>/dev/null; ' : ''}exec "$@"`, 'sh', ...timed]
+  return i.network ? ['unshare', '-rn', ...timed] : timed
 }
 
 export const markerFor = id => `BUGHUNT-${id}`
 
-// Problems with the reproducer's declared test path, as plain strings.
+// Problems with the reproducer's declared test path, as plain strings. No
+// component may start with "-", so the path can never be read as a flag.
 export function testFileProblems(testFile) {
   if (typeof testFile !== 'string' || !testFile.trim()) return ['repro.json has no test_file']
   const p = []
-  if (testFile.startsWith('/') || testFile.includes('\\') || normalize(testFile) !== testFile || testFile.split('/').includes('..')) p.push(`test_file must be a plain repo-relative path, got ${testFile}`)
-  if (!TEST_FILE.test(testFile)) p.push(`test_file must be a test file by this repo's naming (tests/, __tests__/, *.test.*, *_test.go, test_*.py), got ${testFile}`)
+  if (testFile.startsWith('/') || testFile.includes('\\') || testFile.includes('\0') || normalize(testFile) !== testFile || testFile.split('/').includes('..')) p.push(`test_file must be a plain repo-relative path, got ${JSON.stringify(testFile)}`)
+  if (testFile.split('/').some(part => part.startsWith('-'))) p.push(`no part of test_file may start with "-", got ${JSON.stringify(testFile)}`)
+  if (!TEST_FILE.test(testFile)) p.push(`test_file must be a test file by this repo's naming (tests/, __tests__/, *.test.*, *_test.go, test_*.py), got ${JSON.stringify(testFile)}`)
   return p
 }
 
+// The package a JavaScript test belongs to: the nearest directory above it
+// with a package.json ('.' for the root). A monorepo has several.
+export function packageDirOf(testFile, dir) {
+  let d = dirname(testFile)
+  while (d !== '.' && !existsSync(join(dir, d, 'package.json'))) d = dirname(d)
+  return d
+}
+
 // The command for one test file, chosen from its language and the exported
-// tree's own setup. Returns {argv} or {error}.
+// tree's own setup. Returns {argv, cwd} or {error}.
 export function runnerFor(testFile, dir) {
   const ext = extname(testFile)
   if (/^\.(m|c)?(j|t)s$/.test(ext)) {
+    const pkgDir = packageDirOf(testFile, dir)
+    const root = pkgDir === '.' ? dir : join(dir, pkgDir)
+    const rel = pkgDir === '.' ? testFile : testFile.slice(pkgDir.length + 1)
     let pkg = {}
-    try { pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) } catch { /* no package.json: plain node */ }
+    try { pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) } catch { /* no package.json: plain node */ }
     const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
-    const bin = name => join(dir, 'node_modules', '.bin', name)
-    if (deps.vitest) return existsSync(bin('vitest')) ? { argv: [bin('vitest'), 'run', testFile] } : { error: 'the repo uses vitest but node_modules/.bin/vitest is not installed' }
-    if (deps.jest) return existsSync(bin('jest')) ? { argv: [bin('jest'), '--runTestsByPath', testFile] } : { error: 'the repo uses jest but node_modules/.bin/jest is not installed' }
-    return { argv: [process.execPath, '--test', testFile] }
+    const bin = name => [join(root, 'node_modules', '.bin', name), join(dir, 'node_modules', '.bin', name)].find(b => existsSync(b))
+    if (deps.vitest) return bin('vitest') ? { argv: [bin('vitest'), 'run', rel], cwd: root } : { error: 'the package uses vitest but node_modules/.bin/vitest is not installed' }
+    if (deps.jest) return bin('jest') ? { argv: [bin('jest'), '--runTestsByPath', rel], cwd: root } : { error: 'the package uses jest but node_modules/.bin/jest is not installed' }
+    return { argv: [process.execPath, '--test', rel], cwd: root }
   }
-  if (ext === '.py') return { argv: ['python3', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', testFile] }
-  if (testFile.endsWith('_test.go')) return { argv: ['go', 'test', `./${dirname(testFile)}`] }
+  if (ext === '.py') {
+    if (spawnSync('python3', ['-c', 'import pytest'], { stdio: 'ignore', cwd: dir }).status !== 0) return { error: 'pytest is not installed for python3' }
+    return { argv: ['python3', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', testFile], cwd: dir }
+  }
+  if (testFile.endsWith('_test.go')) {
+    if (spawnSync('go', ['version'], { stdio: 'ignore' }).status !== 0) return { error: 'go is not installed' }
+    return { argv: ['go', 'test', `./${dirname(testFile)}`], cwd: dir }
+  }
   return { error: `no runner for ${ext || 'files without an extension'}` }
 }
 
@@ -97,46 +133,84 @@ function exportTree(repo, sha, dir) {
   if (tar.status !== 0) return `git archive ${sha} failed: ${String(tar.stderr).trim()}`
   const x = spawnSync('tar', ['-x', '-C', dir], { input: tar.stdout, maxBuffer: 64 * 1024 * 1024 })
   if (x.status !== 0) return `unpacking ${sha} failed: ${String(x.stderr).trim()}`
-  // Installed dependencies are not in git: borrow the repo's, read-only by convention.
-  const deps = join(repo, 'node_modules')
-  if (existsSync(deps) && !existsSync(join(dir, 'node_modules'))) symlinkSync(deps, join(dir, 'node_modules'))
+  return null
+}
+
+// Installed dependencies are not in git: link the repo's own, at the root and
+// for the test's package.
+function linkDeps(repo, dir, pkgDir) {
+  for (const d of new Set(['.', pkgDir])) {
+    const from = join(repo, d, 'node_modules')
+    const to = join(dir, d, 'node_modules')
+    if (existsSync(from) && existsSync(join(dir, d)) && !existsSync(to)) symlinkSync(from, to)
+  }
+}
+
+// The test's directory, walked part by part in the export: a part the commit
+// made a symlink (or a file) would send the write outside the export.
+function unsafeTestPath(dir, testFile) {
+  let cur = dir
+  for (const part of testFile.split('/')) {
+    cur = join(cur, part)
+    let st
+    try { st = lstatSync(cur) } catch { return null }
+    if (st.isSymbolicLink()) return `${relative(dir, cur)} is a symlink in this commit`
+    if (cur !== join(dir, testFile) && !st.isDirectory()) return `${relative(dir, cur)} is a file in this commit, not a directory`
+  }
   return null
 }
 
 function runArm(repo, sha, arm, testFile, testText, workDir, timeoutMs, marker) {
   const dir = join(workDir, arm)
+  const fail = error => ({ arm, sha, exit: null, timedOut: false, marker: false, error, tail: '' })
   const err = exportTree(repo, sha, dir)
-  if (err) return { arm, sha, exit: null, timedOut: false, marker: false, error: err, tail: '' }
+  if (err) return fail(err)
+  const unsafe = unsafeTestPath(dir, testFile)
+  if (unsafe) return fail(unsafe)
   mkdirSync(dirname(join(dir, testFile)), { recursive: true })
   writeFileSync(join(dir, testFile), testText)
+  linkDeps(repo, dir, packageDirOf(testFile, dir))
   const runner = runnerFor(testFile, dir)
-  if (runner.error) return { arm, sha, exit: null, timedOut: false, marker: false, error: runner.error, tail: '' }
+  if (runner.error) return fail(runner.error)
   const seconds = Math.max(1, Math.ceil(timeoutMs / 1000))
-  const wrapped = canKillGroup() ? ['timeout', '-s', 'KILL', String(seconds), ...runner.argv] : runner.argv
-  const argv = canBlockNetwork() ? ['unshare', '-rn', ...wrapped] : wrapped
+  const argv = wrap(runner.argv, seconds)
+  // Output goes to a file, not a pipe: a child that keeps the pipe open can
+  // never hold the run past its own end.
+  const outFile = join(workDir, `${arm}.out`)
+  const fd = openSync(outFile, 'w')
   const started = Date.now()
-  // Node's timeout is only the backstop when GNU timeout is there.
-  const r = spawnSync(argv[0], argv.slice(1), { cwd: dir, env: sandboxEnv(), encoding: 'utf8', timeout: canKillGroup() ? (seconds + 10) * 1000 : timeoutMs, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024 })
-  const out = `${r.stdout || ''}${r.stderr || ''}`
+  let r
+  try {
+    r = spawnSync(argv[0], argv.slice(1), { cwd: runner.cwd, env: sandboxEnv(), stdio: ['ignore', fd, fd], timeout: isolation().timeout ? (seconds + 15) * 1000 : timeoutMs, killSignal: 'SIGKILL' })
+  } finally {
+    closeSync(fd)
+  }
+  const out = readFileSync(outFile, 'utf8')
   const killed = r.signal === 'SIGKILL' || r.status === 137 || r.status === 124
-  const timedOut = (r.error && r.error.code === 'ETIMEDOUT') || (killed && Date.now() - started >= seconds * 1000 - 100)
+  const timedOut = Boolean((r.error && r.error.code === 'ETIMEDOUT') || (killed && Date.now() - started >= seconds * 1000 - 100))
+  // 126 and 127 are the shell's and timeout's "could not run it": no test ran.
+  const notRun = !timedOut && (r.status === 126 || r.status === 127)
+  const i = isolation()
   return {
-    arm, sha, command: runner.argv.map(a => a.replace(dir + '/', '')), network: canBlockNetwork() ? 'blocked' : 'not blocked',
-    timeout: canKillGroup() ? 'process group' : 'runner only',
+    arm, sha, command: runner.argv.map(a => a.replace(dir + '/', '')),
+    network: i.network ? `blocked${i.loopback ? ', loopback up' : ''}` : 'not blocked', processes: i.pidns ? 'own PID namespace' : i.timeout ? 'process group' : 'runner only',
     exit: r.status, timedOut, marker: out.includes(marker),
-    error: r.error && !timedOut ? r.error.message : null, tail: out.trimEnd().split('\n').slice(-TAIL_LINES).join('\n'),
+    error: r.error && !timedOut ? r.error.message : notRun ? `the runner could not start (exit ${r.status})` : null,
+    tail: out.trimEnd().split('\n').slice(-TAIL_LINES).join('\n'),
   }
 }
 
-// The verdict from the two arms. The head must fail with the marker; then the
-// merge-base decides: passing, or failing without the marker (the code under
-// test is new), means this change introduced it; failing with the marker means
-// it was already there.
+// The verdict from the two arms. Only a test that passes at the head is
+// NOT_REPRODUCED. A failure without the marker is no evidence either way
+// (ERROR): a missing tool, an environment problem, or a test that breaks for
+// another reason. After a marked failure at the head, the merge-base decides:
+// passing, or failing without the marker (the code under test is new), means
+// this change introduced it; failing with the marker means it was already there.
 export function verdictOf(head, base) {
   if (head.error) return ['ERROR', `the test could not run at the head: ${head.error}`]
   if (head.timedOut) return ['ERROR', 'the test timed out at the head']
   if (head.exit === 0) return ['NOT_REPRODUCED', 'the test passes at the head']
-  if (!head.marker) return ['NOT_REPRODUCED', 'the test fails at the head without its marker: it fails for another reason']
+  if (!head.marker) return ['ERROR', 'the test fails at the head without its marker: it fails for another reason, which is no evidence either way']
   if (!base) return ['ERROR', 'the merge-base arm did not run']
   if (base.error) return ['ERROR', `the test could not run at the merge-base: ${base.error}`]
   if (base.timedOut) return ['ERROR', 'the test timed out at the merge-base']
@@ -151,20 +225,21 @@ function readIntake(stateDir) {
   return doc
 }
 
-// Runs one finding's reproduction and writes its evidence file. Returns
+// Runs one finding's reproduction and writes its evidence file. Never throws
+// past a finding: anything that goes wrong is an ERROR verdict. Returns
 // {id, verdict, reason, runs, lines}.
 export function repro(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const lines = []
+  const intake = readIntake(stateDir)
   const done = (verdict, reason, extra = {}) => {
     lines.push(`EVIDENCE ${id}: ${reason}`, `EVIDENCE: ${verdict} ${id}`)
-    const record = { finding_id: id, verdict, reason, at: new Date().toISOString(), runs: [], ...extra }
+    const record = { finding_id: id, head: intake.target.head, verdict, reason, at: new Date().toISOString(), runs: [], ...extra }
     mkdirSync(join(stateDir, 'evidence'), { recursive: true })
     const path = join(stateDir, 'evidence', `${id}.json`)
     writeFileSync(`${path}.tmp`, JSON.stringify(record, null, 2) + '\n')
     renameSync(`${path}.tmp`, path)
     return { id, verdict, reason, runs: record.runs, lines }
   }
-  const intake = readIntake(stateDir)
   const dir = join(stateDir, 'repro', id)
   let spec
   try { spec = JSON.parse(readFileSync(join(dir, 'repro.json'), 'utf8')) } catch (e) { return done('ERROR', `no readable repro.json in ${dir}: ${e.message}`) }
@@ -186,38 +261,55 @@ export function repro(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const text = readFileSync(source)
   const marker = markerFor(id)
   const work = join(stateDir, 'work', id)
-  const head = runArm(intake.repo, intake.target.head, 'head', testFile, text, work, timeoutMs, marker)
-  lines.push(`EVIDENCE ${id} runner: ${(head.command || []).join(' ') || 'none'} (network ${head.network || 'n/a'})`)
-  lines.push(`EVIDENCE ${id} head ${intake.target.head.slice(0, 7)}: ${head.timedOut ? 'timed out' : head.error ? `error: ${head.error}` : `exit ${head.exit}`}${head.marker ? `, ${marker} seen` : ''}`)
-  const needBase = !head.error && !head.timedOut && head.exit !== 0 && head.marker
-  const base = needBase ? runArm(intake.repo, intake.target.mergeBase, 'merge-base', testFile, text, work, timeoutMs, marker) : null
-  if (base) lines.push(`EVIDENCE ${id} merge-base ${intake.target.mergeBase.slice(0, 7)}: ${base.timedOut ? 'timed out' : base.error ? `error: ${base.error}` : `exit ${base.exit}`}${base.marker ? `, ${marker} seen` : ''}`)
-  rmSync(work, { recursive: true, force: true })
-  const [verdict, reason] = verdictOf(head, base)
-  const runs = [head, base].filter(Boolean).map(r => ({ kind: 'repro', ...r }))
-  return done(verdict, reason, { test_file: testFile, runs })
+  try {
+    const head = runArm(intake.repo, intake.target.head, 'head', testFile, text, work, timeoutMs, marker)
+    lines.push(`EVIDENCE ${id} runner: ${(head.command || []).join(' ') || 'none'} (network ${head.network || 'n/a'}; ${head.processes || 'n/a'})`)
+    lines.push(`EVIDENCE ${id} head ${intake.target.head.slice(0, 7)}: ${head.timedOut ? 'timed out' : head.error ? `error: ${head.error}` : `exit ${head.exit}`}${head.marker ? `, ${marker} seen` : ''}`)
+    const needBase = !head.error && !head.timedOut && head.exit !== 0 && head.marker
+    const base = needBase ? runArm(intake.repo, intake.target.mergeBase, 'merge-base', testFile, text, work, timeoutMs, marker) : null
+    if (base) lines.push(`EVIDENCE ${id} merge-base ${intake.target.mergeBase.slice(0, 7)}: ${base.timedOut ? 'timed out' : base.error ? `error: ${base.error}` : `exit ${base.exit}`}${base.marker ? `, ${marker} seen` : ''}`)
+    const [verdict, reason] = verdictOf(head, base)
+    return done(verdict, reason, { test_file: testFile, runs: [head, base].filter(Boolean).map(r => ({ kind: 'repro', ...r })) })
+  } catch (e) {
+    return done('ERROR', `the run failed: ${e.message}`, { test_file: testFile })
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
 }
 
-// Re-runs every reproduction the ledger relies on, then corrects the ledger to
-// match the runs. Returns {checked, corrected, lines}.
+// Re-runs every reproduction the ledger relies on and corrects the ledger to
+// match, writing it after each finding so a cut-off recheck keeps what it
+// proved. A status that claims a run (reproduced, preexisting, not_reproduced)
+// with no written reproduction behind it at this head is an ERROR, which takes
+// the finding back to confirmed. Returns {checked, corrected, lines}.
 export function recheck(stateDir, opts = {}) {
   const intake = readIntake(stateDir)
   const ledgerFile = join(stateDir, 'ledger.json')
-  const ledger = readLedger(ledgerFile, intake.key)
+  let ledger = readLedger(ledgerFile, intake.key)
   const lines = []
-  const evidence = {}
+  const corrected = []
+  let checked = 0
   for (const f of ledger.findings) {
-    if (f.stale || !existsSync(join(stateDir, 'repro', f.finding_id, 'repro.json'))) continue
-    if (!['confirmed', 'reproduced', 'preexisting', 'not_reproduced'].includes(f.verification_status)) continue
-    const r = repro(stateDir, f.finding_id, opts)
-    evidence[f.finding_id] = { verdict: r.verdict, reason: r.reason, runs: r.runs }
+    if (f.stale || !['confirmed', 'reproduced', 'preexisting', 'not_reproduced'].includes(f.verification_status)) continue
+    const written = Boolean(f.reproduction_artifact && f.reproduction_artifact.written === true)
+    const claimsRun = f.verification_status !== 'confirmed'
+    if (!written && !claimsRun) continue
+    let r
+    if (!written || !existsSync(join(stateDir, 'repro', f.finding_id, 'repro.json'))) {
+      r = { verdict: 'ERROR', reason: 'no reproduction was written for this finding at this head, so its status has no run behind it', runs: [] }
+    } else {
+      try { r = repro(stateDir, f.finding_id, opts) } catch (e) { r = { verdict: 'ERROR', reason: `the recheck failed: ${e.message}`, runs: [] } }
+    }
+    checked += 1
     lines.push(`RECHECK ${f.finding_id}: ${r.verdict} (the ledger said ${f.verification_status})`)
+    const out = reconcile(ledger, { [f.finding_id]: { verdict: r.verdict, reason: r.reason, runs: r.runs } })
+    ledger = out.ledger
+    writeLedger(ledgerFile, ledger)
+    corrected.push(...out.corrected)
   }
-  const { ledger: next, corrected } = reconcile(ledger, evidence)
-  writeLedger(ledgerFile, next)
   for (const c of corrected) lines.push(`RECHECK ${c.finding_id}: corrected ${c.from} -> ${c.to}`)
   lines.push(corrected.length ? `RECHECK: CORRECTED ${corrected.length}` : 'RECHECK: PASS')
-  return { checked: Object.keys(evidence).length, corrected: corrected.length, lines }
+  return { checked, corrected: corrected.length, lines }
 }
 
 const USAGE = 'usage: evidence.mjs repro <state dir> F<n> [--timeout-ms <ms>] | evidence.mjs recheck <state dir> [--timeout-ms <ms>]'
