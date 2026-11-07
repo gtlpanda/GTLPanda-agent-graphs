@@ -1,7 +1,7 @@
 // driver.test.mjs — the /build-app driver end to end against a throwaway git repo
 // and a fake `claude` (fixtures/fake-claude.mjs). Run by scripts/test-workflow.mjs.
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -54,7 +54,7 @@ function env(root, script, extra = {}) {
     scriptFile,
     env: {
       ...process.env, CLAUDE_CODE_INHERITED: 'from-the-parent', HARNESS_BUILD_CLAUDE_BIN: FAKE, FAKE_CLAUDE_SCRIPT: scriptFile,
-      HARNESS_BUILD_VERIFY: VERIFY, HARNESS_BUILD_MAX_SLEEP_MS: '50', PANDASTACK_NOTIFY: '', ...extra,
+      HARNESS_BUILD_VERIFY: VERIFY, HARNESS_BUILD_MAX_SLEEP_MS: '50', PANDASTACK_NOTIFY: '', HARNESS_BUILD_BUGHUNT: '0', ...extra,
     },
   }
 }
@@ -494,4 +494,75 @@ await test('bad usage exits 2', () => {
   for (const args of [[], ['run'], ['run', '--repo', '/tmp'], ['run', '--repo', '/tmp', '--app', 'Bad App'], ['go', '--repo', '/tmp', '--app', 'toy']]) {
     assert.equal(spawnSync(process.execPath, [DRIVER, ...args]).status, 2, JSON.stringify(args))
   }
+})
+
+console.log('== build-app driver: the bug hunt after the final QA')
+const HUNT_ON = { HARNESS_BUILD_BUGHUNT: '1' }
+const HUNT = (extra = {}) => ({ hunt: 'done', ...extra })
+const huntBranches = root => gitOut(root, 'branch', '--list', 'bughunt/*').split('\n').map(s => s.trim()).filter(Boolean)
+await test('the hunt runs in fix mode after the final QA; a verified fix lands on integration, its worktree and branch are cleaned up', () => {
+  const root = one()
+  const fix = { subject: 'bughunt: fix F1', files: { 'src/S1.js': 'export const S1 = 2\n' } }
+  const { code, calls } = drive(root, [good('S1'), good('S2'), QA, HUNT({ commits: [fix], findings: [{ status: 'reproduced', fix: 'verified' }, { status: 'confirmed', fix: 'unresolved', severity: 'MEDIUM' }] })], HUNT_ON)
+  assert.equal(code, 0, status(root).message)
+  assert.equal(gitOut(root, 'log', '-1', '--format=%s', INT), 'bughunt: fix F1')
+  assert.deepEqual(huntBranches(root), [], 'the fix branch is gone once its commits landed')
+  const hunt = calls.at(-1)
+  const p = hunt.args[hunt.args.indexOf('-p') + 1]
+  assert.match(p, /"mode": "fix", "fixBranch": "bughunt\/integration-toy-[0-9a-f]{6}"/)
+  assert.match(p, /Never push, never commit yourself, never switch branches/)
+  assert.equal(hunt.guard.writableDirs.length, 1)
+  assert.match(hunt.guard.writableDirs[0], /\/\.git\/bughunt\/integration-toy-[0-9a-f]{6}$/, 'the guard opens only the hunt\'s state dir')
+  assert.ok(!existsSync(join(hunt.guard.writableDirs[0], 'fix')), 'the fix worktree is removed')
+  assert.match(driverLog(root), /bug hunt: 1 verified fix\(es\) landed on integration\/toy/)
+})
+await test('a hunt that saves no finished run brakes; integration keeps the final QA, and the branch is kept as an attempt', () => {
+  const root = one()
+  const before = () => gitOut(root, 'rev-parse', INT)
+  const { code } = drive(root, [good('S1'), good('S2'), QA, HUNT({ hunt: 'none' })], HUNT_ON)
+  assert.equal(code, 3, status(root).message)
+  assert.match(status(root).message, /the bug hunt did not finish .*it saved no run.*run \/build-app resume to retry it/)
+  assert.equal(gitOut(root, 'log', '-1', '--format=%s', INT), 'S2: C1: build S2')
+  assert.ok(gitOut(root, 'branch', '--list', 'attempt/bughunt-*'), 'the hunt branch is kept')
+  before()
+})
+await test('hunt commits that are not "bughunt: fix F<n>", or that change a frozen test, never land', () => {
+  for (const [commit, why] of [
+    [{ subject: 'tidy up', files: { 'src/S1.js': 'x\n' } }, /commits that are not "bughunt: fix F<n>": "tidy up"/],
+    [{ subject: 'bughunt: fix F1', files: { 'tests/S1.test.js': 'weakened\n' } }, /frozen tests from earlier slices changed: tests\/S1\.test\.js/],
+  ]) {
+    const root = one()
+    const { code } = drive(root, [good('S1'), good('S2'), QA, HUNT({ commits: [commit], findings: [{ fix: 'verified' }] })], HUNT_ON)
+    assert.equal(code, 3, status(root).message)
+    assert.match(status(root).message, why)
+    assert.equal(gitOut(root, 'log', '-1', '--format=%s', INT), 'S2: C1: build S2', 'integration did not move')
+  }
+})
+await test('a hunt that leaves the fix worktree dirty never lands', () => {
+  const root = one()
+  const { code } = drive(root, [good('S1'), good('S2'), QA, HUNT({ dirty: { 'src/left.js': 'x\n' }, findings: [] })], HUNT_ON)
+  assert.equal(code, 3)
+  assert.match(status(root).message, /the fix worktree has uncommitted changes/)
+})
+await test('a rerun after a braked hunt sets the old branch aside and archives the old ledger, then hunts again', () => {
+  const root = one()
+  drive(root, [good('S1'), good('S2'), QA, HUNT({ commits: [{ subject: 'nope', files: { 'src/S1.js': 'x\n' } }] })], HUNT_ON)
+  const again = drive(root, [QA, HUNT({ findings: [] })], HUNT_ON)
+  assert.equal(again.code, 0, status(root).message)
+  assert.match(driverLog(root), /bughunt: kept what an earlier hunt left on bughunt\/integration-toy-[0-9a-f]{6} as attempt\/bughunt-/)
+  const state = again.calls.at(-1).guard.writableDirs[0]
+  assert.ok(readdirSync(state).some(f => /^ledger-.*\.json$/.test(f)), 'the earlier ledger is archived')
+})
+await test('the PR body carries the bug hunt: what was found, what was fixed in this branch, and what is still open', () => {
+  const root = one()
+  const remote = mkdtempSync(join(tmpdir(), 'build-app-remote-'))
+  execFileSync('git', ['init', '-q', '--bare', remote])
+  execFileSync('git', ['-C', root, 'remote', 'add', 'origin', remote])
+  const ghLog = join(dirname(root), `${root.split('/').pop()}-gh.log`)
+  const fix = { subject: 'bughunt: fix F1', files: { 'src/S1.js': 'export const S1 = 2\n' } }
+  const { code } = drive(root, [good('S1'), good('S2'), QA, HUNT({ commits: [fix], findings: [{ status: 'reproduced', fix: 'verified' }, { status: 'confirmed', fix: 'unresolved', severity: 'MEDIUM' }] })], { ...HUNT_ON, HARNESS_BUILD_GH: FAKE_GH, FAKE_GH_LOG: ghLog }, [])
+  assert.equal(code, 0, status(root).message)
+  const body = readFileSync(ghLog, 'utf8').trim().split('\n').map(l => JSON.parse(l)).find(a => a[1] === 'create')[9]
+  assert.match(body, /## Bug hunt\nThe bug hunt \(`\/bughunt --fix`\) ran over the whole branch: 2 confirmed bug\(s\), 1 of them reproduced by a failing test; 1 fixed and independently verified \(in this branch/)
+  assert.match(body, /- \*\*Still open:\*\* F2 \[MEDIUM\] bug 2/)
 })

@@ -4,7 +4,7 @@
 // metrics, and the report. Zero dependencies; one owner for every rule here
 // (see this skill's SKILL.md).
 //   node findings.mjs check <ledger.json>
-//   node findings.mjs save <ledger.json> <intake.json> <run-result.json> [--repo <tree>]
+//   node findings.mjs save <ledger.json> <intake.json> <run-result.json> [--repo <tree>] [--started <iso time>]
 //   node findings.mjs report <ledger.json> [evidence dir]
 //   node findings.mjs input <ledger.json> <intake.json> <out.json>
 // check prints one line per problem, then FINDINGS: PASS|FAIL. Exit 0 pass, 1 fail, 2 usage.
@@ -221,7 +221,7 @@ export function writeLedger(path, l) {
 // the list. A run that did not finish never replaces anything: the ledger keeps
 // its findings, coverage, and target, and records the stop. Either way the run
 // is appended to `runs`.
-export function saveRun(ledger, intake, result, at) {
+export function saveRun(ledger, intake, result, at, started = null) {
   if (!result || typeof result !== 'object' || !Array.isArray(result.findings)) throw new Error('the run result has no findings list')
   const finished = result.status === 'done'
   const next = finished
@@ -236,6 +236,8 @@ export function saveRun(ledger, intake, result, at) {
     at, mode: result.mode || 'discover', head: intake.target.head, status: result.status || null, reason: result.reason || null,
     added: result.added || [], merged: (result.merged || []).length, dropped: (result.dropped || []).length,
     calls: (result.history || []).length,
+    duration_s: started && Number.isFinite(Date.parse(started)) && Number.isFinite(Date.parse(at)) ? Math.round((Date.parse(at) - Date.parse(started)) / 1000) : null,
+    budget_stop: result.budgetStop || null,
   }
   next.runs = [...(ledger.runs || []), run].slice(-MAX_RUNS)
   return next
@@ -471,14 +473,19 @@ function main(argv) {
       console.log(`FINDINGS: ${p.length ? 'FAIL' : 'PASS'}`)
       return p.length ? 1 : 0
     }
-    if (cmd === 'save' && (rest.length === 3 || (rest.length === 5 && rest[3] === '--repo'))) {
-      const [ledgerFile, intakeFile, resultFile] = rest
+    const flags = {}
+    const positional = []
+    for (let i = 0; i < rest.length; i += 1) {
+      if (['--repo', '--started'].includes(rest[i]) && rest[i + 1] !== undefined) { flags[rest[i].slice(2)] = rest[i + 1]; i += 1 } else positional.push(rest[i])
+    }
+    if (cmd === 'save' && positional.length === 3) {
+      const [ledgerFile, intakeFile, resultFile] = positional
       const intake = readJson(intakeFile)
       const ledger = readLedger(ledgerFile, intake.key)
-      const next = saveRun(ledger, intake, readJson(resultFile), new Date().toISOString())
-      if (rest[3] === '--repo') {
+      const next = saveRun(ledger, intake, readJson(resultFile), new Date().toISOString(), flags.started || null)
+      if (flags.repo) {
         const readAt = file => {
-          const r = spawnSync('git', ['-C', rest[4], 'show', `${intake.target.head}:${file}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+          const r = spawnSync('git', ['-C', flags.repo, 'show', `${intake.target.head}:${file}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
           return r.status === 0 ? r.stdout : null
         }
         for (const f of next.findings) if (f.head === intake.target.head) f.evidence_missing = missingEvidence(f, readAt)

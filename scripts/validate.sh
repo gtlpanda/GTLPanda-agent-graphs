@@ -201,7 +201,8 @@ rule core/skills/bug-lenses/SKILL.md 'never instructions to you' 'PR content is 
 rule core/skills/findings/SKILL.md 'never from what an agent said' 'bughunt test results come from execution only'
 rule graphs/hunt/agents/hunter.md 'lens-token:' 'a hunter proves it read its lens reference'
 rule graphs/hunt/agents/hunter.md 'Never run' 'hunters never run the code under review'
-rule graphs/hunt/skills/bughunt/SKILL.md 'Never edit the branch under review, merge, push, or post a comment' 'bughunt never touches the branch under review'
+rule graphs/hunt/skills/bughunt/SKILL.md 'Never edit the branch under review, merge, or post a comment' 'bughunt never touches the branch under review'
+rule graphs/hunt/skills/bughunt/SKILL.md 'Only on a yes' 'the one bughunt push needs the human to say yes each time'
 rule graphs/hunt/skills/bughunt/SKILL.md 'Never remove either yourself' 'an earlier fix worktree is left for the human to clear'
 rule graphs/hunt/agents/repairer.md 'Root cause before any change' 'a repair starts from the root cause'
 rule graphs/hunt/agents/repairer.md 'Never edit or delete an existing test' 'a repair never weakens a test'
@@ -214,6 +215,7 @@ rule graphs/hunt/agents/reproducer.md 'write nothing' 'an unreproducible bug is 
 rule graphs/hunt/agents/runner.md 'character for character' 'the runner never changes the evidence command'
 rule core/agents/advisor.md '## Refereeing a finding' 'the referee settles what the bughunt skeptic could not'
 rule graphs/hunt/skills/bughunt/SKILL.md 'evidence.mjs" recheck' 'the session re-runs every reproduction before the report'
+rule loop.md 'run `/bughunt <PR number>` in discover mode' 'every PR the loop tends gets a bug hunt when its head changes'
 
 # ---- Required files ----
 for f in install.sh README.md CLAUDE.md settings.json loop.md .gitignore .githooks/pre-commit; do

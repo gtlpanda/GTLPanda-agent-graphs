@@ -60,6 +60,15 @@ await test('an edit to a frozen test or inside .git is denied; any other edit is
   }
 })
 
+await test('writableDirs opens one directory inside .git, everything under it, and nothing beside it or above it', () => {
+  const hunt = { ...rules, writableDirs: ['/r/.git/bughunt/integration-toy-abc123'] }
+  for (const f of ['/r/.git/bughunt/integration-toy-abc123/result.json', '/r/.git/bughunt/integration-toy-abc123/fix/src/a.js', '/r/.git/bughunt/integration-toy-abc123/repro/F1/files/tests/x.test.js']) {
+    assert.equal(decide('Write', { file_path: f }, hunt), null, f)
+  }
+  for (const f of ['/r/.git/bughunt/integration-toy-abc123x/a', '/r/.git/bughunt/other/a', '/r/.git/config', '/r/.git/bughunt/integration-toy-abc123/../../config']) {
+    assert.match(decide('Write', { file_path: f }, hunt), /inside \.git/, f)
+  }
+})
 await test('a symlinked repo path, or ../ in a file path, does not dodge the edit rules', () => {
   const real = mkdtempSync(join(tmpdir(), 'guard-real-'))
   mkdirSync(join(real, 'tests'))

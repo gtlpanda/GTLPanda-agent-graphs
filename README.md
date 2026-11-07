@@ -50,7 +50,9 @@ and the backlog once, then leave. The work comes back as one PR to approve.
 ```
 /blueprint  interview → design → backlog of /dev-sized slices          ← you approve the design + backlog
 /build-app  per slice: /dev on integration/<app> → /verify → fast-forward
-            done → one harness-repair over the branch → one PR → /release-pr   ← you approve the merge
+            done → one harness-repair over the branch → /bughunt --fix over the branch
+                 → one PR, with what the hunt found and fixed → /release-pr   ← you approve the merge
+/loop       a PR whose head changed → /bughunt (discover) → report
 ```
 
 - A slice that gets stuck is marked blocked, and the other slices keep

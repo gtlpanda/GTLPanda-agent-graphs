@@ -1,6 +1,9 @@
 // The /build-app guard's rules, pure so they are tested without a session.
 // rules: { repo: real absolute repo path, frozen: [repo-relative test files],
-//          writable: [absolute files a session may write even inside .git] }.
+//          writable: [absolute files a session may write even inside .git],
+//          writableDirs: [absolute directories it may write anywhere under] }.
+// writableDirs is the bug hunt's own state dir: its reproductions, its result,
+// and the fix worktree the repairer edits.
 // Denied: git push, remote changes, commands that rewrite or discard history or
 // work, touching the integration branch, recursive rm of / ~ $HOME, edits inside
 // .git, and edits to test files frozen by slices that already landed. It covers
@@ -146,6 +149,7 @@ export function decide(tool, params, rules) {
   const abs = realish(isAbsolute(file) ? file : resolve(repo, file))
   const rel = relative(repo, abs).split('\\').join('/')
   if ((rules.writable || []).some(w => realish(w) === abs)) return null
+  if ((rules.writableDirs || []).some(d => { const dir = realish(d); return abs === dir || abs.startsWith(`${dir}/`) })) return null
   if (rel === '.git' || rel.startsWith('.git/')) return 'editing inside .git'
   if ((rules.frozen || []).includes(rel)) return `${rel} is a frozen test from a slice that already landed; add a new test instead of changing it`
   return null

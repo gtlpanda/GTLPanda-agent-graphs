@@ -37,6 +37,32 @@ export function sliceChecks({ repo, integration, branch, sliceId, frozen, verify
   return { problems, testFiles }
 }
 
+// The driver's own checks on the bug hunt's fix branch before it lands: every
+// commit is one evidence.mjs fix commit, no frozen test changed, the worktree
+// is clean, and its own verify passes there. Returns {problems, commits}.
+export function bughuntChecks({ repo, integration, branch, worktree, frozen, verifyCommand, verifyTimeoutMs = 40 * 60_000 }) {
+  const problems = []
+  const safe = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
+  if (!git(repo, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]).ok) return { problems: [`no branch ${branch}`], commits: 0 }
+  if (!git(repo, ['merge-base', '--is-ancestor', integration, branch]).ok) problems.push(`${branch} does not build on ${integration}, so it cannot be fast-forwarded`)
+  const subjects = git(repo, ['log', '--format=%s', `${integration}..${branch}`]).stdout.split('\n').filter(Boolean)
+  const foreign = subjects.filter(s => !/^bughunt: fix F[1-9][0-9]*$/.test(s))
+  if (foreign.length) problems.push(`commits that are not "bughunt: fix F<n>": ${foreign.map(s => JSON.stringify(s)).join(', ')}`)
+  const changed = git(repo, ['diff', '--name-only', '--no-renames', `${integration}...${branch}`]).stdout.split('\n').filter(Boolean)
+  const touchedFrozen = changed.filter(f => frozen.includes(f))
+  if (touchedFrozen.length) problems.push(`frozen tests from earlier slices changed: ${touchedFrozen.join(', ')}`)
+  if (existsSync(worktree)) {
+    const dirty = git(worktree, [...safe, 'status', '--porcelain']).stdout.trim()
+    if (dirty) problems.push(`the fix worktree has uncommitted changes:\n${tail(dirty, 15)}`)
+  }
+  if (!problems.length && subjects.length) {
+    const v = run('bash', ['-c', verifyCommand], { cwd: worktree, timeoutMs: verifyTimeoutMs })
+    const last = v.out.trimEnd().split('\n').pop() || ''
+    if (last !== 'VERIFY: PASS') problems.push(`the driver's own verify did not pass on ${branch} (last line ${JSON.stringify(last)}):\n${tail(v.out, 30)}`)
+  }
+  return { problems, commits: subjects.length }
+}
+
 // What /dev reported in its own ledger ($(git rev-parse --git-path harness-dev)/ledger.json),
 // or null when it wrote none. A report, never proof: landing still needs sliceChecks.
 export function devReport(file) {

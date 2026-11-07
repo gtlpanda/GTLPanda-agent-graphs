@@ -32,7 +32,7 @@ These instructions are the opt-in to the Workflow tool for this skill.
 
 ## 1. Resolve the target
 
-Usage: `/bughunt [<PR number> | <branch> | <base>..<head>] [--base <ref>] [--propose | --fix] [--approve F<n>,...]`.
+Usage: `/bughunt [<PR number> | <branch> | <base>..<head>] [--base <ref>] [--propose | --fix] [--approve F<n>,...] [--draft-pr]`.
 It reviews committed work only.
 
 ```bash
@@ -104,8 +104,9 @@ Before launching, tell the human:
   write files your user can, including the repo's linked `node_modules`, so run
   `/bughunt` only on changes you are willing to execute locally.
 
-Call the Workflow tool with `scriptPath` set to the absolute path that
-`run-script.mjs` printed, and these args:
+Note the start time first: `STARTED="$(date -u +%FT%TZ)"`. Then call the
+Workflow tool with `scriptPath` set to the absolute path that `run-script.mjs`
+printed, and these args:
 `{"repo": "<REPO>", "tree": "<D>/tree", "configDir": "<CONFIG expanded>", "stateDir": "<D>", "mode": "<discover | propose | fix>"}`.
 - **`--fix`:** also pass `"fixBranch": "bughunt/<KEY>"`.
 - **`--approve`:** also pass `"approve": ["F3", "F5"]`.
@@ -119,7 +120,7 @@ PandaStack checkout and restart Claude Code, then stop.
 
 1. Write the returned ledger, as JSON, to `$D/result.json`.
 2. Save it, checking each quote against the code:
-   `node "$CONFIG/skills/findings/findings.mjs" save "$D/ledger.json" "$D/intake.json" "$D/result.json" --repo "$D/tree"`.
+   `node "$CONFIG/skills/findings/findings.mjs" save "$D/ledger.json" "$D/intake.json" "$D/result.json" --repo "$D/tree" --started "$STARTED"`.
    It must print `FINDINGS: SAVED`; otherwise report the error.
 3. Re-run every reproduction the ledger relies on, and correct the ledger to
    what the runs show:
@@ -153,8 +154,22 @@ PandaStack checkout and restart Claude Code, then stop.
    - Give the human's options: review the branch, cherry-pick the commits onto
      their own branch, or push it and open a PR themselves.
    - List every unresolved finding with its last feedback.
+8. **`--draft-pr`** (only with `--fix`, and only when `bughunt/<KEY>` has
+   commits). This is the one outward step, so first ask the human with
+   AskUserQuestion, naming exactly what happens:
+   - pushing `bughunt/<KEY>` to `origin`;
+   - opening a draft PR from it into the reviewed branch (the PR's head branch,
+     or the branch you hunted), titled `bughunt: fixes for <label>`, with the
+     report as its body.
 
-Never edit the branch under review, merge, push, or post a comment. The only
-commits are the repairs in `$D/fix`, made by `evidence.mjs`. The report, the
+   Only on a yes:
+   `git -C "$REPO" push -u origin "bughunt/$KEY"`, then
+   `gh pr create --draft --base <reviewed branch> --head "bughunt/$KEY" --title "bughunt: fixes for <label>" --body-file "$D/report.md"`
+   (write the report there first). Give the human the URL. Never merge it, and
+   never push anything else. On anything but a yes, push nothing and say so.
+
+Never edit the branch under review, merge, or post a comment, and never push,
+except the one `--draft-pr` push the human approves in step 8. The only commits
+are the repairs in `$D/fix`, made by `evidence.mjs`. The report, the
 reproduction tests (under `$D/repro/`), and the fix worktree stay local until
 the human decides what to do with them.

@@ -76,6 +76,10 @@ const DEFAULT_MAX_REPROS = 8
 const REFUTE_BAR = 67
 const MODES = ['discover', 'propose', 'fix']
 const DEFAULT_MAX_REPAIR_ATTEMPTS = 2
+// With a token budget set ("+500k"), a costly stage starts only while at least
+// this much is left; the run then finishes with what it has, and says where it
+// stopped.
+const BUDGET_RESERVE = 40_000
 // What each evidence.mjs command may end with.
 const GATES = {
   repro: ['REPRODUCED', 'PREEXISTING', 'NOT_REPRODUCED', 'ERROR'],
@@ -626,13 +630,24 @@ ledger.added = added
 ledger.merged = merged.merged.filter(m => findings.some(f => f.finding_id === m.finding_id))
 if (ledger.dropped.length) log(`dropped ${ledger.dropped.length} candidate(s) that did not clear the bar`)
 
+// The token budget, when one is set: true (and logged once) when the next
+// costly stage should not start.
+function overBudget(stage) {
+  if (!budget || !budget.total || budget.remaining() >= BUDGET_RESERVE) return false
+  if (!ledger.budgetStop) {
+    ledger.budgetStop = stage
+    log(`the token budget is nearly spent (${budget.remaining()} left); not starting ${stage}`)
+  }
+  return true
+}
+
 // ----- verify -----
 const byId = id => ledger.findings.find(f => f.finding_id === id)
 const toVerify = ledger.findings.filter(f => !f.stale && f.verification_status === 'candidate')
 // A finding an earlier run left contested (its referee failed) is refereed again.
 const contested = ledger.findings.filter(f => !f.stale && f.verification_status === 'contested').map(f => ({ f, v: null }))
 const dupOf = []   // [finding, skeptic verdict] pairs naming another finding as the same bug
-if (toVerify.length) {
+if (toVerify.length && !overBudget('Verify')) {
   phase('Verify')
   const verdicts = await parallel(toVerify.map(f => () => runNode('skeptic', `skeptic: ${f.finding_id}`, skepticPrompt(f), SKEPTIC_SCHEMA)))
   toVerify.forEach((f, i) => {
@@ -671,7 +686,7 @@ if (toVerify.length) {
 }
 
 // ----- referee -----
-if (contested.length) {
+if (contested.length && !overBudget('Referee')) {
   phase('Referee')
   const ref = await runNode('referee', `referee: ${contested.length} finding(s)`, refereePrompt(contested), REFEREE_SCHEMA)
   if (!ref) {
@@ -697,7 +712,7 @@ const confirmed = ledger.findings
   .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || b.confidence - a.confidence)
 const toRepro = confirmed.slice(0, MAX_REPROS)
 if (confirmed.length > toRepro.length) log(`reproducing the ${MAX_REPROS} most severe of ${confirmed.length} confirmed finding(s); the rest keep static evidence only`)
-if (toRepro.length) {
+if (toRepro.length && !overBudget('Reproduce')) {
   phase('Reproduce')
   const outcomes = await pipeline(
     toRepro,
@@ -737,6 +752,7 @@ if (MODE !== 'discover') {
   for (const id of APPROVE) if (!targets.some(f => f.finding_id === id)) log(`approve: ${id} is not a live confirmed, unreproduced finding with a fix still to do; skipped`)
   if (!targets.length) log('nothing to repair: no reproduced or approved finding is open')
   for (const f of targets) {
+    if (overBudget('Repair')) break
     phase('Repair')
     const stop = await repairOne(f)
     if (stop) { repairStopped = stop; log(`repair stopped: ${stop}`); break }
@@ -812,5 +828,6 @@ async function repairOne(f) {
 
 const count = st => ledger.findings.filter(f => !f.stale && f.verification_status === st).length
 const fixes = st => ledger.findings.filter(f => !f.stale && f.fix_status === st).length
-const repairNote = MODE === 'discover' ? '' : `; repair (${MODE}): ${fixes('verified')} verified, ${fixes('proposed')} proposed, ${fixes('unresolved')} unresolved${repairStopped ? `, stopped: ${repairStopped}` : ''}`
+const repairNote = (MODE === 'discover' ? '' : `; repair (${MODE}): ${fixes('verified')} verified, ${fixes('proposed')} proposed, ${fixes('unresolved')} unresolved${repairStopped ? `, stopped: ${repairStopped}` : ''}`)
+  + (ledger.budgetStop ? `; stopped before ${ledger.budgetStop}: the token budget was nearly spent` : '')
 return finish('done', `${added.length} new finding(s) across ${lenses.length} lens(es): ${count('reproduced')} reproduced, ${count('confirmed')} confirmed without a reproduction, ${count('contested')} contested, ${count('not_reproduced')} not reproduced, ${count('preexisting')} pre-existing, ${count('refuted')} refuted${repairNote}`)

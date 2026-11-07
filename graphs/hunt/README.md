@@ -20,9 +20,17 @@ worktree, one at a time:
 - `--fix` also has an independent verifier review it and write adversarial
   tests that must pass.
 
-No mode ever touches the branch under review, merges, or pushes. Still planned:
-- wiring into `/build-app` and `/loop`;
-- the live benchmark.
+No mode ever touches the branch under review or merges. The only push is
+`--draft-pr`, which the human approves in the session each time. It is wired
+in:
+- **`/build-app`** runs it in fix mode over the whole integration branch after
+  the final QA. The driver runs intake, makes the fix worktree, lands the
+  verified fixes only after its own checks, and puts the result in the PR
+  body. See `graphs/build/README.md`.
+- **`/loop`** runs it in discover mode whenever the PR's head has changed since
+  the last hunt, and reports. It never posts to the PR.
+
+Still planned: the live benchmark.
 
 ```
 intake.mjs (the session, deterministic) → the commits, files, hunks, routing signals, analysis worktree
@@ -333,6 +341,31 @@ ledger.
 - **Quotes are checked.** `findings.mjs save --repo` checks each quoted line
   against the file at the head. A quote that is not there shows as a warning in
   the report.
+
+## Budgets and observability
+
+- **Caps:**
+  - `maxHunters` (6);
+  - `maxFindings` (25);
+  - `maxRepros` (8);
+  - `maxRepairAttempts` (2);
+  - `evidenceTimeoutMs` (120 s per test run);
+  - the 9-minute wall clock per fix check.
+
+  Every drop is logged.
+- **Token budget.** With a token budget set (a `+500k` directive), no costly
+  stage (verify, referee, reproduce, repair) starts once less than 40,000 tokens
+  remain. The run then finishes with what it has, the reason says where it
+  stopped, and the run records `budget_stop`.
+- **Each run in the ledger records:**
+  - its head, status, and reason;
+  - the ids added;
+  - how many reports merged and how many candidates were dropped;
+  - how many agent calls it made, and its duration (from the skill's
+    `--started`).
+
+  Every evidence file records its runs: commit, exit code, marker, and output
+  tail.
 
 ## Extending
 

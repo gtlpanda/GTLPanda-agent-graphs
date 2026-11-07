@@ -57,7 +57,7 @@ export function load(file) {
 // swallowed and the test would pass. Mock-side errors are recorded and
 // rethrown here; only an explicit { throws } entry reaches the workflow as a
 // node failure. Unconsumed responses fail the test unless allowLeftover.
-export async function run(fn, script, args, { allowLeftover = false } = {}) {
+export async function run(fn, script, args, { allowLeftover = false, budget = { total: null, spent: () => 0, remaining: () => Infinity } } = {}) {
   const queues = Object.fromEntries(Object.entries(script).map(([k, v]) => [k, [...v]]))
   const calls = []
   const logs = []
@@ -99,7 +99,7 @@ export async function run(fn, script, args, { allowLeftover = false } = {}) {
     }
     return value
   }))
-  const result = await fn(agent, parallel, pipeline, () => {}, m => logs.push(m), args, { total: null, spent: () => 0, remaining: () => Infinity }, workflow, SafeMath, SafeDate)
+  const result = await fn(agent, parallel, pipeline, () => {}, m => logs.push(m), args, budget, workflow, SafeMath, SafeDate)
   if (mockErrors.length) throw mockErrors[0]
   const leftover = Object.entries(queues).filter(([, q]) => q.length).map(([k, q]) => `${k}:${q.length}`)
   if (!allowLeftover) assert.deepEqual(leftover, [], `scripted responses never consumed: ${leftover.join(', ')}`)
