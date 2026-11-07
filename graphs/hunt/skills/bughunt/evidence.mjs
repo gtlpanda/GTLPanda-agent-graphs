@@ -12,29 +12,55 @@
 // It never takes a command from anyone: the runner is chosen here from the
 // test's language and the repo's own test setup, and called with an argument
 // list, never as shell text. Each arm runs in a fresh export of its commit
-// (git archive, so the repo itself is never touched), with only an allowlist
+// (a private index and checkout-index, so the repo itself is never touched,
+// and no export attribute applies), with only an allowlist
 // of the environment, a timeout, and, where unshare works, no network and its
 // own PID namespace (see isolation()).
 // It writes <state dir>/evidence/F<n>.json and prints lines ending with
 //   EVIDENCE: REPRODUCED|PREEXISTING|NOT_REPRODUCED|ERROR F<n>
-// recheck re-runs every reproduction the ledger relies on and corrects the
-// ledger to what the runs show (findings.mjs reconcile). It ends with
-// RECHECK: PASS (nothing changed) or RECHECK: CORRECTED <n>.
+// recheck re-runs every reproduction and committed fix the ledger relies on and
+// corrects the ledger to what the runs show (findings.mjs reconcile). It ends
+// with RECHECK: PASS (nothing changed) or RECHECK: CORRECTED <n>.
+//
+// The repair commands work on the fix worktree, always <state dir>/fix (made by
+// /bughunt or the /build-app driver, never by an agent):
+//   node evidence.mjs fix <state dir> F<n>          FIX: PASS|FAIL|BLOCKED|ERROR F<n>
+//   node evidence.mjs adversarial <state dir> F<n>  ADVERSARIAL: PASS|FAIL|ERROR F<n>
+//   node evidence.mjs commit <state dir> F<n>       COMMIT: DONE|FAIL F<n> [<commit>]
+//   node evidence.mjs revert <state dir> F<n>       REVERT: DONE|FAIL F<n>
+// fix proves a repair three ways: the reproduction passes with it, fails again
+// without it (the worktree's last commit), and the repo's own suite passes. It
+// stages the repair as a git tree in a private index; the arms run on that tree,
+// and commit commits that same tree (no hooks), so what is checked is what is
+// committed. Every git call in the fix worktree runs without hooks or
+// fsmonitor, in the sandbox environment.
 // Exit 0 when it ran, 1 on an error it could not run past, 2 on usage.
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, lstatSync, symlinkSync, realpathSync, openSync, closeSync } from 'node:fs'
-import { join, dirname, extname, normalize, relative } from 'node:path'
+import { join, dirname, extname, normalize, relative, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { git } from '../../../build/skills/build-app/driver/proc.mjs'
+import { git as rawGit } from '../../../build/skills/build-app/driver/proc.mjs'
 import { TEST_FILE } from '../../../build/skills/build-app/driver/checks.mjs'
-import { readLedger, writeLedger, reconcile } from '../../../../core/skills/findings/findings.mjs'
+import { readLedger, writeLedger, reconcile, reconcileFix } from '../../../../core/skills/findings/findings.mjs'
 
 export const VERDICTS = ['REPRODUCED', 'PREEXISTING', 'NOT_REPRODUCED', 'ERROR']
 const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_TEST_BYTES = 200_000
 const TAIL_LINES = 40
 const ID = /^F[1-9][0-9]*$/
+// Every git call here runs without hooks or fsmonitor. Both are config the
+// user's repo may set with a relative path, and that path resolves inside the
+// checkout git runs in: the PR's own code. Measured 2026-11-06: `git status` in
+// a worktree of the PR ran a committed fsmonitor script; with these flags it
+// did not.
+const SAFE_GIT = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
+const git = (dir, args, opts) => rawGit(dir, [...SAFE_GIT, ...args], opts)
+const MAX_FIX_FILES = 8                 // source files one repair may change
+const MAX_ADVERSARIAL = 5
+const SUITE_TIMEOUT_MS = 15 * 60_000
+const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)))
+const VERIFY_SH = join(HERE, '..', '..', '..', '..', 'core', 'skills', 'verify', 'verify.sh')
 
 // Only an allowlist of the environment reaches the code under test: what a
 // toolchain needs to find itself. Never a credential, a database URL, a
@@ -134,16 +160,25 @@ export function runnerFor(testFile, dir) {
   return { error: `no runner for ${ext || 'files without an extension'}` }
 }
 
-// A fresh copy of `sha` in `dir`, from git archive: the repo is never touched,
-// so any number of these can run at once.
+// A fresh copy of the commit or tree `sha` in `dir`, every file exactly as git
+// stores it: read into a private index and checked out with checkout-index.
+// Not git archive, which honors the tree's own export-ignore and export-subst,
+// so a .gitattributes in a repair once hid a broken test from the check while
+// the commit kept it (found in review). The repo itself is never touched, so
+// any number of these can run at once.
 function exportTree(repo, sha, dir) {
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
-  const tar = spawnSync('git', ['-C', repo, 'archive', '--format=tar', sha], { maxBuffer: 1024 * 1024 * 1024 })
-  if (tar.status !== 0) return `git archive ${sha} failed: ${String(tar.stderr).trim()}`
-  const x = spawnSync('tar', ['-x', '-C', dir], { input: tar.stdout, maxBuffer: 64 * 1024 * 1024 })
-  if (x.status !== 0) return `unpacking ${sha} failed: ${String(x.stderr).trim()}`
-  return null
+  const index = { GIT_INDEX_FILE: join(dir, '..', `.index-${process.pid}-${relative(join(dir, '..'), dir).replace(/[^A-Za-z0-9]/g, '_')}`) }
+  try {
+    const read = spawnSync('git', ['-C', repo, ...SAFE_GIT, 'read-tree', sha], { encoding: 'utf8', env: { ...process.env, ...index } })
+    if (read.status !== 0) return `reading ${sha} failed: ${String(read.stderr).trim()}`
+    const out = spawnSync('git', ['-C', repo, ...SAFE_GIT, 'checkout-index', '-a', '-f', `--prefix=${dir}/`], { encoding: 'utf8', env: { ...process.env, ...index }, maxBuffer: 64 * 1024 * 1024 })
+    if (out.status !== 0) return `checking out ${sha} failed: ${String(out.stderr).trim()}`
+    return null
+  } finally {
+    rmSync(index.GIT_INDEX_FILE, { force: true })
+  }
 }
 
 // Installed dependencies are not in git: link the repo's own, at the root and
@@ -170,8 +205,11 @@ function unsafeTestPath(dir, testFile) {
   return null
 }
 
-function runArm(repo, sha, arm, testFile, testText, workDir, timeoutMs, marker) {
+// One test run in a fresh export of `source.sha` (a commit, or the staged
+// tree of a repair).
+function runArm(repo, source, arm, testFile, testText, workDir, timeoutMs, marker) {
   const dir = join(workDir, arm)
+  const sha = source.sha
   const fail = error => ({ arm, sha, exit: null, timedOut: false, marker: false, error, tail: '' })
   const err = exportTree(repo, sha, dir)
   if (err) return fail(err)
@@ -229,6 +267,26 @@ export function verdictOf(head, base) {
   return ['PREEXISTING', 'fails with its marker at the merge-base too: this change did not introduce it']
 }
 
+// The evidence file for one finding, merged by kind: a repro run never erases
+// the fix runs, and the reverse. Top-level head, verdict, reason, and test_file
+// describe the reproduction; `fix`, `adversarial`, and `commit` carry theirs.
+export function readEvidenceRecord(stateDir, id) {
+  try { return JSON.parse(readFileSync(join(stateDir, 'evidence', `${id}.json`), 'utf8')) } catch { return { finding_id: id, runs: [] } }
+}
+function writeEvidence(stateDir, id, kind, runs, fields) {
+  const record = readEvidenceRecord(stateDir, id)
+  const at = new Date().toISOString()
+  if (kind === 'repro') Object.assign(record, fields, { at })
+  else record[kind] = { ...fields, at }
+  record.finding_id = id
+  record.runs = [...(record.runs || []).filter(r => (r.kind || 'repro') !== kind), ...runs.map(r => ({ kind, ...r }))]
+  mkdirSync(join(stateDir, 'evidence'), { recursive: true })
+  const path = join(stateDir, 'evidence', `${id}.json`)
+  writeFileSync(`${path}.tmp`, JSON.stringify(record, null, 2) + '\n')
+  renameSync(`${path}.tmp`, path)
+  return record
+}
+
 function readIntake(stateDir) {
   const doc = JSON.parse(readFileSync(join(stateDir, 'intake.json'), 'utf8'))
   if (!doc || !doc.target || !doc.target.head || !doc.target.mergeBase || !doc.repo) throw new Error(`${join(stateDir, 'intake.json')} is not an intake file`)
@@ -243,12 +301,9 @@ export function repro(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const intake = readIntake(stateDir)
   const done = (verdict, reason, extra = {}) => {
     lines.push(`EVIDENCE ${id}: ${reason}`, `EVIDENCE: ${verdict} ${id}`)
-    const record = { finding_id: id, head: intake.target.head, verdict, reason, at: new Date().toISOString(), runs: [], ...extra }
-    mkdirSync(join(stateDir, 'evidence'), { recursive: true })
-    const path = join(stateDir, 'evidence', `${id}.json`)
-    writeFileSync(`${path}.tmp`, JSON.stringify(record, null, 2) + '\n')
-    renameSync(`${path}.tmp`, path)
-    return { id, verdict, reason, runs: record.runs, lines }
+    const runs = extra.runs || []
+    writeEvidence(stateDir, id, 'repro', runs, { head: intake.target.head, verdict, reason, test_file: extra.test_file || null })
+    return { id, verdict, reason, runs, lines }
   }
   const dir = join(stateDir, 'repro', id)
   let spec
@@ -272,11 +327,11 @@ export function repro(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const marker = markerFor(id)
   const work = join(stateDir, 'work', id)
   try {
-    const head = runArm(intake.repo, intake.target.head, 'head', testFile, text, work, timeoutMs, marker)
+    const head = runArm(intake.repo, { sha: intake.target.head }, 'head', testFile, text, work, timeoutMs, marker)
     lines.push(`EVIDENCE ${id} runner: ${(head.command || []).join(' ') || 'none'} (network ${head.network || 'n/a'}; ${head.processes || 'n/a'})`)
     lines.push(`EVIDENCE ${id} head ${intake.target.head.slice(0, 7)}: ${head.timedOut ? 'timed out' : head.error ? `error: ${head.error}` : `exit ${head.exit}`}${head.marker ? `, ${marker} seen` : ''}`)
     const needBase = !head.error && !head.timedOut && head.exit !== 0 && head.marker
-    const base = needBase ? runArm(intake.repo, intake.target.mergeBase, 'merge-base', testFile, text, work, timeoutMs, marker) : null
+    const base = needBase ? runArm(intake.repo, { sha: intake.target.mergeBase }, 'merge-base', testFile, text, work, timeoutMs, marker) : null
     if (base) lines.push(`EVIDENCE ${id} merge-base ${intake.target.mergeBase.slice(0, 7)}: ${base.timedOut ? 'timed out' : base.error ? `error: ${base.error}` : `exit ${base.exit}`}${base.marker ? `, ${marker} seen` : ''}`)
     const [verdict, reason] = verdictOf(head, base)
     return done(verdict, reason, { test_file: testFile, runs: [head, base].filter(Boolean).map(r => ({ kind: 'repro', ...r })) })
@@ -312,7 +367,21 @@ export function recheck(stateDir, opts = {}) {
     }
     checked += 1
     lines.push(`RECHECK ${f.finding_id}: ${r.verdict} (the ledger said ${f.verification_status})`)
-    const out = reconcile(ledger, { [f.finding_id]: { verdict: r.verdict, reason: r.reason, runs: r.runs } })
+    // test_results carry every run on file for this finding: the reproduction, and any fix runs.
+    const all = written ? readEvidenceRecord(stateDir, f.finding_id).runs || r.runs : r.runs
+    const out = reconcile(ledger, { [f.finding_id]: { verdict: r.verdict, reason: r.reason, runs: all } })
+    ledger = out.ledger
+    writeLedger(ledgerFile, ledger)
+    corrected.push(...out.corrected)
+  }
+  // A committed repair is proven again from its commit.
+  for (const f of ledger.findings) {
+    const sha = f.fix_artifact && f.fix_artifact.commit
+    if (f.stale || !sha || !['verified', 'proposed'].includes(f.fix_status)) continue
+    const r = recheckFix(stateDir, intake, f.finding_id, sha, f.fix_artifact.branch, opts)
+    checked += 1
+    lines.push(`RECHECK ${f.finding_id} fix ${sha.slice(0, 7)}: ${r.verdict} (${r.reason})`)
+    const out = reconcileFix(ledger, { [f.finding_id]: r })
     ledger = out.ledger
     writeLedger(ledgerFile, ledger)
     corrected.push(...out.corrected)
@@ -322,7 +391,362 @@ export function recheck(stateDir, opts = {}) {
   return { checked, corrected: corrected.length, lines }
 }
 
-const USAGE = 'usage: evidence.mjs repro <state dir> F<n> [--timeout-ms <ms>] | evidence.mjs recheck <state dir> [--timeout-ms <ms>]'
+// ---------- repair ----------
+
+// git in the fix worktree, which holds the PR's code: SAFE_GIT, no system
+// config, and the sandbox environment. A post-commit hook the PR committed once
+// ran here with the full environment (found in review).
+function wgit(dir, args, extraEnv = {}) {
+  const r = spawnSync('git', ['-C', dir, ...SAFE_GIT, ...args], { encoding: 'utf8', env: { ...sandboxEnv(), GIT_CONFIG_NOSYSTEM: '1', ...extraEnv }, maxBuffer: 256 * 1024 * 1024, timeout: 120_000 })
+  return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`, stdout: r.stdout || '' }
+}
+
+// The fix worktree, checked: <state dir>/fix must be a real directory (not a
+// symlink) holding a linked worktree of this repo, and git's own record of
+// which worktree owns its admin dir (<admin dir>/gitdir) must name this exact
+// .git. Without that last check a repairer could point .git at the user's own
+// worktree's admin dir, or at the repo, and commit and revert acted on the
+// user's branch and files (found in review, twice). Its last commit must
+// descend from the head under review. Returns {dir, head} or {error}.
+function fixWorktree(stateDir, intake) {
+  const dir = join(stateDir, 'fix')
+  let st
+  try { st = lstatSync(dir) } catch { return { error: `no fix worktree at ${dir}; /bughunt --propose or --fix makes it` } }
+  if (!st.isDirectory()) return { error: `${dir} must be a directory, not a symlink` }
+  let dotgit
+  try { dotgit = lstatSync(join(dir, '.git')) } catch { return { error: `${dir} is not a git worktree` } }
+  if (!dotgit.isFile()) return { error: `${dir}/.git must be a linked worktree's .git file` }
+  const repoCommon = git(intake.repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']).stdout.trim()
+  const gitDir = wgit(dir, ['rev-parse', '--absolute-git-dir']).stdout.trim()
+  const top = wgit(dir, ['rev-parse', '--show-toplevel']).stdout.trim()
+  let inside = false
+  try {
+    const admin = realpathSync(gitDir)
+    const owner = readFileSync(join(admin, 'gitdir'), 'utf8').trim()
+    // git names a linked worktree's admin dir after the worktree's directory: fix, fix1, ...
+    inside = admin.startsWith(`${realpathSync(repoCommon)}/worktrees/`) && /^fix[0-9]*$/.test(basename(admin)) && realpathSync(top) === realpathSync(dir) && realpathSync(owner) === realpathSync(join(dir, '.git'))
+  } catch { inside = false }
+  if (!inside) return { error: `${dir} is not the linked worktree of ${intake.repo} it claims to be` }
+  // HEAD is detached (propose) or exactly the fix branch (fix): never a branch
+  // under review, which commit would otherwise move (found in review).
+  const branchRef = `refs/heads/bughunt/${intake.key}`
+  const sym = wgit(dir, ['symbolic-ref', '-q', 'HEAD'])
+  const ref = sym.ok ? sym.stdout.trim() : null
+  if (ref !== null && ref !== branchRef) return { error: `the fix worktree's HEAD is ${ref}; it must be detached or ${branchRef}` }
+  const head = wgit(dir, ['rev-parse', 'HEAD']).stdout.trim()
+  if (!wgit(dir, ['merge-base', '--is-ancestor', intake.target.head, head]).ok) return { error: `the fix worktree's commit ${head.slice(0, 7)} does not descend from the head under review` }
+  return { dir, head, ref }
+}
+
+// Every path the staged tree changes against HEAD: exactly what would be
+// checked and committed. Never git status, which reads the worktree's own index
+// (skip-worktree or assume-unchanged hid edits from every guard; found in
+// review). No rename detection: a rename is a delete plus an add, so a test
+// "moved" away is seen as deleted. [{status, path}].
+function changesOf(dir, tree) {
+  const r = wgit(dir, ['diff-tree', '-r', '--no-renames', '-z', '--name-status', 'HEAD', tree])
+  if (!r.ok) throw new Error(`git diff-tree failed in ${dir}`)
+  const parts = r.stdout.split('\0').filter(Boolean)
+  const out = []
+  for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i], path: parts[i + 1] })
+  return out
+}
+
+// The tree the repair would commit: HEAD plus every change, ignored files
+// excluded, modes and symlink targets included, staged in a private index so
+// the worktree's own index is untouched. Both the fingerprint and the arms the
+// checks run come from it, so what is checked is what is committed.
+function stagedTree(dir, work) {
+  mkdirSync(work, { recursive: true })
+  const index = { GIT_INDEX_FILE: join(work, `index-${process.pid}`) }
+  try {
+    if (!wgit(dir, ['read-tree', 'HEAD'], index).ok) throw new Error('git read-tree failed')
+    if (!wgit(dir, ['add', '-A'], index).ok) throw new Error('git add failed')
+    const t = wgit(dir, ['write-tree'], index)
+    if (!t.ok) throw new Error('git write-tree failed')
+    return t.stdout.trim()
+  } finally {
+    rmSync(index.GIT_INDEX_FILE, { force: true })
+  }
+}
+
+// Files that define what the suite runs or expects. A repair may add one but
+// never edit or delete one: changing the test script to "true" made a broken
+// repair pass (found in review).
+const SUITE_FILE = /(^|\/)(package\.json|pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml|conftest\.py|go\.mod|Makefile|\.mocharc[^/]*|(jest|vitest|vite|karma|playwright|cypress|babel)\.config\.[^/]+|tsconfig[^/]*\.json)$|\.snap$|(^|\/)__snapshots__\/|(^|\/)scripts\/(test|validate)\.sh$/
+
+// The reproduction behind a finding, when one proved it. A finding the
+// evidence shows REPRODUCED must have a readable reproduction, or the check
+// fails closed; any other finding (approved by the human) is checked without
+// one. Returns {repro} | {none: true} | {error}.
+function reproFor(stateDir, id) {
+  const rec = readEvidenceRecord(stateDir, id)
+  if (rec.verdict !== 'REPRODUCED') return { none: true }
+  try {
+    const spec = JSON.parse(readFileSync(join(stateDir, 'repro', id, 'repro.json'), 'utf8'))
+    if (testFileProblems(spec.test_file).length || spec.test_file !== rec.test_file) throw new Error('its repro.json no longer names the test that reproduced it')
+    const src = join(stateDir, 'repro', id, 'files', spec.test_file)
+    if (!lstatSync(src).isFile()) throw new Error('the test is not a regular file')
+    return { repro: { testFile: spec.test_file, text: readFileSync(src) } }
+  } catch (e) {
+    return { error: `the reproduction that proved this finding is unreadable: ${e.message}` }
+  }
+}
+
+// The repo's own suite (the verify skill) in `dir`, sandboxed. Returns
+// {pass, failing: [step], timedOut, tail}.
+function runSuite(dir, workDir, name, timeoutMs) {
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000))
+  const argv = wrap(['bash', VERIFY_SH, '.'], seconds)
+  const outFile = join(workDir, `${name}.out`)
+  const fd = openSync(outFile, 'w')
+  const started = Date.now()
+  let r
+  try {
+    r = spawnSync(argv[0], argv.slice(1), { cwd: dir, env: sandboxEnv(), stdio: ['ignore', fd, fd], timeout: (seconds + 15) * 1000, killSignal: 'SIGKILL' })
+  } finally { closeSync(fd) }
+  const lines = readFileSync(outFile, 'utf8').trimEnd().split('\n')
+  const last = lines[lines.length - 1] || ''
+  const failing = lines.map(l => l.match(/^  \[(\d+)\] (.+)$/)).filter(m => m && m[1] !== '0').map(m => m[2])
+  const timedOut = (r.signal === 'SIGKILL' || r.status === 137 || r.status === 124) && Date.now() - started >= seconds * 1000 - 100
+  return { pass: last === 'VERIFY: PASS', failing, timedOut, tail: lines.slice(-TAIL_LINES).join('\n') }
+}
+
+// Prints `<KIND> F<n>: <reason>` then `<KIND>: <verdict> F<n>[ <extra>]`.
+function report(kind, id, verdict, reason, extra = '') {
+  return [`${kind} ${id}: ${reason}`, `${kind}: ${verdict} ${id}${extra ? ` ${extra}` : ''}`]
+}
+
+// One command's wall clock: the runner agent's Bash call allows 10 minutes, so
+// every arm and suite gets what is left of FIX_BUDGET_MS. A suite that cannot
+// fit is BLOCKED, never a guess.
+const FIX_BUDGET_MS = 9 * 60_000
+function clock(budgetMs) {
+  const until = Date.now() + budgetMs
+  return { left: () => until - Date.now() }
+}
+
+// Proves the repair in the fix worktree for one finding. PASS: commit may
+// follow. FAIL: this attempt is wrong (feedback, retry). BLOCKED: no attempt
+// can pass the check as things stand (a human decides). ERROR: the check
+// cannot run at all.
+export function fix(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS, suiteTimeoutMs = SUITE_TIMEOUT_MS, budgetMs = FIX_BUDGET_MS } = {}) {
+  const intake = readIntake(stateDir)
+  const time = clock(budgetMs)
+  const out = (verdict, reason, fields = {}, runs = []) => {
+    writeEvidence(stateDir, id, 'fix', runs, { verdict, reason, ...fields })
+    return { verdict, reason, lines: report('FIX', id, verdict, reason) }
+  }
+  const wt = fixWorktree(stateDir, intake)
+  if (wt.error) return out('ERROR', wt.error)
+  // A fresh check: adversarial tests from an earlier attempt never judge this one.
+  rmSync(join(stateDir, 'repro', id, 'adversarial'), { recursive: true, force: true })
+  const proof = reproFor(stateDir, id)
+  if (proof.error) return out('BLOCKED', proof.error)
+  const repro = proof.repro || null
+  const work = join(stateDir, 'work', `${id}-fix`)
+  rmSync(work, { recursive: true, force: true })
+  let changes
+  try { changes = changesOf(wt.dir, stagedTree(wt.dir, work)) } catch (e) { return out('ERROR', `staging the repair failed: ${e.message}`) }
+  if (!changes.length) return out('FAIL', 'the repair changed nothing')
+  // A fix may add tests and suite files; it never edits or deletes one that
+  // exists, which is how a counterfeit fix makes a suite pass.
+  for (const c of changes) {
+    if (repro && c.path === repro.testFile) {
+      if (!existsSync(join(wt.dir, c.path)) || !readFileSync(join(wt.dir, c.path)).equals(repro.text)) return out('FAIL', `the repair changed the reproduction test ${c.path}; it must stay as written`)
+      continue
+    }
+    const existed = wgit(wt.dir, ['cat-file', '-e', `HEAD:${c.path}`]).ok
+    if (existed && TEST_FILE.test(c.path)) return out('FAIL', `the repair changed an existing test, ${c.path}; a fix may add tests, never edit or delete one`)
+    if (existed && SUITE_FILE.test(c.path)) return out('FAIL', `the repair changed ${c.path}, which defines what the suite runs; a fix never edits it`)
+  }
+  const source = changes.filter(c => !TEST_FILE.test(c.path))
+  if (source.length > MAX_FIX_FILES) return out('FAIL', `the repair changed ${source.length} source files; a minimal fix changes at most ${MAX_FIX_FILES}`)
+  // The reproduction joins the change as its regression test, at a path no
+  // earlier fix already took.
+  if (repro) {
+    if (wgit(wt.dir, ['cat-file', '-e', `HEAD:${repro.testFile}`]).ok) return out('BLOCKED', `${repro.testFile} already exists in the fix worktree (an earlier fix committed a test there); this reproduction needs its own path`)
+    const unsafe = unsafeTestPath(wt.dir, repro.testFile)
+    if (unsafe) return out('FAIL', unsafe)
+    mkdirSync(dirname(join(wt.dir, repro.testFile)), { recursive: true })
+    writeFileSync(join(wt.dir, repro.testFile), repro.text)
+  }
+  const runs = []
+  try {
+    const tree = stagedTree(wt.dir, work)
+    const files = changesOf(wt.dir, tree).map(c => c.path)
+    const marker = markerFor(id)
+    const armTime = () => Math.min(timeoutMs, time.left())
+    if (repro) {
+      const fixed = runArm(intake.repo, { sha: tree }, 'fixed', repro.testFile, repro.text, work, armTime(), marker)
+      runs.push(fixed)
+      if (fixed.error || fixed.timedOut) return out('FAIL', `with the repair the reproduction could not finish: ${fixed.error || 'timed out'}`, { tree }, runs)
+      if (fixed.exit !== 0) return out('FAIL', `with the repair the reproduction still fails${fixed.marker ? ' with its marker: the bug is still there' : ' (for another reason)'}`, { tree }, runs)
+      const without = runArm(intake.repo, { sha: wt.head }, 'without', repro.testFile, repro.text, work, armTime(), marker)
+      runs.push(without)
+      if (without.error || without.timedOut || without.exit === 0 || !without.marker) return out('FAIL', 'without the repair the reproduction does not fail with its marker, so it cannot tell a fix from no fix', { tree }, runs)
+    }
+    // The suite with the repair must pass. Without it, the suite decides only
+    // whether the failure is new (FAIL) or was already there (BLOCKED: a
+    // regression inside a failing step cannot be told apart, so no such repair
+    // is ever committed).
+    const suiteTime = () => Math.min(suiteTimeoutMs, time.left() - 5_000)
+    if (suiteTime() < 30_000) return out('BLOCKED', 'no time is left in this check for the suite; the suite must fit in what the 9-minute check leaves', { tree }, runs)
+    const err = exportTree(intake.repo, tree, join(work, 'suite-fixed'))
+    if (err) return out('ERROR', err, { tree }, runs)
+    linkDeps(intake.repo, join(work, 'suite-fixed'), '.')
+    const withFix = runSuite(join(work, 'suite-fixed'), work, 'suite-fixed', suiteTime())
+    runs.push({ arm: 'suite with the repair', sha: tree, exit: withFix.pass ? 0 : 1, timedOut: withFix.timedOut, marker: false, error: null, failing: withFix.failing, tail: withFix.tail })
+    if (withFix.pass) return out('PASS', `${repro ? 'the reproduction passes with the repair and fails without it; ' : 'no reproduction proved this finding (the human approved it); '}the suite passes`, { tree, files }, runs)
+    if (withFix.timedOut) return out('BLOCKED', 'the suite did not finish in the time this check allows', { tree }, runs)
+    if (suiteTime() < 30_000) return out('BLOCKED', 'the suite fails with the repair, and no time is left to see whether it failed without it', { tree }, runs)
+    const baseErr = exportTree(intake.repo, wt.head, join(work, 'suite-base'))
+    if (baseErr) return out('ERROR', baseErr, { tree }, runs)
+    linkDeps(intake.repo, join(work, 'suite-base'), '.')
+    const base = runSuite(join(work, 'suite-base'), work, 'suite-base', suiteTime())
+    runs.push({ arm: 'suite without the repair', sha: wt.head, exit: base.pass ? 0 : 1, timedOut: base.timedOut, marker: false, error: null, failing: base.failing, tail: base.tail })
+    const worse = withFix.failing.filter(step => !base.failing.includes(step))
+    if (base.pass || worse.length) return out('FAIL', `the repair breaks the suite: ${worse.length ? worse.join('; ') : 'it passes without the repair and fails with it'}`, { tree }, runs)
+    return out('BLOCKED', `the suite already fails without the repair, at ${base.failing.join('; ') || 'a step it could not name (no stack detected?)'}; a regression inside those steps cannot be told apart, so this repair is left for a human`, { tree }, runs)
+  } catch (e) {
+    return out('ERROR', `the check failed: ${e.message}`, {}, runs)
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+}
+
+// Runs the fix verifier's adversarial tests against the checked repair. They
+// assert correct behavior, so each must pass; the staged tree must be exactly
+// the one fix checked (the verifier never edits the worktree).
+export function adversarial(stateDir, id, { timeoutMs = DEFAULT_TIMEOUT_MS, budgetMs = FIX_BUDGET_MS } = {}) {
+  const intake = readIntake(stateDir)
+  const time = clock(budgetMs)
+  const out = (verdict, reason, runs = []) => {
+    writeEvidence(stateDir, id, 'adversarial', runs, { verdict, reason })
+    return { verdict, reason, lines: report('ADVERSARIAL', id, verdict, reason) }
+  }
+  const wt = fixWorktree(stateDir, intake)
+  if (wt.error) return out('ERROR', wt.error)
+  const checked = readEvidenceRecord(stateDir, id).fix
+  if (!checked || checked.verdict !== 'PASS') return out('FAIL', 'the repair has not passed its fix check')
+  const work = join(stateDir, 'work', `${id}-adv`)
+  rmSync(work, { recursive: true, force: true })
+  const runs = []
+  try {
+    if (stagedTree(wt.dir, work) !== checked.tree) return out('FAIL', 'the worktree changed after the fix check; adversarial tests are run against the checked repair only')
+    const dir = join(stateDir, 'repro', id, 'adversarial')
+    if (!existsSync(join(dir, 'adversarial.json'))) return out('PASS', 'no adversarial tests were written')
+    let files
+    try { files = JSON.parse(readFileSync(join(dir, 'adversarial.json'), 'utf8')).test_files } catch (e) { return out('FAIL', `adversarial.json is unreadable: ${e.message}`) }
+    if (!Array.isArray(files) || files.length > MAX_ADVERSARIAL) return out('FAIL', `adversarial.json must list at most ${MAX_ADVERSARIAL} test_files`)
+    for (const [i, file] of files.entries()) {
+      const problems = testFileProblems(file)
+      if (problems.length) return out('FAIL', problems.join('; '), runs)
+      if (wgit(wt.dir, ['cat-file', '-e', `${checked.tree}:${file}`]).ok) return out('FAIL', `${file} already exists; an adversarial test is a new file`, runs)
+      const src = join(dir, 'files', file)
+      let st
+      try { st = lstatSync(src) } catch { return out('FAIL', `the adversarial test is missing at ${src}`, runs) }
+      if (!st.isFile() || st.size > MAX_TEST_BYTES) return out('FAIL', `the adversarial test at ${src} must be a regular file under ${MAX_TEST_BYTES} bytes`, runs)
+      if (time.left() < 10_000) return out('FAIL', 'no time is left in this check for the remaining adversarial tests', runs)
+      const r = runArm(intake.repo, { sha: checked.tree }, `adversarial-${i + 1}`, file, readFileSync(src), work, Math.min(timeoutMs, time.left()), '\0never')
+      runs.push({ ...r, test_file: file })
+      if (r.error || r.timedOut || r.exit !== 0) return out('FAIL', `${file} fails against the repair: ${r.error || (r.timedOut ? 'timed out' : `exit ${r.exit}`)}`, runs)
+    }
+    return out('PASS', `${files.length} adversarial test(s) pass against the repair`, runs)
+  } catch (e) {
+    return out('ERROR', `the run failed: ${e.message}`, runs)
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+}
+
+// Commits exactly the tree fix checked, with plumbing (commit-tree and
+// update-ref), so no hook can run and nothing unchecked rides along.
+export function commit(stateDir, id) {
+  const intake = readIntake(stateDir)
+  const out = (verdict, reason, sha = '') => {
+    writeEvidence(stateDir, id, 'commit', [], { verdict, reason, commit: sha || null })
+    return { verdict, reason, sha, lines: report('COMMIT', id, verdict, reason, sha) }
+  }
+  const wt = fixWorktree(stateDir, intake)
+  if (wt.error) return out('FAIL', wt.error)
+  const checked = readEvidenceRecord(stateDir, id).fix
+  if (!checked || checked.verdict !== 'PASS') return out('FAIL', 'the repair has not passed its fix check')
+  const work = join(stateDir, 'work', `${id}-commit`)
+  try {
+    if (stagedTree(wt.dir, work) !== checked.tree) return out('FAIL', 'the worktree changed after the fix check')
+    const proof = reproFor(stateDir, id)
+    const msg = `bughunt: fix ${id}\n\n${proof.repro ? `Regression test: ${proof.repro.testFile} (fails without this change, passes with it).\n` : ''}Checked by evidence.mjs fix; see the bughunt ledger for the finding.`
+    const who = wgit(wt.dir, ['config', 'user.email']).stdout.trim() ? {} : { GIT_AUTHOR_NAME: 'bughunt', GIT_AUTHOR_EMAIL: 'bughunt@localhost', GIT_COMMITTER_NAME: 'bughunt', GIT_COMMITTER_EMAIL: 'bughunt@localhost' }
+    const made = wgit(wt.dir, ['commit-tree', checked.tree, '-p', wt.head, '-m', msg], who)
+    if (!made.ok) return out('FAIL', `git commit-tree failed: ${made.out.trim()}`)
+    const sha = made.stdout.trim()
+    // The explicit ref fixWorktree pinned, or a detached HEAD: never through a symref.
+    const moved = wt.ref ? wgit(wt.dir, ['update-ref', '-m', `bughunt: fix ${id}`, wt.ref, sha, wt.head]) : wgit(wt.dir, ['update-ref', '--no-deref', '-m', `bughunt: fix ${id}`, 'HEAD', sha, wt.head])
+    const synced = moved.ok && wgit(wt.dir, ['reset', '-q']).ok
+    if (!synced) return out('FAIL', `could not move the fix worktree to ${sha.slice(0, 7)}: ${moved.out.trim()}`)
+    return out('DONE', 'committed in the fix worktree', sha)
+  } catch (e) {
+    return out('FAIL', `the commit failed: ${e.message}`)
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+}
+
+// Puts the fix worktree back to its last commit, dropping a failed repair: the
+// index rebuilt from HEAD (no skip-worktree or assume-unchanged left), every
+// file restored, every untracked or ignored file and nested repo removed. DONE
+// only once the worktree stages to exactly HEAD's tree.
+export function revert(stateDir, id) {
+  const intake = readIntake(stateDir)
+  const wt = fixWorktree(stateDir, intake)
+  if (wt.error) return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', wt.error) }
+  const steps = [['read-tree', 'HEAD'], ['checkout-index', '-a', '-f'], ['clean', '-ffdqx']].map(a => wgit(wt.dir, a))
+  const failed = steps.find(x => !x.ok)
+  if (failed) return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', failed.out.trim()) }
+  const work = join(stateDir, 'work', `${id}-revert`)
+  try {
+    const left = changesOf(wt.dir, stagedTree(wt.dir, work))
+    if (left.length) return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', `the worktree still differs from its last commit: ${left.map(c => c.path).join(', ')}`) }
+  } catch (e) {
+    return { verdict: 'FAIL', lines: report('REVERT', id, 'FAIL', e.message) }
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+  return { verdict: 'DONE', lines: report('REVERT', id, 'DONE', `the fix worktree is back at ${wt.head.slice(0, 7)}`) }
+}
+
+// A committed repair, re-proven from its commit: the commit is still on a
+// branch the run kept (the fix worktree's HEAD, or `branch`), the reproduction
+// passes at it and fails at its parent. Returns {verdict: PASS|FAIL, reason}.
+function recheckFix(stateDir, intake, id, sha, branch, opts) {
+  if (!git(intake.repo, ['cat-file', '-e', `${sha}^{commit}`]).ok) return { verdict: 'FAIL', reason: `the fix commit ${sha.slice(0, 7)} no longer exists` }
+  const wt = fixWorktree(stateDir, intake)
+  const onWorktree = !wt.error && git(intake.repo, ['merge-base', '--is-ancestor', sha, wt.head]).ok
+  const onBranch = typeof branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(branch) && git(intake.repo, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]).ok && git(intake.repo, ['merge-base', '--is-ancestor', sha, `refs/heads/${branch}`]).ok
+  if (!onWorktree && !onBranch) return { verdict: 'FAIL', reason: `the fix commit ${sha.slice(0, 7)} is no longer on the fix worktree or ${branch || 'any kept branch'}` }
+  const proof = reproFor(stateDir, id)
+  if (proof.error) return { verdict: 'FAIL', reason: proof.error }
+  if (!proof.repro) return { verdict: 'PASS', reason: 'the commit is kept; no reproduction proved this finding (the human approved it)' }
+  const repro = proof.repro
+  const parent = git(intake.repo, ['rev-parse', `${sha}^`]).stdout.trim()
+  const work = join(stateDir, 'work', `${id}-refix`)
+  try {
+    const marker = markerFor(id)
+    const fixed = runArm(intake.repo, { sha }, 'fixed', repro.testFile, repro.text, work, opts.timeoutMs || DEFAULT_TIMEOUT_MS, marker)
+    if (fixed.error || fixed.timedOut || fixed.exit !== 0) return { verdict: 'FAIL', reason: `at the fix commit the reproduction does not pass (${fixed.error || (fixed.timedOut ? 'timed out' : `exit ${fixed.exit}`)})` }
+    const without = runArm(intake.repo, { sha: parent }, 'without', repro.testFile, repro.text, work, opts.timeoutMs || DEFAULT_TIMEOUT_MS, marker)
+    if (without.error || without.timedOut || without.exit === 0 || !without.marker) return { verdict: 'FAIL', reason: 'at the fix commit\'s parent the reproduction does not fail with its marker' }
+    return { verdict: 'PASS', reason: 'the reproduction passes at the fix commit and fails at its parent' }
+  } catch (e) {
+    return { verdict: 'FAIL', reason: `the recheck failed: ${e.message}` }
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+}
+
+const USAGE = 'usage: evidence.mjs repro|fix|adversarial|commit|revert <state dir> F<n> [--timeout-ms <ms>] | evidence.mjs recheck <state dir> [--timeout-ms <ms>]'
+const COMMANDS = { repro, fix, adversarial, commit: (d, id) => commit(d, id), revert: (d, id) => revert(d, id) }
 
 function main(argv) {
   const opts = {}
@@ -335,8 +759,8 @@ function main(argv) {
   }
   const [cmd, stateDir, id, ...rest] = argv
   try {
-    if (cmd === 'repro' && stateDir && ID.test(id || '') && !rest.length) {
-      for (const l of repro(stateDir, id, opts).lines) console.log(l)
+    if (COMMANDS[cmd] && stateDir && ID.test(id || '') && !rest.length) {
+      for (const l of COMMANDS[cmd](stateDir, id, opts).lines) console.log(l)
       return 0
     }
     if (cmd === 'recheck' && stateDir && id === undefined) {

@@ -10,7 +10,8 @@ You run one command and report its output. Nothing else.
 
 1. Run the exact command you are given, once, character for character. Do not
    add flags, pipes, `cd`, `||`, or anything around it. Do not run any other
-   command, before or after.
+   command, before or after. Set the Bash tool's timeout to the value you are
+   given (600000 ms). These commands run tests and suites and can take minutes.
 2. Copy everything it printed, stdout and stderr, into `output`, verbatim and
    in order. Do not summarize, reformat, fix, or shorten it. The last line
    must be the command's own last line.

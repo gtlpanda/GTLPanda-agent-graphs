@@ -1,6 +1,6 @@
 ---
 name: bughunt
-description: Hunt a pull request for real bugs with the hunt graph - map the change's impact, run the specialist hunters it calls for (logic, contract, concurrency, security, errors, regression) in parallel, challenge every finding with a blind skeptic and a referee, reproduce each confirmed one with a failing test run in a sandbox at the head and the merge-base, and report reproduced bugs apart from unverified ones, with a computed disposition. It never edits your branch, pushes, or comments. Use when the user says "/bughunt [PR# | branch | base..head]", "hunt this PR for bugs", "find the bugs in this PR", or asks whether a PR was reviewed for bugs.
+description: Hunt a pull request for real bugs with the hunt graph - map the change's impact, run the specialist hunters it calls for (logic, contract, concurrency, security, errors, regression) in parallel, challenge every finding with a blind skeptic and a referee, reproduce each confirmed one with a failing test run in a sandbox at the head and the merge-base, and report reproduced bugs apart from unverified ones, with a computed disposition. --propose and --fix also repair each reproduced bug at its root in an isolated worktree, proven by the reproduction and the suite, and (--fix) reviewed by an independent verifier with adversarial tests. It never edits your branch, merges, pushes, or comments. Use when the user says "/bughunt [PR# | branch | base..head]", "hunt this PR for bugs", "find the bugs in this PR", or asks whether a PR was reviewed for bugs.
 ---
 
 # /bughunt
@@ -15,15 +15,25 @@ opinions. This build runs **discover mode**:
 4. You re-run every reproduction yourself before the report, so no agent's
    transcription is the final word.
 
-`--propose` and `--fix` are not built yet. If either is asked for, say so and
-stop.
+Two more modes share the same graph:
+- **`--propose`** repairs each reproduced bug in a detached worktree. A repair
+  is kept only when the reproduction passes with it, fails without it, and the
+  suite is no worse. You get the commits to review. No independent verifier
+  runs.
+- **`--fix`** does the same on a new branch `bughunt/<key>`. An independent
+  verifier then reviews each repair and writes adversarial tests that must
+  pass. Only then is it committed and marked verified.
+- **`--approve F3,F5`** lets a confirmed finding with no reproduction be
+  repaired too. Without it, only reproduced findings are.
+
+No mode ever touches the branch under review, merges, or pushes.
 
 These instructions are the opt-in to the Workflow tool for this skill.
 
 ## 1. Resolve the target
 
-Usage: `/bughunt [<PR number> | <branch> | <base>..<head>] [--base <ref>]`. It
-reviews committed work only.
+Usage: `/bughunt [<PR number> | <branch> | <base>..<head>] [--base <ref>] [--propose | --fix] [--approve F<n>,...]`.
+It reviews committed work only.
 
 ```bash
 REPO="$(git rev-parse --show-toplevel)"
@@ -42,6 +52,33 @@ node "$CONFIG/skills/bughunt/intake.mjs" "$REPO" <one of: --pr <n> | --branch <n
 - **Notes.** Relay every `note:` line it printed:
   - uncommitted changes, which are not reviewed;
   - a base it could not refresh from origin, which may be behind.
+
+## 1b. The fix worktree (`--propose`, `--fix` only)
+
+Repairs happen only in `$D/fix`, a separate worktree at the head under review.
+
+```bash
+HEAD_SHA="$(node -p 'require(process.argv[1]).target.head' "$D/intake.json")"
+KEY="$(node -p 'require(process.argv[1]).key' "$D/intake.json")"
+git -C "$REPO" worktree add -b "bughunt/$KEY" "$D/fix" "$HEAD_SHA"   # --fix
+git -C "$REPO" worktree add --detach "$D/fix" "$HEAD_SHA"            # --propose
+```
+
+- **When it already exists.** If `$D/fix` exists, or (for `--fix`) the
+  branch `bughunt/$KEY` does, an earlier run left them. Stop, and tell the
+  human what is there:
+  `git -C "$D/fix" log --oneline "$HEAD_SHA"..HEAD`.
+  Give them the commands to clear it when they have reviewed it:
+  `git -C "$REPO" worktree remove --force "$D/fix"` and
+  `git -C "$REPO" branch -D "bughunt/$KEY"`. Never remove either yourself.
+  After that, findings left `unresolved` are tried again. A fix that was
+  verified on the removed branch is taken back by the next recheck, because no
+  kept branch holds it any more.
+- **At launch.** Tell the human:
+  - each repair attempt runs the repo's suite in the sandbox, up to 2 attempts
+    per bug;
+  - one check has 9 minutes in all, so a suite that takes more than about 4
+    minutes leaves the finding blocked, for a human.
 
 ## 2. Prepare the run
 
@@ -69,7 +106,9 @@ Before launching, tell the human:
 
 Call the Workflow tool with `scriptPath` set to the absolute path that
 `run-script.mjs` printed, and these args:
-`{"repo": "<REPO>", "tree": "<D>/tree", "configDir": "<CONFIG expanded>", "stateDir": "<D>", "mode": "discover"}`.
+`{"repo": "<REPO>", "tree": "<D>/tree", "configDir": "<CONFIG expanded>", "stateDir": "<D>", "mode": "<discover | propose | fix>"}`.
+- **`--fix`:** also pass `"fixBranch": "bughunt/<KEY>"`.
+- **`--approve`:** also pass `"approve": ["F3", "F5"]`.
 Do not pass the intake or the findings in args; the run script carries them.
 
 If the run reports an agent type that is not found, the hunt agents are not
@@ -103,7 +142,19 @@ PandaStack checkout and restart Claude Code, then stop.
      confirmed by reading only (static evidence), and which are contested.
 5. If the run ended with `escalate`, quote its `reason`. The save kept the
    earlier findings as they were; nothing from the stopped run replaced them.
+6. **`--propose`:** show the proposed commits and their diff:
+   - `git -C "$D/fix" log --oneline "$HEAD_SHA"..HEAD`;
+   - `git -C "$D/fix" diff "$HEAD_SHA"..HEAD`.
 
-Never edit the branch under review, commit, push, or post a comment. The report
-and the reproduction tests (under `$D/repro/`) stay local until the human
-decides what to do with them.
+   Say that no independent verifier reviewed them.
+7. **`--fix`:** name the branch `bughunt/<KEY>` and its commits (same `log`
+   command). Each verified fix is one commit with its regression test.
+   - Say that nothing was merged or pushed.
+   - Give the human's options: review the branch, cherry-pick the commits onto
+     their own branch, or push it and open a PR themselves.
+   - List every unresolved finding with its last feedback.
+
+Never edit the branch under review, merge, push, or post a comment. The only
+commits are the repairs in `$D/fix`, made by `evidence.mjs`. The report, the
+reproduction tests (under `$D/repro/`), and the fix worktree stay local until
+the human decides what to do with them.

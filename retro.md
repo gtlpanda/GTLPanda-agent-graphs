@@ -1152,3 +1152,110 @@ sandbox, and `reconcile`; 24 were caught at first. The two survivors were real t
 - The suite is 506 workflow tests, 0 failed.
 - 3 new agents, 6 new validate.sh rules, and an advisor section.
 - The workflow test harness gained a real `pipeline()`.
+
+## 27. /bughunt, part 3: proven repairs and independent fix verification (2026-11-06)
+
+**What changed.** `/bughunt --propose` and `--fix` share the graph with discover mode and add a
+repair stage. Each reproduced finding (plus any the human names with `--approve`) is repaired in
+`<state>/fix`, one at a time, most severe first. That worktree is a separate checkout: detached for
+propose, branch `bughunt/<key>` for fix. The skill makes it and never removes it.
+- **The repairer** (Sonnet) investigates the root cause first, then makes the smallest change. It
+  never touches the reproduction test, never edits or deletes an existing test, and never commits.
+- **`evidence.mjs fix`** proves the repair:
+  - **Scope:** it rejects an empty change, an edited existing or reproduction test, and more than 8
+    source files.
+  - **Three arms:** the reproduction passes on a copy of the worktree, and fails with its marker at
+    the worktree's last commit. A test that passes both ways cannot tell a fix from no fix.
+  - **The suite:** the repo's own suite (the verify skill) must be no worse than without the repair.
+  - **On PASS,** the reproduction joins the change, and the worktree state is fingerprinted.
+- **Propose mode** commits there; the fix stays `proposed` because no one independent reviewed it.
+- **Fix mode** adds the verifier:
+  - an independent fix verifier (Sonnet, never shown the repairer's reasoning) reviews the change
+    and writes up to 5 adversarial tests;
+  - `evidence.mjs adversarial` runs them against the fingerprinted state;
+  - only an accept plus a PASS lets `evidence.mjs commit` commit it, and it is marked `verified`.
+- **Failed attempts.** A failed attempt is reverted, and the next one gets the reasons as fenced
+  feedback. After `maxRepairAttempts` (default 2) the finding is `unresolved`. A fix check that
+  cannot run stops all repair.
+- **Recheck.** It re-proves every committed repair from its commit (passes there, fails at its
+  parent), and `findings.mjs reconcileFix` takes back one that does not hold.
+
+**Bugs caught before review.** The mutation run turned up one real test gap: no test had a
+reproduction that already passes without the repair, so dropping the discrimination check went
+unseen. A test now covers it. 22 of 22 mutations are caught, across the repair guards in
+`evidence.mjs` and the repair routing.
+
+**PR review (#29).** Two independent reviewers, a line-level reviewer and a behavioral QA auditor,
+reproduced every finding in throwaway repos. They found 5 HIGH, 11 MEDIUM, and 2 LOW, which overlap
+to 15 distinct issues. All are fixed and tested.
+- **HIGH: a redirected `.git` reached the user's branch.** A repairer could point the fix worktree's
+  `.git` file at the repo itself, so `commit` and `revert` acted on the user's branch and index. The
+  worktree is now checked as a real linked worktree inside the repo's `worktrees/`.
+- **HIGH: a PR hook ran unsandboxed.** `commit` ran the PR's `post-commit` hook (a relative
+  `core.hooksPath`) with the full environment, and a committed fsmonitor script ran on `git status`.
+  Every git call in intake and evidence now disables hooks and fsmonitor, and commits use plumbing.
+- **HIGH: a verified fix outlived its branch and closed the finding.** It was trusted after the
+  branch was deleted, and the disposition read "pass" while the PR still had the bug. Recheck now
+  requires a kept branch, and a verified fix no longer closes the finding.
+- **HIGH: the runner's Bash default (2 minutes) was shorter than a fix check.** Agents are now told
+  to use the 10-minute limit, and the check has a 9-minute wall-clock budget. A suite that cannot fit
+  is BLOCKED, not a silent failure.
+- **HIGH: a rename slipped past the test guard.** A staged rename deleted an existing test unseen.
+  Status now runs with `--no-renames`.
+- **The suite could be neutered.** Changing `package.json`'s test script to `true` passed a broken
+  repair. Suite-defining files are now protected like tests.
+- **Ignored files, modes, and symlinks.** A fix hidden in a git-ignored file passed the check but
+  was not committed, and the fingerprint missed modes and symlink targets. The check, the
+  fingerprint, and the commit now all use one staged git tree.
+- **The reproduction failed open.** An unreadable reproduction became a suite-only check. It is now
+  BLOCKED.
+- **`--approve` could never succeed** on a not-reproduced finding.
+- **A red base suite masked regressions,** and a repair was still committed. It is now BLOCKED.
+- **Shared test paths.** Two findings with one test path overwrote the first fix's regression test.
+  It is now BLOCKED.
+- **Smaller ones:** stale adversarial tests judged later attempts; a revert's failure was ignored;
+  an accept was counted even when the verifier's own fields disagreed; unresolved findings could
+  never be retried.
+
+A mutation run over the fixes caught 18 of 18, including removing the hook and fsmonitor flags (a
+trap test catches each).
+
+A focused re-review of the fix commit (c511594) found four more holes and reproduced each:
+- **CRITICAL:** the worktree check still accepted a `.git` pointed at another linked worktree's
+  admin dir, or a fix dir symlinked to the user's worktree. Commit then moved the user's branch,
+  and revert wiped their uncommitted files. Now the fix dir must not be a symlink, and git's own
+  back-pointer (`<admin>/gitdir`) must name this exact `.git`.
+- **HIGH:** `update-index --skip-worktree` hid edits (a neutered test script) from `git status`,
+  which the guards read, while the staged tree kept them. The guards now judge the diff between
+  HEAD and the staged tree.
+- **HIGH:** exports used `git archive`, which honors a tree's `export-ignore`, so a repair's
+  `.gitattributes` hid a broken test from the check. Exports now use a private index plus
+  `checkout-index`.
+- **MEDIUM:** revert left an untracked nested repo behind, which would be committed next. Revert
+  now rebuilds the index, restores every file, uses `clean -ffdqx`, and verifies before saying DONE.
+
+Six mutations, one per new guard: 6 of 6 caught.
+
+One more adversarial pass, by static reading, found that a repairer could write
+`ref: refs/heads/<the PR branch>` into its own admin `HEAD`, so `commit` would advance the user's
+branch. A variant swapped admin dirs. Now HEAD must be detached or exactly `bughunt/<key>`, the
+admin dir must be the fix worktree's own (`fix`, `fix1`, ...), and commit moves that explicit ref.
+Both pins have tests, and 2 of 2 mutations are caught.
+
+That pass also confirmed the honest limit, now written in the graph README. These checks stop
+`evidence.mjs` from being turned against the user's work by the PR's content or by a wandering
+agent. They are not a sandbox against a deliberately malicious agent, which runs with the user's
+file access and could run `git` itself. Agents are bounded by instructions, and under `/build-app`
+by the guard hook. The fixes added 12 tests, for 549 workflow tests and 0 failed.
+
+**Stats.**
+- 31 new tests (537 workflow tests, 0 failed):
+  - 17 repair tests that run real `npm test` suites through the verify skill in a throwaway project
+    (a non-fix, edited tests, a suite broken by the repair, a correct fix, adversarial passes and
+    failures, a worktree changed after the check, commit, revert, a suite that already failed, and
+    a recheck that keeps one fix and takes back another);
+  - 12 routing tests (propose versus fix, a rejection then a success, attempts used up, a check
+    that cannot run, the adversarial gate, a missing verifier, approvals, re-runs, the exact
+    commands);
+  - 2 findings tests.
+- 2 new agents, 6 new or updated validate.sh rules.

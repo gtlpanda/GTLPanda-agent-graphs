@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { test, REPO } from '../scripts/workflow-harness.mjs'
 import {
   candidateProblems, mergeFindings, transition, sameFinding, disposition, metrics, renderReport, ledgerProblems,
-  emptyLedger, readLedger, writeLedger, saveRun, missingEvidence, readEvidence, reconcile, UNREPRODUCED_CAP,
+  emptyLedger, readLedger, writeLedger, saveRun, missingEvidence, readEvidence, reconcile, reconcileFix, UNREPRODUCED_CAP,
 } from '../core/skills/findings/findings.mjs'
 
 const SCRIPT = join(REPO, 'core', 'skills', 'findings', 'findings.mjs')
@@ -151,8 +151,9 @@ await test('manual review for an unsettled HIGH or CRITICAL, or a lens not cover
   assert.equal(disposition(ledgerWith([F('candidate', 'MEDIUM')])).disposition, 'pass')
   assert.deepEqual(disposition(ledgerWith([], [{ lens: 'security', status: 'not_covered' }])), { disposition: 'manual_review', because: ['security not covered'] })
 })
-await test('refuted, pre-existing, stale, and verified-fixed findings are never open', () => {
-  assert.equal(disposition(ledgerWith([F('refuted'), F('preexisting'), F('reproduced', 'HIGH', { stale: true }), F('reproduced', 'HIGH', { fix_status: 'verified' })])).disposition, 'pass')
+await test('refuted, pre-existing, and stale findings are never open; a verified fix does not close a finding (it is not in the PR yet)', () => {
+  assert.equal(disposition(ledgerWith([F('refuted'), F('preexisting'), F('reproduced', 'HIGH', { stale: true })])).disposition, 'pass')
+  assert.equal(disposition(ledgerWith([F('reproduced', 'HIGH', { fix_status: 'verified' })])).disposition, 'changes_requested')
 })
 
 console.log('== findings: metrics')
@@ -227,6 +228,32 @@ await test('reconcile moves a status to what the runs show, fills test_results f
   assert.equal(d.reproduction_artifact.verdict, 'REPRODUCED')
   assert.equal(a.history.at(-1).why, 'evidence recheck: r1')
   assert.equal(l.findings[0].verification_status, 'not_reproduced', 'the input ledger is not mutated')
+})
+
+await test('reconcileFix takes back a committed repair that no longer proves out, and leaves the rest alone', () => {
+  const l = ledgerWith([
+    F('reproduced', 'HIGH', { fix_status: 'verified', fix_artifact: { commit: 'a'.repeat(40) } }),
+    F('reproduced', 'HIGH', { finding_id: 'F2', fix_status: 'proposed', fix_artifact: { commit: 'b'.repeat(40) } }),
+    F('reproduced', 'HIGH', { finding_id: 'F3', fix_status: 'verified' }),
+  ])
+  const { ledger, corrected } = reconcileFix(l, { F1: { verdict: 'FAIL', reason: 'at the fix commit the reproduction does not pass' }, F2: { verdict: 'PASS', reason: 'ok' } })
+  assert.deepEqual(corrected, [{ finding_id: 'F1', from: 'fix verified', to: 'fix rejected' }])
+  assert.deepEqual(ledger.findings.map(f => f.fix_status), ['rejected', 'proposed', 'verified'])
+  assert.equal(ledger.findings[0].history.at(-1).why, 'evidence recheck: at the fix commit the reproduction does not pass')
+  assert.equal(l.findings[0].fix_status, 'verified', 'the input is not mutated')
+})
+await test('the report says what each fix status means: verified, proposed (no verifier), unresolved', () => {
+  const l = { ...ledgerWith([
+    F('reproduced', 'HIGH', { fix_status: 'verified', fix_artifact: { commit: 'c'.repeat(40), branch: 'bughunt/pr-7', attempts: 2 } }),
+    F('reproduced', 'HIGH', { finding_id: 'F2', file_path: 'b.js', fix_status: 'proposed', fix_artifact: { commit: 'd'.repeat(40) } }),
+    F('reproduced', 'HIGH', { finding_id: 'F3', file_path: 'c.js', fix_status: 'unresolved', fix_artifact: { attempts: 2, last_feedback: 'breaks the suite' } }),
+  ]), target: { label: 'x', head: H2, mergeBase: H1, base: 'main' } }
+  const md = renderReport(l, {})
+  assert.match(md, /Fix:\*\* verified and committed in `cccccccccccc` on `bughunt\/pr-7` \(attempt 2\)/)
+  assert.match(md, /Fix:\*\* proposed in `dddddddddddd`: it passed the fix check, but no independent verifier has reviewed it\./)
+  assert.match(md, /Fix:\*\* unresolved after 2 attempt\(s\): breaks the suite\./)
+  assert.match(md, /Disposition: \*\*changes requested\*\* \(F1, F2, F3\)/, 'a fix on a side branch closes nothing in the PR')
+  assert.match(md, /It is not in the PR until someone merges it there\./)
 })
 
 console.log('== findings: grounding')

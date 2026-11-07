@@ -35,7 +35,7 @@ const MOVES = {
     none: ['proposed'],
     proposed: ['verified', 'rejected'],
     rejected: ['proposed', 'unresolved'],
-    verified: [], unresolved: [],
+    verified: [], unresolved: ['proposed'],   // a later run may try again
   },
 }
 
@@ -276,6 +276,22 @@ export function reconcile(ledger, evidence) {
   return { ledger: { ...ledger, findings }, corrected }
 }
 
+// The ledger corrected to what a committed repair's re-run shows. `results` is
+// {F<n>: {verdict: PASS|FAIL, reason}} from evidence.mjs recheck. A repair that
+// no longer proves out (its reproduction does not pass at the commit, or does
+// not fail at its parent) is taken back to rejected, outside the MOVES table
+// and recorded in history. Returns {ledger, corrected}.
+export function reconcileFix(ledger, results) {
+  const corrected = []
+  const findings = ledger.findings.map(f => {
+    const r = results[f.finding_id]
+    if (!r || r.verdict !== 'FAIL' || !['verified', 'proposed'].includes(f.fix_status)) return f
+    corrected.push({ finding_id: f.finding_id, from: `fix ${f.fix_status}`, to: 'fix rejected' })
+    return { ...f, fix_status: 'rejected', history: [...f.history, { field: 'fix_status', from: f.fix_status, to: 'rejected', why: `evidence recheck: ${r.reason}` }] }
+  })
+  return { ledger: { ...ledger, findings }, corrected }
+}
+
 // ---------- grounding ----------
 
 // Checks each evidence quote against the file it cites, at the cited line
@@ -296,7 +312,9 @@ export function missingEvidence(finding, readAt) {
 
 // ---------- the verdict ----------
 
-const OPEN = f => !f.stale && f.verification_status !== 'refuted' && f.verification_status !== 'preexisting' && f.fix_status !== 'verified'
+// A verified fix lives on the fix branch, not in the PR's head, so it never
+// closes a finding: the PR still has the bug until the fix is merged into it.
+const OPEN = f => !f.stale && f.verification_status !== 'refuted' && f.verification_status !== 'preexisting'
 
 // The PR's disposition, computed from the findings, never chosen by a model:
 // manual_review when the last run did not finish; changes_requested when a
@@ -396,6 +414,11 @@ export function renderReport(ledger, evidence = {}) {
     for (const e of f.evidence) L.push(`- **Evidence:** \`${e.file}:${e.line}\` \`${String(e.quote).replace(/`/g, "'").slice(0, 160)}\``)
     if (f.evidence_missing && f.evidence_missing.length) L.push(`- **Warning:** quoted evidence not found at ${f.evidence_missing.join(', ')}`)
     if (f.root_cause) L.push(`- **Root cause:** ${f.root_cause}`)
+    const fa = f.fix_artifact
+    if (f.fix_status === 'verified') L.push(`- **Fix:** verified and committed${fa && fa.commit ? ` in \`${fa.commit.slice(0, 12)}\`` : ''} on ${fa && fa.branch ? `\`${fa.branch}\`` : 'the fix worktree'}${fa && fa.attempts ? ` (attempt ${fa.attempts})` : ''}: the reproduction passes with it and fails without it, the suite passes, and an independent verifier accepted it. It is not in the PR until someone merges it there.`)
+    else if (f.fix_status === 'proposed') L.push(`- **Fix:** proposed${fa && fa.commit ? ` in \`${fa.commit.slice(0, 12)}\`` : ''}: it passed the fix check, but no independent verifier has reviewed it.`)
+    else if (f.fix_status === 'unresolved') L.push(`- **Fix:** unresolved after ${fa && fa.attempts ? fa.attempts : 'every'} attempt(s)${fa && fa.last_feedback ? `: ${fa.last_feedback}` : ''}.`)
+    else if (f.fix_status === 'rejected') L.push(`- **Fix:** rejected${fa && fa.last_feedback ? `: ${fa.last_feedback}` : ''}.`)
     if (tests.length) for (const r of tests) L.push(`- **Test run:** ${r.arm || r.kind || 'run'}: exit ${r.exit}${r.verdict ? `, ${r.verdict}` : ''}`)
     else L.push('- **Test runs:** none recorded')
   }

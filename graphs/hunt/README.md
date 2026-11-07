@@ -13,8 +13,14 @@ the change calls for. Then:
   head and at the merge-base, in a sandbox.
 - The session re-runs every reproduction before the report.
 
-It never edits the branch under review. Still planned:
-- the propose and fix modes;
+`--propose` and `--fix` then repair each reproduced bug in an isolated
+worktree, one at a time:
+- A repair is kept only when the reproduction passes with it, fails without
+  it, and the repo's suite is no worse.
+- `--fix` also has an independent verifier review it and write adversarial
+  tests that must pass.
+
+No mode ever touches the branch under review, merges, or pushes. Still planned:
 - wiring into `/build-app` and `/loop`;
 - the live benchmark.
 
@@ -31,6 +37,12 @@ impact (impact-mapper) → route = intake signals ∪ impact picks, capped at ma
     runner runs `evidence.mjs repro` → the gate reads the script's own last line
 the session: findings.mjs save → evidence.mjs recheck (re-runs every reproduction, corrects the
 ledger to the runs) → findings.mjs report
+  → mode propose | fix: per reproduced (or --approve'd) finding, most severe first, in <state>/fix:
+    repairer → runner: evidence.mjs fix (three-arm + suite) → FAIL: revert, feedback, retry
+      propose: PASS → evidence.mjs commit → proposed
+      fix:     PASS → fix-verifier (blind) → runner: evidence.mjs adversarial
+               accept + PASS → evidence.mjs commit → verified; else revert, feedback, retry
+    attempts used up (maxRepairAttempts, default 2) → revert → unresolved
 impact returns nothing → route on the intake signals alone
 a hunter returns nothing → its lens is not_covered, and the disposition becomes manual review
 ```
@@ -43,7 +55,9 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
 | Skeptic | `agents/skeptic.md` | sonnet | high | once per candidate |
 | Referee | `core/agents/advisor.md` (shared), "Refereeing a finding" | fable | high | once per run, only when something is contested |
 | Reproducer | `agents/reproducer.md` | sonnet | high | once per confirmed finding, up to maxRepros |
-| Runner | `agents/runner.md` | haiku | high | once per written reproduction |
+| Runner | `agents/runner.md` | haiku | high | once per written reproduction, and per repair command |
+| Repairer | `agents/repairer.md` | sonnet | high | per repair attempt (propose, fix) |
+| Fix verifier | `agents/fix-verifier.md` | sonnet | high | per repair that passed its check (fix only) |
 
 ## Routing
 
@@ -129,6 +143,69 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
 - **A new head clears what belonged to the old one.** A re-found finding loses
   its reproduction, test results, and fix, and drops back under the confidence
   cap.
+- **Repair (propose, fix)** runs one finding at a time, most severe first, all
+  in `<state>/fix`.
+  - **Which findings:** only `reproduced` ones, plus confirmed ones the human
+    names with `--approve`.
+  - **The repairer** must find the root cause before changing anything. It
+    makes the smallest change, never touches the reproduction test, never
+    edits or deletes an existing test, and never commits.
+  - **`evidence.mjs fix` stages the repair first.** It builds a git tree in a
+    private index: HEAD plus every change, ignored files left out, modes and
+    symlink targets kept. Every arm runs on an export of that tree, the tree is
+    the fingerprint, and commit commits that tree. What is checked is what is
+    committed.
+  - **It FAILs a repair** (feedback, then retry) that:
+    - changed nothing;
+    - edits or deletes an existing test (renames count as delete plus add);
+    - edits a file that defines what the suite runs (`package.json`, test
+      configs, `conftest.py`, snapshots, `Makefile`, and similar);
+    - edits the reproduction;
+    - changes more than 8 source files;
+    - leaves the reproduction failing, or passing without it (it cannot tell a
+      fix from no fix);
+    - leaves the suite failing where it passed without the repair.
+  - **It BLOCKs a repair** (no retry; the finding is unresolved for a human)
+    when no attempt could pass as things stand:
+    - the suite already fails without the repair, so a regression inside it
+      cannot be told apart;
+    - an earlier fix already committed a test at the reproduction's path;
+    - the reproduction that proved the finding is unreadable (it fails closed,
+      never into a suite-only check);
+    - the suite does not fit the time the check allows.
+  - **A 9-minute budget.** One `fix` call has 9 minutes of wall clock in all,
+    because the runner agent's Bash call allows 10. A repo whose suite takes
+    longer than about 4 minutes cannot be repaired by `/bughunt`; the finding is
+    BLOCKED and says why.
+  - **On PASS,** the reproduction test joins the change.
+  - **Propose mode** commits after the fix check. The fix stays `proposed`,
+    because nobody independent reviewed it.
+  - **Fix mode** goes on:
+    - the fix verifier reviews the change without the repairer's reasoning (is
+      the root cause gone, are callers intact, any unrelated change, any new
+      boundary failure) and writes up to 5 adversarial tests;
+    - `evidence.mjs adversarial` runs them against the checked state;
+    - only an accept plus a PASS commits the repair and marks it `verified`.
+  - **The verifier's accept must agree with its own checks.** It counts only
+    when the verifier also says the root cause is addressed, callers are
+    preserved, and nothing unrelated changed.
+  - **A failed attempt is reverted** (`evidence.mjs revert`, ignored files
+    included). The next attempt gets the reasons as fenced feedback. A revert
+    that fails stops all repair, so nothing unchecked is swept into a later
+    commit. When attempts run out, the finding is `unresolved` with the last
+    reason, and a later run tries it again.
+  - **A fix check that cannot run** (no worktree) stops all repair.
+  - **A verified fix does not close the finding.** It sits on the fix branch,
+    not in the PR, so the disposition still counts the bug until someone merges
+    the fix.
+  - **Commits only what was checked.** `evidence.mjs commit` re-stages the
+    tree and refuses one that differs from the checked tree, so an agent cannot
+    slip a change in. It commits with plumbing (`commit-tree`, `update-ref`), so
+    no hook runs.
+  - **Rechecked from the commit.** `recheck` re-proves each committed repair
+    from its commit. The commit must still be on the fix worktree or its
+    branch, the reproduction must pass at it, and the reproduction must fail at
+    its parent. One that does not hold goes back to `rejected`.
 - **The disposition is computed** (`findings.mjs disposition`), never chosen by a model.
   - **changes requested:** an open confirmed or reproduced bug above LOW.
   - **manual review:** an unsettled HIGH or CRITICAL finding, a lens not fully covered, or a run that stopped early. A stopped run never replaces the saved findings.
@@ -158,6 +235,8 @@ ledger.
 | `repro/F<n>/` | each reproduction: `repro.json` and `files/<test_file>` |
 | `evidence/F<n>.json` | what `evidence.mjs` ran and saw: each arm's commit, exit code, marker, and output tail, plus the verdict |
 | `work/F<n>/` | the exports a run uses, removed when it ends |
+| `fix/` | the fix worktree (propose, fix): detached in propose mode, branch `bughunt/<key>` in fix mode. Made by `/bughunt`, never removed by it |
+| `repro/F<n>/adversarial/` | the fix verifier's adversarial tests: `adversarial.json` and `files/` |
 
 ## Permissions and trust
 
@@ -167,8 +246,49 @@ ledger.
   - The reproducer writes only `repro/F<n>/`. `evidence.mjs` voids the run if
     the analysis tree changed.
   - The runner runs one fixed command.
+  - The repairer writes only the fix worktree, and never commits.
+  - The fix verifier writes only its adversarial directory. The worktree is
+    fingerprinted, and a change voids the check.
+  - Every commit is `evidence.mjs commit`, in the fix worktree, of the checked
+    tree.
+  - The fix worktree is checked every time:
+    - `<state>/fix` must be a real directory, not a symlink;
+    - its `.git` must be a plain linked-worktree file pointing into this repo's
+      `worktrees/`;
+    - git's own record of which worktree owns that admin directory
+      (`<admin>/gitdir`) must name this exact `.git`.
+
+    A `.git` redirected at the repo, or at the user's own worktree, or a fix dir
+    symlinked to it, once let commit and revert act on the user's branch and
+    files (found in review, twice). The admin directory must also be the fix
+    worktree's own (`fix`, `fix1`, ...). HEAD must be detached (propose) or
+    exactly `bughunt/<key>` (fix), and commit moves that explicit ref, never a
+    symbolic HEAD that points elsewhere.
+  - **What these checks are for.** They stop `evidence.mjs` from being turned
+    against the user's work by the PR's content, or by an agent that wanders.
+    They are not a sandbox against a deliberately malicious agent: the agents
+    run with your user's file access and could run `git` on your repo
+    themselves. Agents are limited by their instructions, and under
+    `/build-app` by the guard hook. Run `/bughunt` only where you would run
+    the agents.
+  - **The guards judge the staged tree, never `git status`.** Skip-worktree
+    flags once hid edits from status that the commit would have kept.
+  - **Every export uses a private index and `checkout-index`, never
+    `git archive`.** Archive honors a tree's own `export-ignore`, which once hid
+    a broken test from the check while the commit kept it.
+  - **`revert` rebuilds the index from HEAD** and restores every file. It
+    removes untracked and ignored files and nested repos (`clean -ffdqx`), and
+    says DONE only once the worktree stages to exactly HEAD's tree.
+- **No git call runs the PR's hooks or fsmonitor.** Every git call in `intake`
+  and `evidence.mjs` runs with `core.hooksPath=/dev/null` and
+  `core.fsmonitor=false`. Both are settings a repo may give with a relative
+  path, which resolves inside the checkout: the PR's own code.
+  - Measured: `git status` in a worktree of the PR ran a committed fsmonitor
+    script, and a post-commit hook the PR committed ran on commit with the full
+    environment.
+  - Git calls inside the fix worktree also get the sandbox environment.
 - **Running code from the change.** Only `evidence.mjs` does it:
-  - **Where:** in a fresh `git archive` export of each commit, so the repo,
+  - **Where:** in a fresh `checkout-index` export of each commit, so the repo,
     its worktrees, and the user's checkout are never touched. The repo's
     `node_modules` are linked in when present.
   - **Environment:** only an allowlist of variables a toolchain needs (`PATH`,
