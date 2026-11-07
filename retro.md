@@ -946,3 +946,93 @@ PR review (#26; 2 MEDIUM, 2 LOW, all fixed):
 - The total time did not add up from the rows: 2 h 11 min of stage time against 2 h 14 min
   elapsed.
 - A failed final QA did not name its cost.
+
+## 25. /bughunt, part 1: a read-only bug-discovery graph (2026-11-06)
+
+**Why.** An agent that built features with an unattended loop said, when asked, that it never
+reviewed the PRs. The QA graph (`harness-repair`) has one generalist reviewer and one QA auditor,
+and nothing in it reproduces a bug before fixing it. `/bughunt` is a dedicated graph for real
+functional defects one change introduced. It is planned in five PRs: discovery, then verification
+and reproduction, repair, hardening and wiring into `/build-app` and `/loop`, and a live benchmark.
+
+**What changed (PR1: discover mode, read-only).**
+- `graphs/hunt/skills/bughunt/intake.mjs` (deterministic):
+  - resolves a PR (through `gh pr view`), a branch, or a range to exact commits and the merge-base;
+  - parses the diff into files, head-side hunks, and added and removed lines;
+  - routes lenses from the change's own lines, never from tests or docs;
+  - checks out a detached analysis worktree at the head, so agents never read the user's checkout.
+- `bughunt-flow.js` runs the graph:
+  - the impact-mapper maps callers, contracts, tests, and the protections the change must keep;
+  - one hunter per routed lens runs in parallel; the impact map can add a lens, never remove one;
+  - code drops candidates without a trigger, path, observable, and quoted evidence, or under
+    confidence 60;
+  - code also discards every finding of a hunter that did not return its lens reference's token;
+  - findings merge under stable ids.
+- `core/skills/findings/findings.mjs` owns the shared rules:
+  - the record, with every field the spec lists;
+  - ids that survive re-runs: a new head re-verifies a re-found finding and marks the rest stale;
+  - the status moves;
+  - a computed disposition;
+  - metrics against ground truth;
+  - a report that keeps confirmed and unverified findings apart, and takes test runs only from
+    evidence files.
+- `core/skills/bug-lenses` holds the finding bar, the do-not-flag list, the untrusted-content rule,
+  and six lens references.
+
+**The research behind it.** I read eight public projects with `gh api`, installed and ran nothing,
+and spot-checked the licenses.
+- **Adapted, with credit:**
+  - paad's trigger, path, and observable rule, and its confidence floor and cap;
+  - bug-hunt's blind skeptic and asymmetric dismissal;
+  - the code-review plugin's do-not-flag list. It moved to `anthropics/claude-plugins-official`
+    (Apache-2.0); its old home in `claude-code` is "All rights reserved";
+  - bugbot's coverage ledger and computed disposition;
+  - superpowers' root cause before a fix;
+  - prove-it's claim freeze.
+- **Ideas only, no text:** Trail of Bits, which is CC-BY-SA-4.0.
+- **Rejected:** buddhi-review, an app with a licensing call to its own API.
+- The credits are in `core/skills/bug-lenses/CREDITS.md`.
+
+**Bugs caught before review.**
+- The diff parser read a removed `-- comment` line (SQL) as a file header; headers are now
+  recognized only before a file's first hunk.
+- Title similarity counted stopwords and plurals, so two lenses describing one bug in different
+  words stayed two findings.
+- The PR-description fence left a stray `>` when it removed a forged closing tag.
+
+**PR review (#27).** Two independent reviewers: a line-level reviewer and a behavioral QA auditor.
+They found 2 HIGH, 5 MEDIUM, and 3 LOW, which overlap to 10 distinct issues. All are fixed and
+tested:
+- **HIGH:** an escalated run (bad args, a mode not built yet) returned an empty findings list, and
+  `save` replaced the ledger's findings with it. The report then said "pass". Now a stopped run
+  never replaces anything, the workflow hands back the earlier findings, and a stopped run's
+  disposition is manual review.
+- **HIGH:** a branch named `_wip` made the key `_wip`, which the ledger rejects. The whole hunt ran,
+  then could not be saved.
+- **Paths:** they now come from `git diff --name-status -z`. Before, a deleted binary was listed as
+  `/dev/null` and treated as code. A filename with a space kept git's trailing tab, so `my notes.md`
+  was not recognized as docs. Quoted names kept their backslashes.
+- **The base:** a PR target diffed against a stale local `origin/<base>`, which pulled other people's
+  merged work into the review. The base is now refreshed first.
+- **Merging:** the same generic title far apart in one file merged two different bugs. Equal titles
+  now also need the same category and a quoted line in common.
+- **Coverage:** `partial` coverage, and a hunter that listed nothing, still allowed "pass".
+- **Untrusted text:** the PR title and the impact map's notes reached prompts unfenced.
+- **Keys:** `feat/x` and `feat-x` shared one ledger and worktree. Keys now carry a hash of the exact
+  name.
+- **Errors:** a missing `gh` gave an empty failure reason, and `report` on a missing ledger printed
+  "pass".
+
+A second mutation run over the fixes: 14 of 14 caught.
+
+**Mutation run.** 21 mutations across `findings.mjs`, `intake.mjs`, and the workflow. 20 were caught
+at first. The survivor was a recall that used the wrong denominator, which the test could not see
+because its reported count happened to equal its truth count. A third true bug in the test closes
+it; 21 of 21 are caught.
+
+**Stats.**
+- 71 new tests: 30 findings, 20 intake (over real throwaway repos), and 21 routing and drift. The
+  suite is 460 workflow tests, 0 failed.
+- 7 new validate.sh rules.
+- 3 new skills, 2 new agents, and 1 workflow.
+- Discover mode is tested with mocked agents only; its first live run is part of PR5.

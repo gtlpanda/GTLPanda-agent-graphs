@@ -10,6 +10,7 @@
 > /dev <task>         plan it (you approve) → build it tests-first → prove every acceptance criterion → QA
 > /loop               keep a branch green: check → fix → review → QA, until it passes or needs you
 > /release-pr [PR#]   docs into the PR → you approve the exact commit → merge once → verify the deploy
+> /bughunt [PR#]      impact map → specialist hunters → findings with evidence (verify, reproduce, fix: next)
 > ```
 >
 > Install: `git clone https://github.com/gtlpanda/PandaStack.git && cd PandaStack && ./install.sh`
@@ -36,6 +37,7 @@
 | build | [`graphs/dev/`](graphs/dev/README.md) | `/dev <task>` | planner → advisor plan gate → you approve → scouts → implementer per component, tests first → acceptance auditor → the QA graph | live-tested |
 | build | [`graphs/qa/`](graphs/qa/README.md) | `/loop` | checker → fixer → reviewer → qa-auditor, with the advisor confirming blocking findings before any fix | live-tested |
 | build | [`graphs/release/`](graphs/release/README.md) | `/release-pr [PR#]` | scribe (docs in the PR) → readiness on the exact head → merger, once → deploy-watcher, evidence for the merge commit | tested with mocked agents |
+| build | [`graphs/hunt/`](graphs/hunt/README.md) | `/bughunt [PR# \| branch \| a..b]` | intake (exact commits, hunks, routing signals, a worktree at the head) → impact-mapper → one hunter per lens the change calls for (logic, contract, concurrency, security, errors, regression), in parallel → findings merged under stable ids in code → a report with a computed disposition; read-only | discover mode tested with mocked agents; verification, reproduction, and fixes not built yet |
 | build | [`graphs/build/`](graphs/build/README.md) | `/build-app` | the driver, detached: one fresh headless `/dev --slice` session per backlog slice, its own checks (commit prefix, clean tree, frozen tests, its own verify), fast-forward onto `integration/<app>`, usage-limit waits, the backlog brakes; then one QA pass over the whole branch, the push, and one PR for you | live-run once end to end: a 7-slice CLI in 1 h 40 min (retro 24) |
 | marketing | [`graphs/seo/`](graphs/seo/README.md) | `seo-check.mjs check <dir> --site <url>` | so far only the check: a built site's title, description, canonical, Open Graph, and JSON-LD tags, duplicates across pages, the sitemaps (which decide the strict pages), and robots.txt, `SEO-CHECK: PASS\|FAIL`; the audit graph not built yet | check tested offline |
 
@@ -90,7 +92,7 @@ symlinked into `~/.claude/` on every machine.
 
 ```
 install.sh  settings.json  CLAUDE.md  loop.md   shared config, linked into ~/.claude/
-core/skills/                                    skills more than one graph uses (verify, harness-review, knowledge-map, default-stack, gtm-brief, backlog)
+core/skills/                                    skills more than one graph uses (verify, harness-review, knowledge-map, default-stack, gtm-brief, backlog, findings, bug-lenses)
 core/agents/                                    agents more than one graph uses (advisor, checker)
 graphs/<graph>/agents/                          that graph's agents
 graphs/<graph>/workflows/                       that graph's workflow script
