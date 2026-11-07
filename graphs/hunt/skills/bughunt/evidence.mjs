@@ -369,7 +369,7 @@ export function recheck(stateDir, opts = {}) {
     lines.push(`RECHECK ${f.finding_id}: ${r.verdict} (the ledger said ${f.verification_status})`)
     // test_results carry every run on file for this finding: the reproduction, and any fix runs.
     const all = written ? readEvidenceRecord(stateDir, f.finding_id).runs || r.runs : r.runs
-    const out = reconcile(ledger, { [f.finding_id]: { verdict: r.verdict, reason: r.reason, runs: all } })
+    const out = reconcile(ledger, { [f.finding_id]: { verdict: r.verdict, reason: r.reason, runs: all } }, intake.files)
     ledger = out.ledger
     writeLedger(ledgerFile, ledger)
     corrected.push(...out.corrected)

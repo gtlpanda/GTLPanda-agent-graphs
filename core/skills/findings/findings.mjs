@@ -145,6 +145,20 @@ function mergeFindings(known, candidates, head) {
   return { findings, added, merged }
 }
 
+// Whether the change touched the finding's lines: its file is new, or one of
+// the file's head-side hunks (intake's `files`) is within NEAR_LINES of the
+// finding's range. A reproduction that also fails at the merge-base is a
+// pre-existing bug only when the change left these lines alone; when it wrote
+// them, the behavior the test asserts is the change's own (a feature the base
+// never had), so the change introduced the bug. The first live benchmark run
+// called a brand-new discount threshold "pre-existing" this way.
+function touchedByChange(f, files) {
+  const file = (Array.isArray(files) ? files : []).find(x => x && x.path === f.file_path)
+  if (!file) return false
+  if (file.status === 'A') return true
+  return (file.hunks || []).some(([s, e]) => s <= f.line_range[1] + NEAR_LINES && f.line_range[0] <= e + NEAR_LINES)
+}
+
 // Moves one status field, or throws on a move the table does not allow.
 function transition(f, field, to, why) {
   const from = f[field]
@@ -159,7 +173,7 @@ function transition(f, field, to, why) {
 
 export {
   SEVERITIES, BLOCKING, LENSES, CONFIDENCE_FLOOR, UNREPRODUCED_CAP, REPRODUCED_CONFIDENCE, MOVES,
-  candidateProblems, sameFinding, mergeFindings, transition,
+  candidateProblems, sameFinding, mergeFindings, transition, touchedByChange,
 }
 
 // ---------- the ledger ----------
@@ -252,13 +266,15 @@ const FROM_EVIDENCE = { REPRODUCED: 'reproduced', PREEXISTING: 'preexisting', NO
 const REPRO_STATUSES = ['confirmed', 'reproduced', 'preexisting', 'not_reproduced']
 
 // The ledger corrected to what the runs show. `evidence` is {F<n>: {verdict,
-// reason, runs}} from evidence.mjs. Execution outranks every agent here: a
+// reason, runs}} from evidence.mjs; `files` is intake's changed files, which
+// decide whether a test failing at both commits means pre-existing (the change
+// left the lines alone) or reproduced (the change wrote them). Execution outranks every agent here: a
 // status that disagrees with the runs is moved to match them (outside the
 // MOVES table, and recorded in history), test_results are replaced by the runs,
 // and confidence follows (at least 90 when reproduced, at most 79 otherwise).
 // Findings the skeptic or referee settled (refuted, contested) are never
 // touched. Returns {ledger, corrected: [{finding_id, from, to}]}.
-export function reconcile(ledger, evidence) {
+export function reconcile(ledger, evidence, files = null) {
   const corrected = []
   const findings = ledger.findings.map(f => {
     const e = evidence[f.finding_id]
@@ -266,7 +282,7 @@ export function reconcile(ledger, evidence) {
     const g = { ...f, history: [...f.history] }
     g.test_results = (e.runs || []).map(r => ({ kind: r.kind || 'repro', arm: r.arm, sha: r.sha, exit: r.exit, timedOut: !!r.timedOut, marker: !!r.marker, error: r.error || null }))
     g.reproduction_artifact = { ...(f.reproduction_artifact || {}), verdict: e.verdict, reason: e.reason }
-    const to = FROM_EVIDENCE[e.verdict]
+    const to = e.verdict === 'PREEXISTING' && touchedByChange(f, files) ? 'reproduced' : FROM_EVIDENCE[e.verdict]
     if (to && to !== f.verification_status) {
       g.history.push({ field: 'verification_status', from: f.verification_status, to, why: `evidence recheck: ${e.reason}` })
       g.verification_status = to

@@ -221,6 +221,20 @@ function mergeFindings(known, candidates, head) {
   return { findings, added, merged }
 }
 
+// Whether the change touched the finding's lines: its file is new, or one of
+// the file's head-side hunks (intake's `files`) is within NEAR_LINES of the
+// finding's range. A reproduction that also fails at the merge-base is a
+// pre-existing bug only when the change left these lines alone; when it wrote
+// them, the behavior the test asserts is the change's own (a feature the base
+// never had), so the change introduced the bug. The first live benchmark run
+// called a brand-new discount threshold "pre-existing" this way.
+function touchedByChange(f, files) {
+  const file = (Array.isArray(files) ? files : []).find(x => x && x.path === f.file_path)
+  if (!file) return false
+  if (file.status === 'A') return true
+  return (file.hunks || []).some(([s, e]) => s <= f.line_range[1] + NEAR_LINES && f.line_range[0] <= e + NEAR_LINES)
+}
+
 // Moves one status field, or throws on a move the table does not allow.
 function transition(f, field, to, why) {
   const from = f[field]
@@ -733,6 +747,9 @@ if (toRepro.length && !overBudget('Reproduce')) {
     ledger.history.push({ node: 'run', kind: 'repro', finding: id, verdict: g.verdict })
     if (g.verdict === 'REPRODUCED') {
       transition(f, 'verification_status', 'reproduced', `evidence.mjs: ${art.reason}`)
+      f.confidence = Math.max(f.confidence, REPRODUCED_CONFIDENCE)
+    } else if (g.verdict === 'PREEXISTING' && touchedByChange(f, IN.files)) {
+      transition(f, 'verification_status', 'reproduced', `evidence.mjs: ${art.reason}; but the change wrote these lines, so the behavior the test asserts is the change's own, not an old bug`)
       f.confidence = Math.max(f.confidence, REPRODUCED_CONFIDENCE)
     } else if (g.verdict === 'PREEXISTING') {
       transition(f, 'verification_status', 'preexisting', `evidence.mjs: ${art.reason}`)

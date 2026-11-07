@@ -230,6 +230,14 @@ await test('reconcile moves a status to what the runs show, fills test_results f
   assert.equal(l.findings[0].verification_status, 'not_reproduced', 'the input ledger is not mutated')
 })
 
+await test('reconcile: PREEXISTING on lines the change wrote is reproduced; on untouched lines, or with no file list, pre-existing', () => {
+  const l = ledgerWith([F('confirmed', 'HIGH', { line_range: [10, 12] }), F('confirmed', 'HIGH', { finding_id: 'F2', file_path: 'src/cart.js', line_range: [80, 81] }), F('confirmed', 'HIGH', { finding_id: 'F3', file_path: 'src/new.js', line_range: [1, 1] })])
+  const files = [{ path: 'src/cart.js', status: 'M', hunks: [[9, 14]] }, { path: 'src/new.js', status: 'A', hunks: [[1, 20]] }]
+  const ev = { verdict: 'PREEXISTING', reason: 'r', runs: [] }
+  const out = reconcile(l, { F1: ev, F2: ev, F3: ev }, files)
+  assert.deepEqual(out.ledger.findings.map(f => f.verification_status), ['reproduced', 'preexisting', 'reproduced'])
+  assert.equal(reconcile(l, { F1: ev }).ledger.findings[0].verification_status, 'preexisting', 'without intake\'s files, nothing is assumed touched')
+})
 await test('reconcileFix takes back a committed repair that no longer proves out, and leaves the rest alone', () => {
   const l = ledgerWith([
     F('reproduced', 'HIGH', { fix_status: 'verified', fix_artifact: { commit: 'a'.repeat(40) } }),
