@@ -1359,18 +1359,32 @@ defects:
 The scoring also had a bug of my own: totals counted matching reports as bugs found (recall 1.375).
 All four are fixed and tested, and 3 of 3 mutations are caught.
 
-**The second full run, on the fixed code:**
+**The second full run, on the fixed code.** Discovery is scored over the 10 discover runs only.
+The PR review caught that my first totals also counted the two fix-mode re-runs, giving "8 of 8"
+and $1.50 per bug; the corrected figures are below, and the PR and the READMEs were corrected too.
 
 | Measure | Result |
 |---|---|
-| Planted bugs found | 8 of 8, each reproduced by a real failing test |
+| Planted bugs found | 6 of 6, each reproduced by a real failing test |
 | False positives on the 4 bug-free changes | 0 |
-| Precision against the truth files | 0.75 (9 of 12). The other 3 are each a PR that rewrote its own test to hide the bug: real defects, absent from my truth files, never hallucinated. I left the truth files as they were set before the run |
-| Duplicate reports | 1 |
+| Precision against the truth files | 0.70 (7 of 10). The other 3 are each a PR that rewrote its own test to hide the bug: real defects, absent from my truth files, never hallucinated. I left the truth files as they were set before the run. One more match is a second real bug 4 lines from a planted one, counted through the 5-line window |
 | Recheck | agreed every time, 0 corrections |
 | Fix mode | `boundary-discount`: fixed, verified, committed on `bughunt/<key>`. `logic-off-by-one`: unresolved, because the PR's own test asserts the buggy result and a repair may never edit an existing test. `pr` was untouched in both |
-| Cost | $12.01 for 12 runs, $1.50 per true bug found |
-| Time | 22.6 minutes |
+| Cost | $9.64 for discovery, $1.61 per true bug found; $12.01 for all 12 runs |
+| Time | 16.5 minutes for discovery; 22.6 minutes for all 12 runs |
+
+**PR review (#31).** It found 4 MEDIUM and 1 LOW, all fixed:
+- **Double counting.** The fix-mode re-runs were counted twice in the totals (above).
+- **The same-line merge was too eager.** Two different bugs quoting a generic line like `}` collapsed
+  into one. A shared quote must now carry at least 16 letters or digits, and a merged report that
+  says something different keeps its title (`also_reported_as`) and its evidence.
+- **The "change wrote these lines" upgrade was too loose.** It allowed 5 lines of slack, so an old
+  bug next to an unrelated edit read as introduced. Only an exact overlap with the change's hunks
+  counts now. Its limits are stated in the code: a renamed file reads as new, and a cosmetic edit
+  reads as written.
+- **Two audit trails.** The workflow and recheck recorded the upgrade differently. They now share
+  one note.
+- **The fixture test** now checks each truth range against the change's real hunks.
 
 **The pre-registered conditions all pass:**
 - C1: every case produced a ledger with a finished run.
@@ -1386,6 +1400,6 @@ All four are fixed and tested, and 3 of 3 mutations are caught.
 - A fix is blocked whenever the PR's test asserts the bug.
 
 **Stats.**
-- 19 new tests: 15 offline benchmark tests, plus 4 for the fixes.
+- 21 new tests: 16 offline benchmark tests, plus 5 for the fixes.
 - Live spend for this part: $26.15 over 25 runs.
-- The suite is 588 workflow tests, 0 failed.
+- The suite is 590 workflow tests, 0 failed.

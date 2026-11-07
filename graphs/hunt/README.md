@@ -30,9 +30,9 @@ in:
 - **`/loop`** runs it in discover mode whenever the PR's head has changed since
   the last hunt, and reports. It never posts to the PR.
 
-**Live-run** on the benchmark below (2026-11-07). All 8 planted bugs were
+**Live-run** on the benchmark below (2026-11-07). All 6 planted bugs were
 found and reproduced, there were no false positives on the 4 bug-free changes,
-and the run cost $12.01 for 12 runs.
+and discovery cost $9.64 for 10 cases.
 
 ```
 intake.mjs (the session, deterministic) → the commits, files, hunks, routing signals, analysis worktree
@@ -362,18 +362,21 @@ It is opt-in, costs real money, and is never part of `scripts/test.sh`.
 The second live run, after the fixes the first one prompted (results in
 `bench/results-2026-11-07.json`):
 
+Discovery is scored over the 10 discover runs only; a fix run hunts its case a
+second time.
+
 | Measure | Result |
 |---|---|
-| Planted bugs found | 8 of 8 (recall 1.0), every one reproduced by a failing test |
+| Planted bugs found | 6 of 6 (recall 1.0), every one reproduced by a failing test |
 | False positives on the 4 bug-free changes | 0 (the misleading one included) |
-| Precision against the truth files | 0.75: 9 of 12 confirmed findings |
+| Precision against the truth files | 0.70: 7 of 10 confirmed findings |
 | The 3 others | the same pattern each time: the PR rewrote its own test to hide the bug. Real defects a reviewer should flag, absent from the truth files, never hallucinated |
-| Duplicate reports | 1 |
+| One more match | in `errors-swallowed`, a second real bug (`portOf('null')` throws), 4 lines from the planted one, counts as a match through the 5-line window |
 | Recheck corrections | 0: the session's re-run agreed with the graph every time |
 | Fix mode, `boundary-discount` | fixed, verified (three-arm proof, suite, fix verifier, an adversarial test), committed on `bughunt/<key>`; `pr` untouched |
 | Fix mode, `logic-off-by-one` | unresolved after 2 attempts: the PR's own test asserts the buggy result, so any correct fix breaks the suite, and a repair may never edit an existing test |
-| Cost | $12.01 for 12 runs: $0.65 to $1.28 per run, $1.50 per true bug found |
-| Time | 22.6 minutes in all: 47 to 215 seconds per run |
+| Cost | $9.64 for the 10 discover runs ($0.65 to $1.22 each), $1.61 per true bug found; $12.01 for all 12 runs |
+| Time | 16.5 minutes for discovery, 47 to 135 seconds per case; 22.6 minutes for all 12 runs |
 
 **Limits.**
 - The fixtures are tiny, self-authored JavaScript changes, so they show the

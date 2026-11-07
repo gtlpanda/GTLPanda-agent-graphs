@@ -33,11 +33,17 @@ for (const name of Object.keys(CASES)) {
     assert.equal(base.status, 0, `the suite fails at the base: ${base.stdout.slice(-400)}`)
     const truth = JSON.parse(readFileSync(join(out, `${name}.truth.json`), 'utf8'))
     assert.deepEqual(truth.bugs, CASES[name].bugs)
-    const changed = git(dir, 'diff', '--name-only', 'main', 'pr').split('\n')
     for (const b of truth.bugs) {
       const lines = readFileSync(join(dir, b.file_path), 'utf8').split('\n').length - 1
       assert.ok(b.line_range[0] >= 1 && b.line_range[1] <= lines, `${b.file_path}:${b.line_range} is outside the file (${lines} lines)`)
-      assert.ok(changed.includes(b.file_path) || truth.bugs.length && name.startsWith('contract'), `${b.file_path} is not in the change`)
+      // contract-return-shape's bug is in an unchanged caller (greet.js) of the changed callee (users.js).
+      if (name === 'contract-return-shape') {
+        assert.equal(b.file_path, 'src/greet.js')
+        assert.match(git(dir, 'diff', '--name-only', 'main', 'pr'), /^src\/users\.js$/m)
+        continue
+      }
+      const hunks = [...git(dir, 'diff', '-U0', 'main', 'pr', '--', b.file_path).matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)].map(m => { const s = Number(m[1]); const n = m[2] === undefined ? 1 : Number(m[2]); return [s, n > 0 ? s + n - 1 : s] })   // a deletion touches the line it follows, as intake records it
+      assert.ok(hunks.some(([s, e]) => s <= b.line_range[1] && b.line_range[0] <= e), `${b.file_path}:${b.line_range} is not on a line the change wrote (hunks ${JSON.stringify(hunks)})`)
     }
   })
 }
@@ -56,6 +62,11 @@ await test('the runner scores each ledger against its truth: precision, recall, 
   assert.match(r.stdout, /BENCH-BUGHUNT: DONE 3 case\(s\)$/m)
   const t = JSON.parse(readFileSync(join(o, 'results.json'), 'utf8')).totals
   assert.deepEqual({ tp: t.true_positives, fp: t.false_positives, p: t.precision, r: t.recall, cleanFp: t.clean_cases_with_false_positives, cost: t.cost_usd, perBug: t.cost_per_true_bug }, { tp: 1, fp: 1, p: 0.5, r: 1, cleanFp: 1, cost: 1.5, perBug: 1.5 })
+})
+await test('totals: a fix-mode run hunts a case a second time, so discovery counts only discover runs; cost and time cover every run', () => {
+  const d = { truth_bugs: 1, found: 1, true_positives: 1, false_positives: 0, missed: 0, cost_usd: 1, seconds: 10 }
+  const t = totals([d, { ...d, fix_mode: true, fixes_verified: 1, fix_commits: 1, cost_usd: 2, seconds: 20 }])
+  assert.deepEqual({ bugs: t.truth_bugs, found: t.bugs_found, perBug: t.cost_per_true_bug, dcost: t.discover_cost_usd, cost: t.cost_usd, secs: t.seconds, fixes: t.fixes_verified, runs: t.runs }, { bugs: 1, found: 1, perBug: 1, dcost: 1, cost: 3, secs: 30, fixes: 1, runs: 2 })
 })
 await test('totals: recall counts true bugs found, and a second report of one bug is a duplicate, not a second find', () => {
   const t = totals([{ truth_bugs: 1, found: 1, true_positives: 3, false_positives: 1, missed: 0, cost_usd: 2, seconds: 1 }, { truth_bugs: 1, found: 0, true_positives: 0, false_positives: 0, missed: 1, cost_usd: 1, seconds: 1 }])

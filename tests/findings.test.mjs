@@ -119,6 +119,16 @@ await test('overlapping reports that quote the same line are one bug, whatever t
   assert.equal(sameFinding(a, b), true)
   assert.equal(sameFinding(a, { ...b, evidence: [{ file: 'src/files.js', line: 3, quote: 'export function readPublic(root, name) {' }] }), false, 'no shared quote, other category, other wording')
   assert.equal(sameFinding(a, { ...b, line_range: [7, 9] }), false, 'the same quote but no overlapping lines')
+  const brace = [{ file: 'src/files.js', line: 5, quote: '}' }]
+  assert.equal(sameFinding({ ...a, evidence: brace }, { ...b, evidence: brace }), false, 'a generic line like } is no evidence of one bug')
+})
+await test('a merged report that says something different keeps its title and evidence on the finding', () => {
+  const a = CAND({ file_path: 'src/files.js', line_range: [5, 5], bug_category: 'security', title: 'Path traversal through name', evidence: [{ file: 'src/files.js', line: 5, quote: "return readFileSync(join(root, name), 'utf8')" }] })
+  const b = { ...a, bug_category: 'errors', title: 'Unhandled ENOENT crash on a missing file', source_agent: 'hunter:errors', evidence: [...a.evidence, { file: 'src/api.js', line: 9, quote: 'readPublic(root, req.name)' }] }
+  const f = mergeFindings([], [a, b], H1).findings
+  assert.equal(f.length, 1)
+  assert.deepEqual(f[0].also_reported_as, ['Unhandled ENOENT crash on a missing file (errors)'])
+  assert.ok(f[0].evidence.some(e => e.file === 'src/api.js'), 'the second report\'s own evidence is kept')
 })
 await test('merging keeps the higher severity and confidence', () => {
   const first = mergeFindings([], [CAND({ severity: 'MEDIUM', confidence: 65 })], H1).findings
@@ -245,6 +255,9 @@ await test('reconcile: PREEXISTING on lines the change wrote is reproduced; on u
   const out = reconcile(l, { F1: ev, F2: ev, F3: ev }, files)
   assert.deepEqual(out.ledger.findings.map(f => f.verification_status), ['reproduced', 'preexisting', 'reproduced'])
   assert.equal(reconcile(l, { F1: ev }).ledger.findings[0].verification_status, 'preexisting', 'without intake\'s files, nothing is assumed touched')
+  assert.match(out.ledger.findings[0].reproduction_artifact.reason, /the change wrote these lines/, 'the upgrade says why, as the workflow does')
+  const near = ledgerWith([F('confirmed', 'HIGH', { line_range: [16, 17] })])
+  assert.equal(reconcile(near, { F1: ev }, files).ledger.findings[0].verification_status, 'preexisting', 'an old bug 2 lines from an unrelated edit stays old')
 })
 await test('reconcileFix takes back a committed repair that no longer proves out, and leaves the rest alone', () => {
   const l = ledgerWith([
