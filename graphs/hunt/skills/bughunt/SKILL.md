@@ -69,11 +69,16 @@ git -C "$REPO" worktree add --detach "$D/fix" "$HEAD_SHA"            # --propose
   human what is there:
   `git -C "$D/fix" log --oneline "$HEAD_SHA"..HEAD`.
   Give them the commands to clear it when they have reviewed it:
-  `git -C "$REPO" worktree remove "$D/fix"` and
+  `git -C "$REPO" worktree remove --force "$D/fix"` and
   `git -C "$REPO" branch -D "bughunt/$KEY"`. Never remove either yourself.
-- **At launch.** Tell the human that each repair attempt runs the repo's suite
-  in the sandbox, so it takes as long as their tests do, up to 2 attempts per
-  bug.
+  After that, findings left `unresolved` are tried again. A fix that was
+  verified on the removed branch is taken back by the next recheck, because no
+  kept branch holds it any more.
+- **At launch.** Tell the human:
+  - each repair attempt runs the repo's suite in the sandbox, up to 2 attempts
+    per bug;
+  - one check has 9 minutes in all, so a suite that takes more than about 4
+    minutes leaves the finding blocked, for a human.
 
 ## 2. Prepare the run
 

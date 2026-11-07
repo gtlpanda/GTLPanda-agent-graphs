@@ -13,11 +13,16 @@ import { existsSync, mkdirSync, writeFileSync, renameSync, rmSync, realpathSync 
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { git, run } from '../../../build/skills/build-app/driver/proc.mjs'
+import { git as rawGit, run } from '../../../build/skills/build-app/driver/proc.mjs'
 import { TEST_FILE } from '../../../build/skills/build-app/driver/checks.mjs'
 import { defaultBase } from '../../../build/skills/build-app/driver/finish.mjs'
 
 export const ALWAYS = ['logic', 'regression']
+// No hooks or fsmonitor in any git call: a relative core.hooksPath or
+// core.fsmonitor in the user's config resolves inside the checkout, which may be
+// the PR's own code (the analysis worktree always is). Measured 2026-11-06: a
+// committed fsmonitor script ran on `git status` without these flags.
+const git = (dir, args, opts) => rawGit(dir, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args], opts)
 const MAX_HITS = 5
 const MAX_DESCRIPTION = 4000
 const NOT_CODE = /\.(md|mdx|txt|rst|adoc|png|jpe?g|gif|svg|ico|webp|pdf|lock)$|(^|\/)(LICENSE|CHANGELOG|AUTHORS)[^/]*$|(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i

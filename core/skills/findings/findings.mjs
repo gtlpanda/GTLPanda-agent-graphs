@@ -35,7 +35,7 @@ const MOVES = {
     none: ['proposed'],
     proposed: ['verified', 'rejected'],
     rejected: ['proposed', 'unresolved'],
-    verified: [], unresolved: [],
+    verified: [], unresolved: ['proposed'],   // a later run may try again
   },
 }
 
@@ -312,7 +312,9 @@ export function missingEvidence(finding, readAt) {
 
 // ---------- the verdict ----------
 
-const OPEN = f => !f.stale && f.verification_status !== 'refuted' && f.verification_status !== 'preexisting' && f.fix_status !== 'verified'
+// A verified fix lives on the fix branch, not in the PR's head, so it never
+// closes a finding: the PR still has the bug until the fix is merged into it.
+const OPEN = f => !f.stale && f.verification_status !== 'refuted' && f.verification_status !== 'preexisting'
 
 // The PR's disposition, computed from the findings, never chosen by a model:
 // manual_review when the last run did not finish; changes_requested when a
@@ -413,7 +415,7 @@ export function renderReport(ledger, evidence = {}) {
     if (f.evidence_missing && f.evidence_missing.length) L.push(`- **Warning:** quoted evidence not found at ${f.evidence_missing.join(', ')}`)
     if (f.root_cause) L.push(`- **Root cause:** ${f.root_cause}`)
     const fa = f.fix_artifact
-    if (f.fix_status === 'verified') L.push(`- **Fix:** verified and committed${fa && fa.commit ? ` in \`${fa.commit.slice(0, 12)}\`` : ''} on ${fa && fa.branch ? `\`${fa.branch}\`` : 'the fix worktree'}${fa && fa.attempts ? ` (attempt ${fa.attempts})` : ''}: the reproduction passes with it and fails without it, the suite is no worse, and an independent verifier accepted it.`)
+    if (f.fix_status === 'verified') L.push(`- **Fix:** verified and committed${fa && fa.commit ? ` in \`${fa.commit.slice(0, 12)}\`` : ''} on ${fa && fa.branch ? `\`${fa.branch}\`` : 'the fix worktree'}${fa && fa.attempts ? ` (attempt ${fa.attempts})` : ''}: the reproduction passes with it and fails without it, the suite passes, and an independent verifier accepted it. It is not in the PR until someone merges it there.`)
     else if (f.fix_status === 'proposed') L.push(`- **Fix:** proposed${fa && fa.commit ? ` in \`${fa.commit.slice(0, 12)}\`` : ''}: it passed the fix check, but no independent verifier has reviewed it.`)
     else if (f.fix_status === 'unresolved') L.push(`- **Fix:** unresolved after ${fa && fa.attempts ? fa.attempts : 'every'} attempt(s)${fa && fa.last_feedback ? `: ${fa.last_feedback}` : ''}.`)
     else if (f.fix_status === 'rejected') L.push(`- **Fix:** rejected${fa && fa.last_feedback ? `: ${fa.last_feedback}` : ''}.`)

@@ -361,7 +361,7 @@ await test('PREEXISTING, NOT_REPRODUCED, and ERROR map to their statuses; ERROR 
 await test('the runner gets exactly the evidence.mjs command, with the state dir and timeout and nothing an agent chose', async () => {
   const { calls } = await run(fn, { ...ONE(), skeptic: [SKEP('confirmed')], reproducer: [WROTE('tests/$(rm -rf ~).test.js')], runner: [RAN('ERROR')] }, ARGS({ evidenceTimeoutMs: 5000 }))
   const p = calls.find(c => c.agentType === 'runner').prompt
-  assert.equal(p, "Run exactly this command, once, and copy its full output verbatim into output:\nnode '/home/u/.claude/skills/bughunt/evidence.mjs' repro '/tmp/repo/.git/bughunt/pr-7' F1 --timeout-ms 5000")
+  assert.equal(p, "Run exactly this command, once, with the Bash tool's timeout set to 600000 ms, and copy its full output verbatim into output:\nnode '/home/u/.claude/skills/bughunt/evidence.mjs' repro '/tmp/repo/.git/bughunt/pr-7' F1 --timeout-ms 5000")
   const rp = calls.find(c => c.agentType === 'reproducer').prompt
   assert.match(rp, /BUGHUNT-F1/)
   assert.match(rp, /<confirmation-notes>\nskeptic: src\/api\.js:4 -> src\/cart\.js:11\n<\/confirmation-notes>/, 'the skeptic\'s text is fenced')
@@ -459,7 +459,7 @@ await test('attempts used up: each failed attempt is reverted, then the finding 
 })
 await test('a fix check that cannot run (no worktree) stops all repair: that finding is unresolved, the next is never tried', async () => {
   const two = [CAND({ severity: 'CRITICAL' }), CAND({ file_path: 'b.js', title: 'second bug' })]
-  const runner = RUNNER({ repro: [['REPRODUCED'], ['REPRODUCED']], fix: [['ERROR', 'no fix worktree at /x/fix']] })
+  const runner = RUNNER({ repro: [['REPRODUCED'], ['REPRODUCED']], fix: [['ERROR', 'no fix worktree at /x/fix']], revert: [['FAIL', 'no fix worktree']] })
   const { result, calls } = await run(fn, { ...ONE(two), skeptic: [SKEP('confirmed'), SKEP('confirmed')], reproducer: [WROTE(), WROTE()], runner, repairer: [REP()] }, ARGS({ mode: 'fix' }))
   assert.equal(calls.filter(c => c.agentType === 'repairer').length, 1)
   assert.equal(result.findings[0].fix_status, 'unresolved')
@@ -489,7 +489,7 @@ await test('only reproduced findings are repaired, unless the human approved a c
   let { calls } = await run(fn, unrepro(), ARGS({ mode: 'propose' }))
   assert.ok(!calls.some(c => c.agentType === 'repairer'))
   ;({ calls } = await run(fn, { ...unrepro(), repairer: [REP()], runner: RUNNER({ fix: [['PASS']], commit: [['DONE', 'c', SHA]] }) }, ARGS({ mode: 'propose', approve: ['F1'] })))
-  assert.match(calls.find(c => c.agentType === 'repairer').prompt, /approved for repair without a reproduction test/)
+  assert.match(calls.find(c => c.agentType === 'repairer').prompt, /No test reproduced this finding; the human approved it for repair anyway/)
 })
 await test('a re-run skips a finding already verified', async () => {
   const first = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS']], adversarial: [['PASS']], commit: [['DONE', 'c', SHA]] }), repairer: [REP()], 'fix-verifier': [ACCEPT()] }), ARGS({ mode: 'fix' }))
@@ -515,4 +515,34 @@ await test('repair nodes pin their model and effort to the agent files', async (
     assert.equal(c.effort, agentField(c.agentType, 'effort'), `${c.agentType}: effort drift`)
     assert.ok(c.schema && c.schema.type === 'object')
   }
+})
+await test('BLOCKED ends that finding without a retry (reverted, unresolved), and repair moves on to the next', async () => {
+  const two = [CAND({ severity: 'CRITICAL' }), CAND({ file_path: 'b.js', title: 'second bug' })]
+  const runner = (() => {
+    const steps = { 'run: F1': 'EVIDENCE: REPRODUCED F1', 'run: F2': 'EVIDENCE: REPRODUCED F2', 'fix: F1': 'FIX: BLOCKED F1', 'revert: F1': 'REVERT: DONE F1', 'fix: F2': 'FIX: PASS F2', 'commit: F2': `COMMIT: DONE F2 ${SHA}` }
+    return Array.from({ length: 6 }, () => (p, opts) => ({ output: `${opts.label.split(':')[0].toUpperCase()} x: the suite already fails without the repair\n${steps[opts.label]}`, exit_code: 0 }))
+  })()
+  const { result, calls } = await run(fn, { ...ONE(two), skeptic: [SKEP('confirmed'), SKEP('confirmed')], reproducer: [WROTE(), WROTE('tests/bughunt-f2.test.js')], runner, repairer: [REP(), REP()] }, ARGS({ mode: 'propose' }))
+  assert.equal(calls.filter(c => c.label.startsWith('repair: F1')).length, 1, 'no second attempt for a blocked finding')
+  assert.equal(result.findings[0].fix_status, 'unresolved')
+  assert.match(result.findings[0].fix_artifact.last_feedback, /^blocked: /)
+  assert.equal(result.findings[1].fix_status, 'proposed')
+})
+await test('a revert that fails after a rejected attempt stops all repair', async () => {
+  const { result, calls } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['FAIL', 'still fails']], revert: [['FAIL', 'reset failed']] }), repairer: [REP()] }), ARGS({ mode: 'fix' }))
+  assert.equal(calls.filter(c => c.agentType === 'repairer').length, 1)
+  assert.match(result.reason, /stopped: the fix worktree could not be reverted after a rejected attempt/)
+})
+await test('an accept whose own checks disagree (root cause not addressed, callers broken, unrelated changes) is a rejection', async () => {
+  for (const bad of [{ root_cause_addressed: false }, { callers_preserved: false }, { unrelated_changes: ['reformatted src/b.js'] }]) {
+    const { result, calls } = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['PASS'], ['PASS']], adversarial: [['PASS'], ['PASS']], revert: [['DONE'], ['DONE']] }), repairer: [REP(), REP()], 'fix-verifier': [ACCEPT(bad), ACCEPT(bad)] }), ARGS({ mode: 'fix' }))
+    assert.equal(f1(result).fix_status, 'unresolved', JSON.stringify(bad))
+    assert.ok(!calls.some(c => c.label === 'commit: F1'), 'nothing is committed')
+  }
+})
+await test('a finding an earlier run left unresolved is tried again on the next run', async () => {
+  const first = await run(fn, REPRODUCED({ runner: RUNNER({ repro: [['REPRODUCED']], fix: [['FAIL'], ['FAIL']], revert: [['DONE'], ['DONE']] }), repairer: [REP(), REP()] }), ARGS({ mode: 'propose' }))
+  assert.equal(f1(first.result).fix_status, 'unresolved')
+  const { result } = await run(fn, { ...ONE(), repairer: [REP()], runner: RUNNER({ fix: [['PASS']], commit: [['DONE', 'c', SHA]] }) }, ARGS({ mode: 'propose', prior: first.result.findings }))
+  assert.equal(f1(result).fix_status, 'proposed')
 })

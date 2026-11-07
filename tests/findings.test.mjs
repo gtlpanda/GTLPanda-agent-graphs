@@ -151,8 +151,9 @@ await test('manual review for an unsettled HIGH or CRITICAL, or a lens not cover
   assert.equal(disposition(ledgerWith([F('candidate', 'MEDIUM')])).disposition, 'pass')
   assert.deepEqual(disposition(ledgerWith([], [{ lens: 'security', status: 'not_covered' }])), { disposition: 'manual_review', because: ['security not covered'] })
 })
-await test('refuted, pre-existing, stale, and verified-fixed findings are never open', () => {
-  assert.equal(disposition(ledgerWith([F('refuted'), F('preexisting'), F('reproduced', 'HIGH', { stale: true }), F('reproduced', 'HIGH', { fix_status: 'verified' })])).disposition, 'pass')
+await test('refuted, pre-existing, and stale findings are never open; a verified fix does not close a finding (it is not in the PR yet)', () => {
+  assert.equal(disposition(ledgerWith([F('refuted'), F('preexisting'), F('reproduced', 'HIGH', { stale: true })])).disposition, 'pass')
+  assert.equal(disposition(ledgerWith([F('reproduced', 'HIGH', { fix_status: 'verified' })])).disposition, 'changes_requested')
 })
 
 console.log('== findings: metrics')
@@ -251,7 +252,8 @@ await test('the report says what each fix status means: verified, proposed (no v
   assert.match(md, /Fix:\*\* verified and committed in `cccccccccccc` on `bughunt\/pr-7` \(attempt 2\)/)
   assert.match(md, /Fix:\*\* proposed in `dddddddddddd`: it passed the fix check, but no independent verifier has reviewed it\./)
   assert.match(md, /Fix:\*\* unresolved after 2 attempt\(s\): breaks the suite\./)
-  assert.match(md, /Disposition: \*\*changes requested\*\* \(F2, F3\)/, 'a verified fix closes F1; proposed and unresolved stay open')
+  assert.match(md, /Disposition: \*\*changes requested\*\* \(F1, F2, F3\)/, 'a fix on a side branch closes nothing in the PR')
+  assert.match(md, /It is not in the PR until someone merges it there\./)
 })
 
 console.log('== findings: grounding')

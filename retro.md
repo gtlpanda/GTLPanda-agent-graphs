@@ -1185,6 +1185,41 @@ reproduction that already passes without the repair, so dropping the discriminat
 unseen. A test now covers it. 22 of 22 mutations are caught, across the repair guards in
 `evidence.mjs` and the repair routing.
 
+**PR review (#29).** Two independent reviewers, a line-level reviewer and a behavioral QA auditor,
+reproduced every finding in throwaway repos. They found 5 HIGH, 11 MEDIUM, and 2 LOW, which overlap
+to 15 distinct issues. All are fixed and tested.
+- **HIGH: a redirected `.git` reached the user's branch.** A repairer could point the fix worktree's
+  `.git` file at the repo itself, so `commit` and `revert` acted on the user's branch and index. The
+  worktree is now checked as a real linked worktree inside the repo's `worktrees/`.
+- **HIGH: a PR hook ran unsandboxed.** `commit` ran the PR's `post-commit` hook (a relative
+  `core.hooksPath`) with the full environment, and a committed fsmonitor script ran on `git status`.
+  Every git call in intake and evidence now disables hooks and fsmonitor, and commits use plumbing.
+- **HIGH: a verified fix outlived its branch and closed the finding.** It was trusted after the
+  branch was deleted, and the disposition read "pass" while the PR still had the bug. Recheck now
+  requires a kept branch, and a verified fix no longer closes the finding.
+- **HIGH: the runner's Bash default (2 minutes) was shorter than a fix check.** Agents are now told
+  to use the 10-minute limit, and the check has a 9-minute wall-clock budget. A suite that cannot fit
+  is BLOCKED, not a silent failure.
+- **HIGH: a rename slipped past the test guard.** A staged rename deleted an existing test unseen.
+  Status now runs with `--no-renames`.
+- **The suite could be neutered.** Changing `package.json`'s test script to `true` passed a broken
+  repair. Suite-defining files are now protected like tests.
+- **Ignored files, modes, and symlinks.** A fix hidden in a git-ignored file passed the check but
+  was not committed, and the fingerprint missed modes and symlink targets. The check, the
+  fingerprint, and the commit now all use one staged git tree.
+- **The reproduction failed open.** An unreadable reproduction became a suite-only check. It is now
+  BLOCKED.
+- **`--approve` could never succeed** on a not-reproduced finding.
+- **A red base suite masked regressions,** and a repair was still committed. It is now BLOCKED.
+- **Shared test paths.** Two findings with one test path overwrote the first fix's regression test.
+  It is now BLOCKED.
+- **Smaller ones:** stale adversarial tests judged later attempts; a revert's failure was ignored;
+  an accept was counted even when the verifier's own fields disagreed; unresolved findings could
+  never be retried.
+
+A mutation run over the fixes caught 18 of 18, including removing the hook and fsmonitor flags (a
+trap test catches each). The fixes added 12 tests, for 549 workflow tests and 0 failed.
+
 **Stats.**
 - 31 new tests (537 workflow tests, 0 failed):
   - 17 repair tests that run real `npm test` suites through the verify skill in a throwaway project

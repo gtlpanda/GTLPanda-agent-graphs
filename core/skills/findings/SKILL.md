@@ -84,6 +84,7 @@ When a candidate matches a known finding:
 | fix_status | none | proposed |
 | | proposed | verified, rejected |
 | | rejected | proposed, unresolved |
+| | unresolved | proposed (a later run tries again) |
 
 `reproduced` means a test failed at the head for the stated reason (its marker
 in the output) and passed at the merge-base. `preexisting` means the test also
@@ -108,4 +109,6 @@ these holds:
 
 The same generic title far apart in one file is two bugs.
 
-Refuted, pre-existing, stale, and fixed-and-verified findings are never open.
+Refuted, pre-existing, and stale findings are never open. A verified fix does
+not close a finding, because it sits on the fix branch, not in the PR, until
+someone merges it.

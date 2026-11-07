@@ -79,7 +79,7 @@ const DEFAULT_MAX_REPAIR_ATTEMPTS = 2
 // What each evidence.mjs command may end with.
 const GATES = {
   repro: ['REPRODUCED', 'PREEXISTING', 'NOT_REPRODUCED', 'ERROR'],
-  fix: ['PASS', 'FAIL', 'ERROR'],
+  fix: ['PASS', 'FAIL', 'BLOCKED', 'ERROR'],
   adversarial: ['PASS', 'FAIL', 'ERROR'],
   commit: ['DONE', 'FAIL'],
   revert: ['DONE', 'FAIL'],
@@ -107,7 +107,7 @@ const MOVES = {
     none: ['proposed'],
     proposed: ['verified', 'rejected'],
     rejected: ['proposed', 'unresolved'],
-    verified: [], unresolved: [],
+    verified: [], unresolved: ['proposed'],   // a later run may try again
   },
 }
 
@@ -473,26 +473,28 @@ Check your test with exactly this command, at most 3 times: ${evidenceCommand(id
 Fill the structured output: written (false when it cannot be reproduced in an automated test, with the reason), test_file, how_it_fails (one line), reason.`
 }
 
+// The checks run up to 9 minutes; the Bash tool's default limit is 2.
 function runPrompt(f, kind = 'repro') {
-  return `Run exactly this command, once, and copy its full output verbatim into output:
+  return `Run exactly this command, once, with the Bash tool's timeout set to 600000 ms, and copy its full output verbatim into output:
 ${evidenceCommand(f.finding_id, kind)}`
 }
 
 function repairPrompt(f, feedback, attempt) {
   const id = f.finding_id
   const ra = f.reproduction_artifact
+  const proven = f.verification_status === 'reproduced' && ra && ra.written
   return `${scope()}
 
 Repair this finding in the fix worktree, following your instructions. Attempt ${attempt} of ${MAX_REPAIR_ATTEMPTS}.
 Fix worktree (work only here; never commit): ${shq(`${STATE}/fix`)}
 ${fenced('claim', json(claimOf(f)))}
-${ra && ra.written ? `The reproduction test (read it; never edit it; it joins your change when checked): ${shq(ra.path)}
-It will live in the repo at ${ra.test_file}. It fails now with ${markerOf(id)} and must pass with your repair.` : 'This finding was approved for repair without a reproduction test: your repair is checked against the suite and reviewed only.'}
+${proven ? `The reproduction test (read it; never edit it; it joins your change when checked): ${shq(ra.path)}
+It will live in the repo at ${ra.test_file}. It fails now with ${markerOf(id)} and must pass with your repair.` : 'No test reproduced this finding; the human approved it for repair anyway. Your repair is checked against the suite and reviewed only.'}
 ${ledger.impact ? `Protections the change must keep (from the impact map; verify them):
 ${fenced('impact-map-notes', json(ledger.impact.protections))}` : ''}
 ${feedback ? `Earlier attempts were rejected. Address this specifically:
 ${fenced('rejection-feedback', feedback)}` : ''}
-Check your repair with exactly this command, at most twice: ${evidenceCommand(id, 'fix')}
+Check your repair with exactly this command, at most twice, with the Bash tool's timeout set to 600000 ms: ${evidenceCommand(id, 'fix')}
 
 Fill the structured output: root_cause (one or two sentences), why_it_exists, files_changed (repo-relative), interfaces_changed, summary.`
 }
@@ -500,12 +502,13 @@ Fill the structured output: root_cause (one or two sentences), why_it_exists, fi
 function fixVerifyPrompt(f) {
   const id = f.finding_id
   const ra = f.reproduction_artifact
+  const proven = f.verification_status === 'reproduced' && ra && ra.written
   return `${scope()}
 
 Review the uncommitted repair for this finding in the fix worktree, following your instructions. The repairer's reasoning is withheld on purpose.
 Fix worktree (read only; it is fingerprinted): ${shq(`${STATE}/fix`)}
 ${fenced('claim', json(claimOf(f)))}
-${ra && ra.written ? `The reproduction test: ${shq(ra.path)} (in the repo at ${ra.test_file}).` : 'No reproduction test: the finding was approved for repair without one.'}
+${proven ? `The reproduction test: ${shq(ra.path)} (in the repo at ${ra.test_file}).` : 'No test reproduced this finding; the human approved it for repair anyway.'}
 ${ledger.impact ? `Protections the change must keep:
 ${fenced('impact-map-notes', json(ledger.impact.protections))}` : ''}
 Your adversarial directory (write only here): ${shq(`${STATE}/repro/${id}/adversarial`)}
@@ -728,7 +731,7 @@ if (toRepro.length) {
 let repairStopped = null
 if (MODE !== 'discover') {
   const targets = ledger.findings
-    .filter(f => !f.stale && ['none', 'proposed', 'rejected'].includes(f.fix_status))
+    .filter(f => !f.stale && ['none', 'proposed', 'rejected', 'unresolved'].includes(f.fix_status))
     .filter(f => f.verification_status === 'reproduced' || (APPROVE.has(f.finding_id) && ['confirmed', 'not_reproduced'].includes(f.verification_status)))
     .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || b.confidence - a.confidence)
   for (const id of APPROVE) if (!targets.some(f => f.finding_id === id)) log(`approve: ${id} is not a live confirmed, unreproduced finding with a fix still to do; skipped`)
@@ -747,41 +750,60 @@ async function repairOne(f) {
   let feedback = null
   for (let attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS; attempt += 1) {
     if (f.fix_status !== 'proposed') transition(f, 'fix_status', 'proposed', `repair attempt ${attempt}`)
+    const giveUp = why => {
+      if (f.fix_status === 'proposed') transition(f, 'fix_status', 'rejected', `attempt ${attempt}: ${why}`)
+      transition(f, 'fix_status', 'unresolved', why)
+      f.fix_artifact = { mode: MODE, branch: FIX_BRANCH, commit: null, attempts: attempt, last_feedback: why }
+    }
+    // A rejected attempt is reverted before anything else runs; a revert that
+    // fails stops all repair, so no leftover is swept into the next commit.
     const rejectAttempt = async why => {
       feedback = why
       transition(f, 'fix_status', 'rejected', `attempt ${attempt}: ${why}`)
-      await runEvidence(f, 'revert')
+      const back = await runEvidence(f, 'revert')
+      return back.verdict === 'DONE' ? null : `the fix worktree could not be reverted after a rejected attempt (${back.reason}); repair stopped so nothing unchecked is committed`
     }
     const rep = await runNode('repair', `repair: ${id} #${attempt}`, repairPrompt(f, feedback, attempt), REPAIR_SCHEMA)
-    if (!rep) { await rejectAttempt('the repairer returned nothing'); continue }
+    if (!rep) { const stop = await rejectAttempt('the repairer returned nothing'); if (stop) return stop; continue }
     f.root_cause = rep.root_cause
     const checked = await runEvidence(f, 'fix')
-    if (checked.verdict === 'ERROR') {
-      transition(f, 'fix_status', 'rejected', `attempt ${attempt}: ${checked.reason}`)
-      transition(f, 'fix_status', 'unresolved', 'the fix check could not run')
-      f.fix_artifact = { mode: MODE, branch: FIX_BRANCH, commit: null, attempts: attempt, last_feedback: checked.reason }
-      return checked.reason
+    // ERROR: the check cannot run at all, so all repair stops. BLOCKED: no
+    // attempt can pass as things stand, so this finding stops without a retry.
+    if (checked.verdict === 'ERROR' || checked.verdict === 'BLOCKED') {
+      const back = await runEvidence(f, 'revert')
+      giveUp(checked.verdict === 'BLOCKED' ? `blocked: ${checked.reason}` : `the fix check could not run: ${checked.reason}`)
+      if (checked.verdict === 'ERROR') return checked.reason
+      return back.verdict === 'DONE' ? null : `the fix worktree could not be reverted (${back.reason})`
     }
-    if (checked.verdict !== 'PASS') { await rejectAttempt(`the fix check failed: ${checked.reason}`); continue }
+    if (checked.verdict !== 'PASS') { const stop = await rejectAttempt(`the fix check failed: ${checked.reason}`); if (stop) return stop; continue }
     if (MODE === 'propose') {
       const c = await runEvidence(f, 'commit')
-      if (c.verdict !== 'DONE') { await rejectAttempt(`the commit failed: ${c.reason}`); continue }
+      if (c.verdict !== 'DONE') { const stop = await rejectAttempt(`the commit failed: ${c.reason}`); if (stop) return stop; continue }
       f.fix_artifact = { mode: MODE, branch: null, commit: c.commit, attempts: attempt, check: checked.reason }
       return null
     }
     phase('Verify fix')
     const v = await runNode('fixverify', `verify fix: ${id} #${attempt}`, fixVerifyPrompt(f), FIXVERIFY_SCHEMA)
-    if (!v) { await rejectAttempt('the fix verifier returned nothing, and no repair is accepted unreviewed'); continue }
+    if (!v) { const stop = await rejectAttempt('the fix verifier returned nothing, and no repair is accepted unreviewed'); if (stop) return stop; continue }
     const adv = await runEvidence(f, 'adversarial')
-    if (v.verdict === 'accept' && adv.verdict === 'PASS') {
+    // An accept counts only when the verifier's own checks agree with it.
+    const accepted = v.verdict === 'accept' && v.root_cause_addressed && v.callers_preserved && !v.unrelated_changes.length
+    if (accepted && adv.verdict === 'PASS') {
       const c = await runEvidence(f, 'commit')
-      if (c.verdict !== 'DONE') { await rejectAttempt(`the commit failed: ${c.reason}`); continue }
+      if (c.verdict !== 'DONE') { const stop = await rejectAttempt(`the commit failed: ${c.reason}`); if (stop) return stop; continue }
       transition(f, 'fix_status', 'verified', `attempt ${attempt}: the check passed, the verifier accepted, ${adv.reason}`)
       f.fix_artifact = { mode: MODE, branch: FIX_BRANCH, commit: c.commit, attempts: attempt, check: checked.reason, adversarial: adv.reason, remaining_risks: v.remaining_risks }
       return null
     }
-    const why = [...v.problems, ...(v.unrelated_changes.length ? [`unrelated changes: ${v.unrelated_changes.join('; ')}`] : []), ...(adv.verdict !== 'PASS' ? [`adversarial tests: ${adv.reason}`] : [])]
-    await rejectAttempt(why.length ? why.join('; ') : 'the verifier rejected it without a reason')
+    const why = [
+      ...v.problems,
+      ...(v.unrelated_changes.length ? [`unrelated changes: ${v.unrelated_changes.join('; ')}`] : []),
+      ...(v.verdict === 'accept' && !v.root_cause_addressed ? ['the verifier accepted it but says the root cause is not addressed'] : []),
+      ...(v.verdict === 'accept' && !v.callers_preserved ? ['the verifier accepted it but says callers are not preserved'] : []),
+      ...(adv.verdict !== 'PASS' ? [`adversarial tests: ${adv.reason}`] : []),
+    ]
+    const stop = await rejectAttempt(why.length ? why.join('; ') : 'the verifier rejected it without a reason')
+    if (stop) return stop
   }
   transition(f, 'fix_status', 'unresolved', `no repair passed in ${MAX_REPAIR_ATTEMPTS} attempt(s)`)
   f.fix_artifact = { mode: MODE, branch: FIX_BRANCH, commit: null, attempts: MAX_REPAIR_ATTEMPTS, last_feedback: feedback }
