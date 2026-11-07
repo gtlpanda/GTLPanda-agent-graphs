@@ -1,12 +1,14 @@
 # PandaStack
 
-> **TL;DR** Hand Claude Code a task and get back a change that is planned,
-> built tests-first, reviewed, QA'd, and released on your approval. Three
-> agent teams do the work; code, not prompts, decides what runs next, and every
-> step is gated on real test results, never on an agent's word.
+> **TL;DR** Hand Claude Code a task, or a whole app idea, and get back a change
+> that is planned, built tests-first, reviewed, bug-hunted, QA'd, and released
+> on your approval. Graphs of agents do the work; code, not prompts, decides
+> what runs next, and every step is gated on real test results, never on an
+> agent's word.
 >
 > ```
-> /blueprint <idea>   read the doc or idea → one up-front interview → binding decisions → gated design (backlog: next)
+> /blueprint <idea>   read the doc or idea → one up-front interview → binding decisions → gated design → gated backlog → your one approval
+> /build-app          the approved backlog, unattended: one /dev per slice → final QA → /bughunt --fix → one PR
 > /dev <task>         plan it (you approve) → build it tests-first → prove every acceptance criterion → QA
 > /loop               keep a branch green: check → fix → review → QA, until it passes or needs you
 > /release-pr [PR#]   docs into the PR → you approve the exact commit → merge once → verify the deploy
@@ -78,8 +80,10 @@ and `/bughunt` (discover, propose, fix: specialist hunters, a blind skeptic, a r
 reproductions run in a sandbox, proven repairs; wired into `/build-app` and `/loop`).
 The whole loop has run live once: a one-sentence request became a 7-slice CLI with 143
 passing tests in 2 h 14 min and $57, with no human between the approval and the end
-(retro 24). Next: research and spikes before the design, and a look at the advisor's share
-of the cost (63% of that build).
+(retro 24). `/bughunt` has run live on a 10-case benchmark: all 6 planted bugs found and
+reproduced, no false positives on the 4 bug-free changes, $9.64 for discovery (retro 29).
+Next: research and spikes before the design, a look at the advisor's share of the cost (63% of
+that build), and `/bughunt` on a real codebase's PRs, beyond the benchmark's tiny fixtures.
 
 Families: **build** graphs change your code. **Marketing** graphs (SEO first) change what you
 own, like your site and content, and their fixes ship as code PRs. **Sales** graphs (research,
