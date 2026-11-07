@@ -1000,14 +1000,39 @@ and spot-checked the licenses.
   words stayed two findings.
 - The PR-description fence left a stray `>` when it removed a forged closing tag.
 
+**PR review (#27).** Two independent reviewers: a line-level reviewer and a behavioral QA auditor.
+They found 2 HIGH, 5 MEDIUM, and 3 LOW, which overlap to 10 distinct issues. All are fixed and
+tested:
+- **HIGH:** an escalated run (bad args, a mode not built yet) returned an empty findings list, and
+  `save` replaced the ledger's findings with it. The report then said "pass". Now a stopped run
+  never replaces anything, the workflow hands back the earlier findings, and a stopped run's
+  disposition is manual review.
+- **HIGH:** a branch named `_wip` made the key `_wip`, which the ledger rejects. The whole hunt ran,
+  then could not be saved.
+- **Paths:** they now come from `git diff --name-status -z`. Before, a deleted binary was listed as
+  `/dev/null` and treated as code. A filename with a space kept git's trailing tab, so `my notes.md`
+  was not recognized as docs. Quoted names kept their backslashes.
+- **The base:** a PR target diffed against a stale local `origin/<base>`, which pulled other people's
+  merged work into the review. The base is now refreshed first.
+- **Merging:** the same generic title far apart in one file merged two different bugs. Equal titles
+  now also need the same category and a quoted line in common.
+- **Coverage:** `partial` coverage, and a hunter that listed nothing, still allowed "pass".
+- **Untrusted text:** the PR title and the impact map's notes reached prompts unfenced.
+- **Keys:** `feat/x` and `feat-x` shared one ledger and worktree. Keys now carry a hash of the exact
+  name.
+- **Errors:** a missing `gh` gave an empty failure reason, and `report` on a missing ledger printed
+  "pass".
+
+A second mutation run over the fixes: 14 of 14 caught.
+
 **Mutation run.** 21 mutations across `findings.mjs`, `intake.mjs`, and the workflow. 20 were caught
 at first. The survivor was a recall that used the wrong denominator, which the test could not see
 because its reported count happened to equal its truth count. A third true bug in the test closes
 it; 21 of 21 are caught.
 
 **Stats.**
-- 59 new tests: 27 findings, 14 intake (over real throwaway repos), and 18 routing and drift. The
-  suite is 448 workflow tests, 0 failed.
+- 71 new tests: 30 findings, 20 intake (over real throwaway repos), and 21 routing and drift. The
+  suite is 460 workflow tests, 0 failed.
 - 7 new validate.sh rules.
 - 3 new skills, 2 new agents, and 1 workflow.
 - Discover mode is tested with mocked agents only; its first live run is part of PR5.

@@ -72,13 +72,17 @@ function similarTitles(a, b) {
   for (const w of A) if (B.has(w)) shared += 1
   return shared / (A.size + B.size - shared) >= 0.5
 }
-// One bug reported twice: the same file, and either the same title, or lines
-// within NEAR_LINES with the same category or a similar title.
+// One bug reported twice: the same file, and either lines within NEAR_LINES
+// with the same category or a similar title, or (lines moved by a new head)
+// the same title, the same category, and a quote in common. The same generic
+// title far apart in one file is two bugs.
 function sameFinding(a, b) {
   if (a.file_path !== b.file_path) return false
-  if (normTitle(a.title) === normTitle(b.title)) return true
   const near = a.line_range[0] <= b.line_range[1] + NEAR_LINES && b.line_range[0] <= a.line_range[1] + NEAR_LINES
-  return near && (a.bug_category === b.bug_category || similarTitles(a.title, b.title))
+  if (near) return a.bug_category === b.bug_category || similarTitles(a.title, b.title)
+  const quote = e => String(e.quote).replace(/\s+/g, ' ').trim()
+  const sharedQuote = (a.evidence || []).some(e => (b.evidence || []).some(x => quote(x) === quote(e)))
+  return normTitle(a.title) === normTitle(b.title) && a.bug_category === b.bug_category && sharedQuote
 }
 function nextFindingId(findings) {
   const n = findings.reduce((m, f) => Math.max(m, Number(String(f.finding_id).replace(/^F/, '')) || 0), 0)
@@ -207,20 +211,22 @@ export function writeLedger(path, l) {
   renameSync(tmp, path)
 }
 
-// Folds one bughunt-flow result into the ledger. The run's findings already
-// include the earlier ones (the workflow merged them), so they replace the
-// list; everything else the run reports is appended to `runs`.
+// Folds one bughunt-flow result into the ledger. A finished run's findings
+// already include the earlier ones (the workflow merged them), so they replace
+// the list. A run that did not finish never replaces anything: the ledger keeps
+// its findings, coverage, and target, and records the stop. Either way the run
+// is appended to `runs`.
 export function saveRun(ledger, intake, result, at) {
   if (!result || typeof result !== 'object' || !Array.isArray(result.findings)) throw new Error('the run result has no findings list')
-  const next = {
-    ...ledger,
-    target: intake.target,
-    findings: result.findings,
-    coverage: Array.isArray(result.coverage) ? result.coverage : [],
-    routing: result.routing || null,
-    status: result.status || null,
-    reason: result.reason || null,
-  }
+  const finished = result.status === 'done'
+  const next = finished
+    ? {
+      ...ledger, target: intake.target, findings: result.findings,
+      coverage: Array.isArray(result.coverage) ? result.coverage : [], routing: result.routing || null,
+    }
+    : { ...ledger, target: ledger.target || intake.target }
+  next.status = result.status || null
+  next.reason = result.reason || null
   const run = {
     at, mode: result.mode || 'discover', head: intake.target.head, status: result.status || null, reason: result.reason || null,
     added: result.added || [], merged: (result.merged || []).length, dropped: (result.dropped || []).length,
@@ -253,17 +259,19 @@ export function missingEvidence(finding, readAt) {
 const OPEN = f => !f.stale && f.verification_status !== 'refuted' && f.verification_status !== 'preexisting' && f.fix_status !== 'verified'
 
 // The PR's disposition, computed from the findings, never chosen by a model:
-// changes_requested when a confirmed or reproduced bug above LOW is still open;
-// manual_review when a HIGH or CRITICAL one is unsettled or coverage is
-// incomplete; pass otherwise.
+// manual_review when the last run did not finish; changes_requested when a
+// confirmed or reproduced bug above LOW is still open; manual_review when a
+// HIGH or CRITICAL one is unsettled or a lens was not fully covered; pass
+// otherwise.
 export function disposition(ledger) {
+  if (ledger.status && ledger.status !== 'done') return { disposition: 'manual_review', because: [`the last run stopped: ${ledger.reason || ledger.status}`] }
   const open = (ledger.findings || []).filter(OPEN)
   const actionable = open.filter(f => ['confirmed', 'reproduced'].includes(f.verification_status) && f.severity !== 'LOW')
   if (actionable.length) return { disposition: 'changes_requested', because: actionable.map(f => f.finding_id) }
   const unsettled = open.filter(f => BLOCKING.includes(f.severity) && ['candidate', 'contested', 'not_reproduced'].includes(f.verification_status))
-  const uncovered = (ledger.coverage || []).filter(c => c.status === 'not_covered')
+  const uncovered = (ledger.coverage || []).filter(c => c.status === 'not_covered' || c.status === 'partial')
   if (unsettled.length || uncovered.length) {
-    return { disposition: 'manual_review', because: [...unsettled.map(f => f.finding_id), ...uncovered.map(c => `${c.lens} not covered`)] }
+    return { disposition: 'manual_review', because: [...unsettled.map(f => f.finding_id), ...uncovered.map(c => `${c.lens} ${c.status === 'partial' ? 'partly covered' : 'not covered'}`)] }
   }
   return { disposition: 'pass', because: [] }
 }
@@ -415,6 +423,7 @@ function main(argv) {
       return 0
     }
     if (cmd === 'report' && (rest.length === 1 || rest.length === 2)) {
+      if (!existsSync(rest[0])) throw new Error(`no ledger at ${rest[0]}: nothing has been saved for this target yet`)
       const l = readLedger(rest[0], 'unknown')
       process.stdout.write(renderReport(l, readEvidence(rest[1])))
       return 0

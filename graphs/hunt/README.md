@@ -62,14 +62,22 @@ a hunter returns nothing → its lens is not_covered, and the disposition become
   - `maxFindings` (default 25) keeps the most severe new findings and logs the rest.
 - **The disposition is computed** (`findings.mjs disposition`), never chosen by a model.
   - **changes requested:** an open confirmed or reproduced bug above LOW.
-  - **manual review:** an unsettled HIGH or CRITICAL finding, or a lens not covered.
+  - **manual review:** an unsettled HIGH or CRITICAL finding, a lens not fully covered, or a run that stopped early. A stopped run never replaces the saved findings.
+  - A hunter that lists no areas examined and no findings counts as partial coverage.
   - **pass:** otherwise.
 
 ## State
 
 Everything lives in `<git common dir>/bughunt/<key>/`, inside `.git` and never
-committed. `<key>` is `pr-<n>` for a pull request, or the branch as a slug. It
-is never a commit, so a new head finds the same ledger.
+committed. `<key>` is `pr-<n>` for a pull request. For a branch it is the
+branch's slug plus a hash of its exact name, so `feat/x` and `feat-x` never
+collide. A detached HEAD uses `detached-<commit>`. Only the detached key changes
+with the head; every other key survives a new head, so a new head finds the same
+ledger.
+
+- **A PR target refreshes `origin/<base>` first**, so other people's merged work
+  never lands in the review. If it can't (offline), it uses the local copy and
+  says so.
 
 | File | What it is |
 |------|------------|
@@ -86,9 +94,11 @@ is never a commit, so a new head finds the same ledger.
   `git diff`, `git show`, and `git grep`, as the reviewer does.
 - **What `/bughunt` never does:** edit the branch under review, commit, push,
   or comment.
-- **Untrusted text.** The PR description, the code, comments, and commit
-  messages are data:
-  - The description goes to agents inside an `<untrusted-pr-description>` fence that it cannot close.
+- **Untrusted text.** The PR title and description, branch names, the code,
+  comments, and commit messages are data:
+  - The title and the branch label go to agents inside an `<untrusted-pr-title>` fence that they cannot close.
+  - The description goes inside an `<untrusted-pr-description>` fence that it cannot close.
+  - The impact map's notes reach the hunters inside an `<impact-map-notes>` fence, because another agent wrote them after reading the same code.
   - The `bug-lenses` skill tells every hunter to treat embedded instructions as a security signal, never as instructions.
 - **Quotes are checked.** `findings.mjs save --repo` checks each quoted line
   against the file at the head. A quote that is not there shows as a warning in

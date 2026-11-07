@@ -11,6 +11,7 @@
 // INTAKE: OK|FAIL. Exit 0 ok, 1 fail, 2 usage.
 import { existsSync, mkdirSync, writeFileSync, renameSync, rmSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { git, run } from '../../../build/skills/build-app/driver/proc.mjs'
 import { TEST_FILE } from '../../../build/skills/build-app/driver/checks.mjs'
@@ -42,11 +43,17 @@ export const SIGNALS = {
   },
 }
 
-// A ledger key: lowercase, safe in a path, never a commit (a new head must find
-// the same ledger).
+// The readable part of a key: lowercase, safe in a path, starting with a
+// letter or digit.
 export function slug(s) {
-  const out = String(s || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/-{2,}/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 60)
+  const out = String(s || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/-{2,}/g, '-').replace(/^[-._]+|[-._]+$/g, '').slice(0, 48)
   return out || 'head'
+}
+// A ledger key for a branch or range: the slug plus a short hash of the exact
+// name, so feat/x, feat-x, and FEAT-X never share a ledger or a worktree. Never
+// a commit: a new head must find the same ledger.
+export function nameKey(prefix, name) {
+  return `${prefix}${slug(name)}-${createHash('sha1').update(String(name)).digest('hex').slice(0, 6)}`
 }
 
 export function parseArgs(argv) {
@@ -65,7 +72,7 @@ export function parseArgs(argv) {
 }
 
 function must(r, what) {
-  if (!r.ok) throw new Error(`${what} failed: ${r.out.trim().split('\n').slice(-3).join(' ')}`)
+  if (!r.ok) throw new Error(`${what} failed: ${(r.out.trim() || r.error || `exit ${r.status}`).split('\n').slice(-3).join(' ')}`)
   return r.stdout.trim()
 }
 const commitOf = (repo, ref) => must(git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]), `resolving ${ref}`)
@@ -83,50 +90,60 @@ export function resolveTarget(repo, opts) {
     let pr
     try { pr = JSON.parse(out) } catch { throw new Error(`gh pr view ${opts.pr} printed no JSON`) }
     if (!hasCommit(repo, pr.headRefOid)) must(git(repo, ['fetch', '--no-tags', '--quiet', 'origin', `pull/${pr.number}/head`]), `fetching PR #${pr.number}`)
+    // A stale origin/<base> would put other people's merged work into the
+    // review, so the base the PR merges into is refreshed first. Offline, the
+    // local copy is used and the intake says so.
+    const baseName = opts.base || pr.baseRefName
+    const fetched = /^[A-Za-z0-9._/-]+$/.test(baseName) && !baseName.startsWith('origin/')
+      ? git(repo, ['fetch', '--no-tags', '--quiet', 'origin', `+refs/heads/${baseName}:refs/remotes/origin/${baseName}`]).ok
+      : false
     return {
-      kind: 'pr', key: `pr-${pr.number}`, label: `PR #${pr.number}: ${pr.title}`, pr: pr.number, title: pr.title, url: pr.url,
-      base: baseRef(repo, opts.base || pr.baseRefName), head: pr.headRefOid, description: String(pr.body || '').slice(0, MAX_DESCRIPTION),
+      kind: 'pr', key: `pr-${pr.number}`, label: `PR #${pr.number}`, pr: pr.number, title: pr.title, url: pr.url,
+      base: baseRef(repo, baseName), baseFetched: fetched, head: pr.headRefOid, description: String(pr.body || '').slice(0, MAX_DESCRIPTION),
     }
   }
   if (opts.range !== undefined) {
     const m = opts.range.match(/^(.+?)\.{2,3}(.+)$/)
     if (!m) throw new Error(`--range must look like <base>..<head>, got ${opts.range}`)
-    return { kind: 'range', key: `range-${slug(m[1])}-${slug(m[2])}`, label: `${m[1]}..${m[2]}`, base: m[1], head: m[2] }
+    return { kind: 'range', key: nameKey('range-', opts.range), label: `${m[1]}..${m[2]}`, base: m[1], head: m[2] }
   }
   let branch = opts.branch
   if (branch === undefined) branch = must(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), 'reading the current branch')
   const base = baseRef(repo, opts.base || defaultBase(repo))
-  if (branch === 'HEAD') return { kind: 'branch', key: 'detached', label: 'the detached HEAD', base, head: 'HEAD' }
-  return { kind: 'branch', key: slug(branch), label: `branch ${branch}`, base, head: branch }
+  if (branch === 'HEAD') {
+    const sha = commitOf(repo, 'HEAD')
+    return { kind: 'detached', key: `detached-${sha.slice(0, 12)}`, label: `the detached HEAD at ${sha.slice(0, 12)}`, base, head: sha }
+  }
+  return { kind: 'branch', key: nameKey('', branch), label: `branch ${branch}`, base, head: branch }
 }
 
 // Changed files at head versus the merge-base, each with its head-side hunk
-// ranges and the lines each optional lens should look at.
+// ranges and the lines each optional lens should look at. Paths come from
+// `--name-status -z`, exactly as git stores them (no quoting, no trailing tab
+// after a space, no /dev/null for a deleted file); the patch, in the same
+// order, gives each file its hunks.
 export function changedFiles(repo, mergeBase, head) {
-  const diff = must(git(repo, ['-c', 'core.quotepath=off', 'diff', '--no-color', '--no-ext-diff', '--no-renames', '-U0', mergeBase, head]), 'git diff')
+  const DIFF = ['-c', 'core.quotepath=off', 'diff', '--no-color', '--no-ext-diff', '--no-renames']
+  const names = git(repo, [...DIFF, '--name-status', '-z', mergeBase, head])
+  if (!names.ok) throw new Error(`git diff --name-status failed: ${names.out.trim().split('\n').slice(-3).join(' ')}`)
+  const parts = names.stdout.split('\0')
+  if (parts[parts.length - 1] === '') parts.pop()
   const files = []
+  for (let i = 0; i + 1 < parts.length; i += 2) files.push({ path: parts[i + 1], status: parts[i].charAt(0), added: 0, deleted: 0, hunks: [], addedLines: [], removedLines: [] })
+  const patch = must(git(repo, [...DIFF, '-U0', mergeBase, head]), 'git diff')
+  let index = -1
   let cur = null
   let newLine = 0
   let oldLine = 0
   let header = false   // between "diff --git" and the first hunk: "--- " there is a path, not a removed "-- " line
-  const unquote = p => p.replace(/^"|"$/g, '')
-  for (const line of diff.split('\n')) {
+  for (const line of patch.split('\n')) {
     if (line.startsWith('diff --git ')) {
-      cur = { path: null, status: 'M', added: 0, deleted: 0, hunks: [], addedLines: [], removedLines: [] }
-      files.push(cur)
+      index += 1
+      cur = files[index] || null
       header = true
       continue
     }
     if (!cur) continue
-    if (header && line.startsWith('new file mode')) { cur.status = 'A'; continue }
-    if (header && line.startsWith('deleted file mode')) { cur.status = 'D'; continue }
-    if (header && line.startsWith('--- ')) { if (line !== '--- /dev/null') cur.path = unquote(line.slice(4)).replace(/^a\//, ''); continue }
-    if (header && line.startsWith('+++ ')) { if (line !== '+++ /dev/null') cur.path = unquote(line.slice(4)).replace(/^b\//, ''); continue }
-    if (header && line.startsWith('Binary files ')) {
-      const m = line.match(/ and (?:b\/)?(.+) differ$/)
-      if (m && !cur.path) cur.path = unquote(m[1]).replace(/^b\//, '')
-      continue
-    }
     const h = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/)
     if (h) {
       header = false
@@ -137,14 +154,12 @@ export function changedFiles(repo, mergeBase, head) {
       cur.hunks.push(len > 0 ? [start, start + len - 1] : [start, start])
       continue
     }
+    if (header) continue   // index, mode, ---, +++, and Binary lines: the path came from --name-status
     if (line.startsWith('+')) { cur.added += 1; cur.addedLines.push([newLine, line.slice(1)]); newLine += 1; continue }
     if (line.startsWith('-')) { cur.deleted += 1; cur.removedLines.push([oldLine, line.slice(1)]); oldLine += 1; continue }
   }
-  // A deleted file's path comes from its --- line; a file without either (a mode
-  // change only) is dropped.
-  return files.filter(f => f.path).map(f => ({
-    ...f, isTest: TEST_FILE.test(f.path), isCode: !TEST_FILE.test(f.path) && !NOT_CODE.test(f.path),
-  }))
+  if (index + 1 !== files.length) throw new Error(`git diff listed ${files.length} file(s) but its patch has ${index + 1}`)
+  return files.map(f => ({ ...f, isTest: TEST_FILE.test(f.path), isCode: !TEST_FILE.test(f.path) && !NOT_CODE.test(f.path) }))
 }
 
 // Which optional lenses the change calls for, with up to MAX_HITS example
@@ -206,7 +221,7 @@ export function intake(opts, at) {
   const tree = analysisTree(repo, stateDir, head)
   const doc = {
     version: 1, key: t.key, at, repo, tree, stateDir,
-    target: { kind: t.kind, label: t.label, pr: t.pr || null, title: t.title || null, url: t.url || null, base: t.base, baseSha, head, mergeBase, dirty },
+    target: { kind: t.kind, label: t.label, pr: t.pr || null, title: t.title || null, url: t.url || null, base: t.base, baseSha, head, mergeBase, dirty, baseFetched: t.baseFetched === undefined ? null : t.baseFetched },
     stats: {
       files: files.length, added: files.reduce((n, f) => n + f.added, 0), deleted: files.reduce((n, f) => n + f.deleted, 0),
       code: files.filter(f => f.isCode).length, tests: files.filter(f => f.isTest).length,
@@ -232,6 +247,7 @@ function main(argv) {
     const { path, doc } = intake(opts, new Date().toISOString())
     console.log(path)
     if (doc.target.dirty) console.log('note: the checked-out branch has uncommitted changes; only committed work is reviewed')
+    if (doc.target.baseFetched === false) console.log(`note: could not refresh ${doc.target.base} from origin; the review uses the local copy, which may be behind`)
     console.log(`INTAKE: OK key=${doc.key} files=${doc.stats.files} lenses=${doc.lenses.routed.join(',') || 'none'}`)
     return 0
   } catch (e) {

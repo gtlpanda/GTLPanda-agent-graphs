@@ -100,7 +100,9 @@ await test('findings a new head did not re-find are marked stale; ids are never 
 await test('same file but far apart and differently titled are two findings; a different file never merges', () => {
   assert.equal(sameFinding(CAND(), CAND({ line_range: [80, 81], title: 'Unrelated overflow in tax' })), false)
   assert.equal(sameFinding(CAND(), CAND({ file_path: 'src/other.js' })), false)
-  assert.equal(sameFinding(CAND(), CAND({ line_range: [80, 81] })), true, 'the same title in one file is one bug')
+  assert.equal(sameFinding(CAND(), CAND({ line_range: [80, 81], evidence: [{ file: 'src/cart.js', line: 80, quote: 'other line' }] })), false, 'the same title far apart, different code: two bugs')
+  assert.equal(sameFinding(CAND(), CAND({ line_range: [80, 81] })), true, 'the same title, category, and quoted code moved by a new head: one bug')
+  assert.equal(sameFinding(CAND(), CAND({ line_range: [80, 81], bug_category: 'errors' })), false, 'far apart and another category')
   assert.equal(sameFinding(CAND(), CAND({ line_range: [16, 18], title: 'Unrelated overflow in tax' })), true, 'near and the same category')
   assert.equal(sameFinding(CAND(), CAND({ line_range: [16, 18], bug_category: 'errors', title: 'Unrelated overflow in tax' })), false)
 })
@@ -131,6 +133,12 @@ await test('pass with no findings; changes requested for an open reproduced or c
   assert.deepEqual(disposition(ledgerWith([F('reproduced')])), { disposition: 'changes_requested', because: ['F1'] })
   assert.equal(disposition(ledgerWith([F('confirmed', 'MEDIUM')])).disposition, 'changes_requested')
   assert.equal(disposition(ledgerWith([F('reproduced', 'LOW')])).disposition, 'pass')
+})
+await test('a run that stopped early is manual review, whatever its findings', () => {
+  assert.deepEqual(disposition({ ...ledgerWith([]), status: 'escalate', reason: 'hunter failed' }), { disposition: 'manual_review', because: ['the last run stopped: hunter failed'] })
+})
+await test('a partly covered lens is manual review, not pass', () => {
+  assert.deepEqual(disposition(ledgerWith([], [{ lens: 'logic', status: 'partial' }])), { disposition: 'manual_review', because: ['logic partly covered'] })
 })
 await test('manual review for an unsettled HIGH or CRITICAL, or a lens not covered', () => {
   for (const s of ['candidate', 'contested', 'not_reproduced']) assert.equal(disposition(ledgerWith([F(s)])).disposition, 'manual_review', s)
@@ -210,6 +218,17 @@ await test('saveRun replaces the findings, keeps the last 20 runs, and stamps th
   assert.equal(l.findings.length, 1)
   assert.throws(() => saveRun(l, intake, { status: 'done' }, 't'), /no findings list/)
 })
+await test('saveRun: a run that stopped early never replaces the findings, coverage, or target; it records the stop', () => {
+  const intake = { key: 'pr-7', target: { head: H1, label: 'first' } }
+  const kept = saveRun(emptyLedger('pr-7'), intake, { status: 'done', findings: mergeFindings([], [CAND()], H1).findings, coverage: [{ lens: 'logic', status: 'covered' }] }, 't1')
+  const after = saveRun(kept, { key: 'pr-7', target: { head: H2, label: 'second' } }, { status: 'escalate', reason: 'bad args', findings: [], coverage: [] }, 't2')
+  assert.equal(after.findings.length, 1)
+  assert.deepEqual(after.coverage, kept.coverage)
+  assert.equal(after.target.label, 'first')
+  assert.equal(after.status, 'escalate')
+  assert.equal(after.runs.at(-1).status, 'escalate')
+  assert.equal(disposition(after).disposition, 'manual_review')
+})
 await test('CLI: input, save, check, and report work end to end, also through a symlink', () => {
   const d = tmp()
   const intake = join(d, 'intake.json')
@@ -243,6 +262,9 @@ await test('CLI: check fails on a broken ledger and usage errors exit 2', () => 
   assert.match(r.stdout, /FINDINGS: FAIL$/m)
   assert.equal(cli().status, 2)
   assert.equal(cli('report').status, 2)
+  const missing = cli('report', join(d, 'missing.json'))
+  assert.equal(missing.status, 1, 'a missing ledger never reads as a clean PR')
+  assert.match(missing.stderr, /no ledger at .*missing\.json/)
 })
 await test('readEvidence reads F<n>.json files and ignores everything else', () => {
   const d = tmp()

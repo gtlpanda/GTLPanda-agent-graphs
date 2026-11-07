@@ -7,8 +7,11 @@ description: The record /bughunt keeps for one pull request (a ledger inside .gi
 
 `findings.mjs` in this skill owns every rule below. `/bughunt` keeps one ledger
 per pull request at `<git common dir>/bughunt/<key>/ledger.json`, inside `.git`
-and never committed. `<key>` is `pr-<n>` for a pull request and the branch name
-as a slug otherwise. It is never a commit, so a new head finds the same ledger.
+and never committed. `<key>` is `pr-<n>` for a pull request. For a branch it is
+the branch name as a slug plus a short hash of the exact name, so `feat/x` and
+`feat-x` never share one. A detached HEAD uses `detached-<commit>`. Only the
+detached case keys on a commit; every other key survives a new head, so a new
+head finds the same ledger.
 
 ```
 node ~/.claude/skills/findings/findings.mjs check <ledger.json>
@@ -91,8 +94,18 @@ is an error.
 
 Computed in code, never chosen by a model:
 
+- **manual review:** the last run stopped early.
+  - A stopped run never replaces the saved findings; `save` keeps them as they were.
 - **changes requested:** a confirmed or reproduced bug above `LOW` is still open.
-- **manual review:** a `HIGH` or `CRITICAL` finding is unsettled (a candidate, contested, or not reproduced), or a lens that should have run did not.
+- **manual review:** a `HIGH` or `CRITICAL` finding is unsettled (a candidate, contested, or not reproduced), or a lens that should have run was not fully covered.
 - **pass:** otherwise.
+
+A bug reported twice is one finding when it is in the same file and either of
+these holds:
+
+- the lines are within 5 of each other, and the category matches or the titles are similar;
+- the title, the category, and a quoted line all match. This catches a bug that a new head moved.
+
+The same generic title far apart in one file is two bugs.
 
 Refuted, pre-existing, stale, and fixed-and-verified findings are never open.

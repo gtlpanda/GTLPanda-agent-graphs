@@ -32,8 +32,9 @@ node "$CONFIG/skills/bughunt/intake.mjs" "$REPO" <one of: --pr <n> | --branch <n
     `<git common dir>/bughunt/<key>`, inside `.git` and never committed.
   - `D/tree` is a detached worktree at the head under review. The agents read
     only that, never your checked-out branch.
-- **Uncommitted changes.** If it printed a `note:` line about them, tell the
-  human that only committed work is reviewed.
+- **Notes.** Relay every `note:` line it printed:
+  - uncommitted changes, which are not reviewed;
+  - a base it could not refresh from origin, which may be behind.
 
 ## 2. Prepare the run
 
@@ -74,7 +75,8 @@ PandaStack checkout and restart Claude Code, then stop.
    - the disposition;
    - every lens that was skipped or not covered;
    - that discover mode reports candidates only, none verified or reproduced.
-4. If the run ended with `escalate`, quote its `reason`.
+4. If the run ended with `escalate`, quote its `reason`. The save kept the
+   earlier findings as they were; nothing from the stopped run replaced them.
 
 Never edit the branch under review, commit, push, or post a comment. The report
 stays local until the human decides what to do with it.
